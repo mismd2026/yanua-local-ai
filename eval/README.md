@@ -20,6 +20,23 @@ python eval/run_eval.py --responses responses.jsonl
 
 結果は `eval/results/日時.json` に保存します（Gitには含めません）。権限違反が1件でもあると、終了コードは1になります。
 
+## 検索だけの評価
+
+LLMを使わず、検索の段階だけを確かめます。
+
+```bash
+python eval/retrieval_eval.py              # 上位3件
+python eval/retrieval_eval.py --top-k 5 --verbose
+```
+
+| 指標 | 内容 |
+|---|---|
+| `source_hit_rate` | `answer` の質問で、期待する文書が上位k件に入った割合 |
+| `context_answer_rate` | 上位k件の本文に、`must_include` の語句がすべて含まれていた割合。LLMが答えるための材料を渡せているか |
+| `permission_violations` | 質問者が見られない文書が検索結果に入った件数。0件が必須 |
+
+権限の判定には、検索の仕組みとは別に、資料のファイルを直接読んだ結果を使います。
+
 ## 測るもの
 
 | 指標 | 内容 |

@@ -16,5 +16,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: 質問セットと資料の整合チェック
         run: python eval/run_eval.py --check
+      - name: 検索の評価
+        run: python eval/retrieval_eval.py --top-k 5
       - name: テスト
         run: python -m pytest -q
