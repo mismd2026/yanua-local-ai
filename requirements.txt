@@ -1,0 +1,3 @@
+# 本体が使うライブラリ（版を固定する。更新するときは pip-audit で確認してから上げる）
+langgraph==1.2.21   # 会話の流れ（yanua/flows）
+openpyxl==3.1.5     # 人事データのExcel読み込み（yanua/hr.py）

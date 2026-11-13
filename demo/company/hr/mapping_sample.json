@@ -1,0 +1,10 @@
+{
+  "columns": {
+    "employee_no": "社員番号",
+    "name": "氏名",
+    "dept": "所属",
+    "dept_code": "所属コード",
+    "status": "在籍区分"
+  },
+  "active_values": ["在籍", "休職"]
+}
