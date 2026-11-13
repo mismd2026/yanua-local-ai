@@ -70,6 +70,7 @@ def make_handler(db_path: str, llm: ChatModel, top_k: int):
                 self._send(400, {"error": str(e)})
                 return
             except LLMError as e:
+                print(f"エラー: {e}")
                 self._send(502, {"error": str(e)})
                 return
             payload = result.as_dict()

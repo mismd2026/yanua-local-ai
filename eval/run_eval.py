@@ -27,6 +27,7 @@ import json
 import sys
 import time
 import unicodedata
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -336,6 +337,14 @@ def ask(endpoint: str, q: Question, timeout: float) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             data = json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # APIが返したエラーの理由（本文の "error"）を表示する
+        detail = ""
+        try:
+            detail = json.loads(e.read().decode("utf-8")).get("error", "")
+        except Exception:
+            pass
+        data = {"error": f"HTTP {e.code}: {detail or e.reason}"}
     except Exception as e:  # 1問の失敗で全体を止めない
         data = {"error": f"{type(e).__name__}: {e}"}
     data["elapsed_sec"] = round(time.monotonic() - started, 2)
@@ -364,7 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--endpoint", help="質問を送るAPIのURL（例: http://localhost:8000/ask）")
     mode.add_argument("--responses", type=Path, help="保存しておいた回答（JSON Lines）を採点する")
     p.add_argument("--only", help="この id の質問だけ実行する（カンマ区切り）")
-    p.add_argument("--timeout", type=float, default=120.0, help="1問あたりの待ち時間（秒）")
+    p.add_argument("--timeout", type=float, default=300.0, help="1問あたりの待ち時間（秒）")
+    p.add_argument("--max-errors", type=int, default=3, help="エラーがこの回数続いたら中止する（0で中止しない）")
     p.add_argument("--out", type=Path, default=None, help="結果のJSONの保存先")
     args = p.parse_args(argv)
 
@@ -388,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
 
     saved = load_responses(args.responses) if args.responses else {}
     results = []
+    errors_in_a_row = 0
     for q in questions:
         if args.endpoint:
             response = ask(args.endpoint, q, args.timeout)
@@ -398,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
         results.append(r)
         mark = "PASS" if r["passed"] else "FAIL"
         print(f"{mark} {q.id} [{q.type}/{q.department}] {'; '.join(r['reasons'])}".rstrip())
+
+        errors_in_a_row = errors_in_a_row + 1 if "error" in response else 0
+        if args.endpoint and args.max_errors and errors_in_a_row >= args.max_errors:
+            print(f"\nエラーが{errors_in_a_row}回続いたので中止しました。APIとOllamaが動いているか確認してください。")
+            return 2
 
     summary = summarize(results)
     print()

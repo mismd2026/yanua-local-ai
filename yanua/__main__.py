@@ -59,7 +59,13 @@ def main(argv: list[str] | None = None) -> int:
         if not Store(args.db).documents():
             print(f"{args.db} に文書がありません。先に ingest を実行してください。")
             return 1
-        server = serve(str(args.db), OllamaChat(args.model, args.ollama), args.host, args.port, args.top_k)
+        llm = OllamaChat(args.model, args.ollama)
+        try:
+            llm.check()
+        except LLMError as e:
+            print(e)
+            return 1
+        server = serve(str(args.db), llm, args.host, args.port, args.top_k)
         print(f"http://{args.host}:{args.port} で待ち受けています（モデル: {args.model}）。止めるには Ctrl+C")
         try:
             server.serve_forever()

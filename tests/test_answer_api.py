@@ -182,6 +182,85 @@ def test_api_reports_llm_failure(api):
     assert status == 502 and "接続できません" in body["error"]
 
 
+def test_eval_shows_error_reason_and_stops(api, tmp_path, capsys):
+    sys.path.insert(0, str(ROOT / "eval"))
+    import run_eval
+
+    base = api(BrokenLLM())
+    code = run_eval.main(["--endpoint", f"{base}/ask", "--only", "Q01,Q02,Q03,Q04,Q05", "--out", str(tmp_path / "r.json")])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "HTTP 502: 接続できません" in out
+    assert "Q04" not in out  # 3回続けて失敗した時点で止まる
+
+
+class FakeOllama:
+    """/api/tags と /api/chat だけを返す、Ollama の代わりの小さなサーバー。"""
+
+    def __init__(self, models, chat_status=200):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def _json(self, status, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self._json(200, {"models": [{"name": m} for m in outer.models]})
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                if outer.chat_status == 200:
+                    self._json(200, {"message": {"content": "OK"}})
+                else:
+                    self._json(outer.chat_status, {"error": 'model "x" not found, try pulling it first'})
+
+            def log_message(self, *a):
+                pass
+
+        self.models = models
+        self.chat_status = chat_status
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_ollama_check_finds_missing_model():
+    fake = FakeOllama(["qwen2.5:7b"])
+    try:
+        OllamaChat("qwen2.5:7b", fake.url).check()
+        with pytest.raises(LLMError, match="qwen2.5:3b がありません.*qwen2.5:7b"):
+            OllamaChat("qwen2.5:3b", fake.url).check()
+    finally:
+        fake.close()
+
+
+def test_ollama_404_explains_missing_model():
+    fake = FakeOllama(["qwen2.5:3b"], chat_status=404)
+    try:
+        with pytest.raises(LLMError, match="ollama pull"):
+            OllamaChat("qwen2.5:3b", fake.url).chat([{"role": "user", "content": "x"}])
+    finally:
+        fake.close()
+
+
+def test_ollama_chat_success():
+    fake = FakeOllama(["qwen2.5:3b"])
+    try:
+        assert OllamaChat("qwen2.5:3b", fake.url).chat([{"role": "user", "content": "x"}]) == "OK"
+    finally:
+        fake.close()
+
+
 def test_eval_script_against_api(api, tmp_path):
     """評価スクリプトがこのAPIの形をそのまま採点できること。"""
     sys.path.insert(0, str(ROOT / "eval"))

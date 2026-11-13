@@ -31,6 +31,24 @@ class OllamaChat:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
+    def check(self) -> None:
+        """Ollama に接続でき、モデルがあることを確かめる。問題があれば LLMError。"""
+        try:
+            with urllib.request.urlopen(f"{self.base_url}/api/tags", timeout=10) as res:
+                data = json.loads(res.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ValueError) as e:
+            raise LLMError(
+                f"Ollama（{self.base_url}）に接続できません: {e}。"
+                "別のターミナルで `ollama serve` を実行しているか確認してください"
+            ) from e
+        names = [m.get("name", "") for m in data.get("models", [])]
+        wanted = self.name if ":" in self.name else f"{self.name}:latest"
+        if wanted not in names:
+            raise LLMError(
+                f"Ollama にモデル {self.name} がありません。今あるモデル: {', '.join(names) or 'なし'}。"
+                f"`ollama pull {self.name}` を実行してください"
+            )
+
     def chat(self, messages: list[dict]) -> str:
         body = json.dumps(
             {
@@ -47,7 +65,20 @@ class OllamaChat:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
                 data = json.loads(res.read().decode("utf-8"))
-        except urllib.error.URLError as e:
+        except urllib.error.HTTPError as e:
+            # Ollama には届いたが、エラーが返ってきた（モデルがない、メモリが足りないなど）
+            detail = e.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(detail).get("error", detail)
+            except ValueError:
+                pass
+            if e.code == 404:
+                raise LLMError(
+                    f"Ollama にモデル {self.name} がありません（{detail}）。"
+                    f"`ollama list` で名前を確認するか、`ollama pull {self.name}` を実行してください"
+                ) from e
+            raise LLMError(f"Ollama がエラーを返しました（HTTP {e.code}）: {detail}") from e
+        except (urllib.error.URLError, TimeoutError) as e:
             raise LLMError(f"Ollama（{self.base_url}）に接続できません: {e}") from e
         try:
             return data["message"]["content"]
