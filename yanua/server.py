@@ -22,7 +22,7 @@ from .store import Store
 MAX_BODY = 64 * 1024
 
 
-def make_handler(db_path: str, llm: ChatModel, top_k: int):
+def make_handler(db_path: str, llm: ChatModel, top_k: int, debug: bool = False):
     local = threading.local()
 
     def store() -> Store:
@@ -73,7 +73,7 @@ def make_handler(db_path: str, llm: ChatModel, top_k: int):
                 print(f"エラー: {e}")
                 self._send(502, {"error": str(e)})
                 return
-            payload = result.as_dict()
+            payload = result.as_dict(debug=debug)
             payload["elapsed_sec"] = round(time.monotonic() - started, 2)
             self._send(200, payload)
 
@@ -84,5 +84,7 @@ def make_handler(db_path: str, llm: ChatModel, top_k: int):
     return Handler
 
 
-def serve(db_path: str, llm: ChatModel, host: str = "127.0.0.1", port: int = 8000, top_k: int = 5) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(db_path, llm, top_k))
+def serve(
+    db_path: str, llm: ChatModel, host: str = "127.0.0.1", port: int = 8000, top_k: int = 5, debug: bool = False
+) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(db_path, llm, top_k, debug))

@@ -271,6 +271,7 @@ def score_one(q: Question, response: dict, docs: dict[str, Doc], refusals: tuple
         "department": q.department,
         "question": q.question,
         "answer": answer,
+        "model_text": response.get("model_text"),
         "sources": sources,
         "passed": False,
         "source_matched": None,
@@ -317,7 +318,14 @@ def summarize(results: list[dict]) -> dict:
         if items:
             by_type[t] = {"count": len(items), "passed": sum(r["passed"] for r in items), "pass_rate": rate(items, "passed")}
     answers = [r for r in results if r["type"] == "answer"]
+    times = sorted(r["elapsed_sec"] for r in results if r.get("elapsed_sec") is not None)
+    elapsed = (
+        {"mean": round(sum(times) / len(times), 1), "median": times[len(times) // 2], "max": times[-1], "total": round(sum(times), 1)}
+        if times
+        else None
+    )
     return {
+        "elapsed_sec": elapsed,
         "total": len(results),
         "passed": sum(r["passed"] for r in results),
         "pass_rate": rate(results, "passed"),

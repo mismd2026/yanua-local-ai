@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("serve", help="HTTP API を起動する")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--debug", action="store_true", help="LLMが実際に返した文（model_text）も応答に含める。評価・調査用")
     llm_options(s)
 
     args = p.parse_args(argv)
@@ -65,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         except LLMError as e:
             print(e)
             return 1
-        server = serve(str(args.db), llm, args.host, args.port, args.top_k)
+        server = serve(str(args.db), llm, args.host, args.port, args.top_k, args.debug)
         print(f"http://{args.host}:{args.port} で待ち受けています（モデル: {args.model}）。止めるには Ctrl+C")
         try:
             server.serve_forever()

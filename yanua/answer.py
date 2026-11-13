@@ -38,9 +38,26 @@ class Answer:
     answer: str
     sources: list[dict] = field(default_factory=list)
     refused: bool = False
+    # LLMが実際に返した文（評価・調査用。serve --debug のときだけAPIの応答に含める）
+    model_text: str = ""
 
-    def as_dict(self) -> dict:
-        return {"answer": self.answer, "sources": self.sources, "refused": self.refused}
+    def as_dict(self, debug: bool = False) -> dict:
+        d = {"answer": self.answer, "sources": self.sources, "refused": self.refused}
+        if debug:
+            d["model_text"] = self.model_text
+        return d
+
+
+def is_refusal(text: str) -> bool:
+    """LLMの返事が「答えられない」という意味か。
+
+    「わかりません」で始まる返事と、出典の番号がなく「わかりません」を含む返事を、答えられないとみなす。
+    出典の番号を付けて答えた中に「わかりません」が混ざっているだけの返事は、回答として扱う。
+    """
+    head = text.strip().lstrip("「『[(（ ")
+    if head.startswith(REFUSAL):
+        return True
+    return REFUSAL in text and not _CITATION.search(text)
 
 
 def build_messages(question: str, hits: list[Hit]) -> list[dict]:
@@ -79,10 +96,10 @@ def answer_question(store: Store, llm: ChatModel, question: str, department: str
 
     text = llm.chat(build_messages(question, hits)).strip()
 
-    if REFUSAL in text:
-        return Answer(NOT_FOUND_MESSAGE, [], refused=True)
+    if is_refusal(text):
+        return Answer(NOT_FOUND_MESSAGE, [], refused=True, model_text=text)
 
     cited = cited_hits(text, hits)
     # 番号を付け忘れた回答は、いちばん近い検索結果を出典とする
     sources = [source_of(h) for h in (cited or hits[:1])]
-    return Answer(text, sources, refused=False)
+    return Answer(text, sources, refused=False, model_text=text)

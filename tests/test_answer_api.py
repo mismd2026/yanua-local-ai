@@ -90,6 +90,34 @@ def test_refusal_from_llm_returns_not_found_without_sources(store):
     assert result.answer == NOT_FOUND_MESSAGE
 
 
+@pytest.mark.parametrize(
+    "text, refused",
+    [
+        ("わかりません", True),
+        ("「わかりません」", True),
+        ("資料からはわかりません。", True),
+        ("送れるかどうかは資料からはわかりませんが、社外には送れません[1]。", False),
+        ("週3日までです[1]。", False),
+    ],
+)
+def test_is_refusal(text, refused):
+    from yanua.answer import is_refusal
+
+    assert is_refusal(text) is refused
+
+
+def test_cited_answer_mentioning_unknown_is_kept(store):
+    reply = "細かい条件はわかりませんが、在宅勤務は週3日までです[1]。"
+    result = answer_question(store, FakeLLM(reply), "在宅勤務は週に何日までできますか？", "営業部")
+    assert not result.refused and result.sources[0]["doc_id"] == "A01"
+
+
+def test_model_text_only_in_debug(store):
+    result = answer_question(store, FakeLLM("わかりません"), "在宅勤務は？", "営業部")
+    assert "model_text" not in result.as_dict()
+    assert result.as_dict(debug=True)["model_text"] == "わかりません"
+
+
 def test_no_search_hits_refuses_without_calling_llm(store):
     llm = FakeLLM()
     result = answer_question(store, llm, "zzzz", "営業部")
