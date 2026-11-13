@@ -83,3 +83,8 @@ def bm25(query: str, chunks: list[StoredChunk], top_k: int) -> list[Hit]:
 def search(store: Store, query: str, department: str, top_k: int = 5) -> list[Hit]:
     """その部署が見られる文書の中だけを検索する。"""
     return bm25(query, store.chunks_for(department), top_k)
+
+
+def search_public(store: Store, query: str, top_k: int = 5) -> list[Hit]:
+    """社外公開の文書の中だけを検索する（社外の人向け）。"""
+    return bm25(query, store.public_chunks(), top_k)

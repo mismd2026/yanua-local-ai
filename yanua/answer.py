@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 
 from .llm import ChatModel
-from .search import Hit, search
+from .search import Hit, search, search_public
 from .store import Store
 
 REFUSAL = "わかりません"
@@ -30,6 +30,16 @@ SYSTEM_PROMPT = """あなたは社内の資料に答えるアシスタントで�
 - 答えに使った資料の番号を、文の後ろに [1] のように付ける。
 - 資料に答えが書かれていない場合は、推測せずに「わかりません」とだけ答える。
 - 資料にない数字・日付・名前を作らない。
+"""
+
+PUBLIC_NOT_FOUND_MESSAGE = "申し訳ございません。こちらではお答えできない内容です。担当の部署から改めてご連絡いたします。"
+
+PUBLIC_SYSTEM_PROMPT = """あなたは会社の受付で、社外のお客様の質問に答えるアシスタントです。次の決まりを必ず守ってください。
+
+- 下の「資料」に書かれている内容だけを使って、丁寧な日本語で簡潔に答える。
+- 答えに使った資料の番号を、文の後ろに [1] のように付ける。
+- 資料に答えが書かれていない場合は、推測せずに「わかりません」とだけ答える。
+- 資料にない数字・日付・名前を作らない。社員の個人情報や社内の事情は答えない。
 """
 
 
@@ -60,10 +70,10 @@ def is_refusal(text: str) -> bool:
     return REFUSAL in text and not _CITATION.search(text)
 
 
-def build_messages(question: str, hits: list[Hit]) -> list[dict]:
+def build_messages(question: str, hits: list[Hit], system_prompt: str = SYSTEM_PROMPT) -> list[dict]:
     context = "\n\n".join(f"[{i}] {h.text}" for i, h in enumerate(hits, start=1))
     user = f"資料:\n{context}\n\n質問: {question}"
-    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user}]
 
 
 _CITATION = re.compile(r"\[(\d+)\]")
@@ -85,19 +95,22 @@ def source_of(hit: Hit) -> dict:
     return {"doc_id": hit.doc_id, "title": hit.title, "section": hit.section}
 
 
-def answer_question(store: Store, llm: ChatModel, question: str, department: str, top_k: int = 5) -> Answer:
+def answer_question(store: Store, llm: ChatModel, question: str, department: str, top_k: int = 5,
+                    public: bool = False) -> Answer:
+    """public=True のときは社外向け：社外公開の文書だけを検索し、部署は使わない。"""
     question = (question or "").strip()
     if not question:
         raise ValueError("質問が空です")
 
-    hits = search(store, question, department, top_k)
+    not_found = PUBLIC_NOT_FOUND_MESSAGE if public else NOT_FOUND_MESSAGE
+    hits = search_public(store, question, top_k) if public else search(store, question, department, top_k)
     if not hits:
-        return Answer(NOT_FOUND_MESSAGE, [], refused=True)
+        return Answer(not_found, [], refused=True)
 
-    text = llm.chat(build_messages(question, hits)).strip()
+    text = llm.chat(build_messages(question, hits, PUBLIC_SYSTEM_PROMPT if public else SYSTEM_PROMPT)).strip()
 
     if is_refusal(text):
-        return Answer(NOT_FOUND_MESSAGE, [], refused=True, model_text=text)
+        return Answer(not_found, [], refused=True, model_text=text)
 
     cited = cited_hits(text, hits)
     # 番号を付け忘れた回答は、いちばん近い検索結果を出典とする

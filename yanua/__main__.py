@@ -10,6 +10,9 @@
     python -m yanua hr-import 人事出力.csv --mapping 対応表.json   # 人事データを取り込む
     python -m yanua helpdesk --account yamada.t            # 社内向けヘルプデスク（対話）
     python -m yanua helpdesk --demo 1                      # ヘルプデスクのデモ
+    python -m yanua ingest demo/company/public             # 社外公開の文書を取り込む（受付が使う）
+    python -m yanua reception --channel 電話               # 社外向けの受付（対話）
+    python -m yanua reception --demo 1                     # 受付のデモ
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from .store import Store
 
 DEFAULT_DB = Path("data/index.db")
 DEFAULT_HELPDESK_DATA = Path("demo/company/flows/helpdesk")
+DEFAULT_RECEPTION_DATA = Path("demo/company/flows/reception")
 HR_STALE_DAYS = 30   # 人事データがこれより古ければ警告する
 
 
@@ -69,6 +73,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--account", default="", help="ログイン中のアカウント（SSOの代わり）")
     s.add_argument("--demo", choices=["1", "2", "3", "4"], help="用意したデモを流す")
     s.add_argument("--data", type=Path, default=DEFAULT_HELPDESK_DATA, help="手順・アカウント・障害情報のフォルダ")
+    llm_options(s)
+
+    s = sub.add_parser("reception", help="社外向けの受付（会話）。社外公開の文書だけを使う")
+    s.add_argument("--channel", choices=["来訪", "電話", "Web"], default="電話", help="どこからの問い合わせか")
+    s.add_argument("--demo", choices=["1", "2", "3", "4", "5"], help="用意したデモを流す")
+    s.add_argument("--today", help="来訪予定と照合する日（YYYY-MM-DD）。省略時は今日。--demo ではデモの日")
+    s.add_argument("--data", type=Path, default=DEFAULT_RECEPTION_DATA, help="引き継ぎ先・来訪予定のフォルダ")
     llm_options(s)
 
     s = sub.add_parser("serve", help="HTTP API を起動する")
@@ -125,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if report.errors else 0
         if args.command == "helpdesk":
             return _helpdesk(args, store)
+        if args.command == "reception":
+            return _reception(args, store)
         if args.command == "ask":
             try:
                 result = answer_question(store, OllamaChat(args.model, args.ollama), args.question, args.department, args.top_k)
@@ -178,6 +191,38 @@ def _helpdesk(args, store: Store) -> int:
     else:
         print(f"=== ヘルプデスク（アカウント：{args.account or '未ログイン'}） ===")
         run(app, args.account, lambda q: input("利用者> "))
+    return 0
+
+
+
+def _reception(args, store: Store) -> int:
+    from datetime import date
+
+    from .flows.external.reception import build_app
+    from .flows.external.reception.cli import DEMO_TODAY, demo_answers, run
+    from .hr import last_import
+
+    if not store.public_chunks():
+        print(f"{args.db} に社外公開の文書がありません。先に ingest demo/company/public を実行してください。")
+        return 1
+    if not last_import(store.db):
+        print("注意：人事データが取り込まれていません。訪ね先の社員を探せないため、取次はすべて総務部に回します。")
+
+    llm = OllamaChat(args.model, args.ollama)
+    try:
+        llm.check()
+    except LLMError as e:
+        print(e)
+        return 1
+    today = args.today or (DEMO_TODAY if args.demo else None)
+    app = build_app(store, llm, args.data, date.fromisoformat(today) if today else None, args.top_k)
+    if args.demo:
+        channel, title, answer_for = demo_answers(args.demo)
+        print(f"=== 受付デモ{args.demo}：{title}（{channel}） ===")
+        run(app, channel, answer_for, echo=True)
+    else:
+        print(f"=== 受付（{args.channel}） ===")
+        run(app, args.channel, lambda q: input("お客様> "))
     return 0
 
 

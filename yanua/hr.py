@@ -257,3 +257,24 @@ def last_import(db) -> dict | None:
         return None
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(row[0])).days
     return {"imported_at": row[0], "source": row[1], "active": row[2], "inactive": row[3], "age_days": age}
+
+
+def find_in_text(db, text: str) -> list[dict]:
+    """文の中に名前が出てくる在籍中の社員を探す（受付で、訪ね先の社員を見つけるとき用）。
+
+    フルネームが含まれていればその人だけ。なければ姓で探し、同じ姓が複数いればすべて返す（呼び出し側で聞き直す）。
+    結果は社内の取次に使うだけで、社外の人に見せない。
+    """
+    ensure_schema(db)
+    t = _key(text)
+    rows = [
+        {"employee_no": r[0], "name": r[1], "dept": r[2], "dept_code": r[3]}
+        for r in db.execute("SELECT employee_no, name, dept, dept_code FROM employees WHERE active = 1")
+    ]
+    full = [r for r in rows if _key(r["name"]) and _key(r["name"]) in t]
+    if full:
+        return full
+    def surname(name: str) -> str:
+        parts = re.split(r"\s+", unicodedata.normalize("NFKC", name).strip())
+        return parts[0] if len(parts) > 1 else ""
+    return [r for r in rows if len(surname(r["name"])) >= 2 and _key(surname(r["name"])) in t]
