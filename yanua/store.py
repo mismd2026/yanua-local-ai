@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import ALL_ACCESS
+from . import ALL_ACCESS, PUBLIC_ACCESS
 from .documents import Document, DocumentError, find_files, load_document
 
 SCHEMA = """
@@ -148,25 +148,39 @@ class Store:
     # ------------------------------------------------------------ 取り出し
 
     def chunks_for(self, department: str) -> list[StoredChunk]:
-        """その部署が見られる文書のチャンクだけを返す。部署が空なら全社向けの文書だけ。"""
+        """その部署が見られる文書のチャンクだけを返す。部署が空なら全社向け（と社外公開）の文書だけ。"""
         rows = self.db.execute(
             """
             SELECT c.chunk_id, c.doc_id, d.title, c.section, c.text
             FROM chunks c
             JOIN documents d ON d.doc_id = c.doc_id
             WHERE c.doc_id IN (
-                SELECT doc_id FROM doc_access WHERE department = ? OR department = ?
+                SELECT doc_id FROM doc_access WHERE department IN (?, ?, ?)
             )
             ORDER BY c.doc_id, c.position
             """,
-            (ALL_ACCESS, department or ALL_ACCESS),
+            (ALL_ACCESS, PUBLIC_ACCESS, department or ALL_ACCESS),
+        )
+        return [StoredChunk(*row) for row in rows]
+
+    def public_chunks(self) -> list[StoredChunk]:
+        """社外公開の文書のチャンクだけを返す。社外の人向けの検索はこれだけを使う。"""
+        rows = self.db.execute(
+            """
+            SELECT c.chunk_id, c.doc_id, d.title, c.section, c.text
+            FROM chunks c
+            JOIN documents d ON d.doc_id = c.doc_id
+            WHERE c.doc_id IN (SELECT doc_id FROM doc_access WHERE department = ?)
+            ORDER BY c.doc_id, c.position
+            """,
+            (PUBLIC_ACCESS,),
         )
         return [StoredChunk(*row) for row in rows]
 
     def can_view(self, doc_id: str, department: str) -> bool:
         row = self.db.execute(
-            "SELECT 1 FROM doc_access WHERE doc_id = ? AND (department = ? OR department = ?)",
-            (doc_id, ALL_ACCESS, department or ALL_ACCESS),
+            "SELECT 1 FROM doc_access WHERE doc_id = ? AND department IN (?, ?, ?)",
+            (doc_id, ALL_ACCESS, PUBLIC_ACCESS, department or ALL_ACCESS),
         ).fetchone()
         return row is not None
 
