@@ -35,6 +35,7 @@ demo/company/meeting/      会議の録画風のデモ動画（Zoom風・架空�
 integrations/google-calendar/  Googleカレンダーから受付コードを発行するアドオン（Apps Script）
 eval/                      評価用の質問セット（70問）と採点スクリプト
 tests/                     テスト
+docs/                      設計の文書（screens.md：Web画面の全体設計）
 ```
 
 ## 使い方
