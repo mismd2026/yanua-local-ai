@@ -59,10 +59,10 @@ python -m yanua search "在宅勤務は週に何日までできますか？" --d
 python -m yanua docs
 
 # Ollamaで出典つきの回答を作る（Ollamaが動いていること）
-python -m yanua ask "在宅勤務は週に何日までできますか？" --department 営業部 --model qwen2.5:3b
+python -m yanua ask "在宅勤務は週に何日までできますか？" --department 営業部 --model qwen2.5:3b-instruct
 
 # Web画面・クライアントアプリ向けの API を起動する（開発用ログインつき。API の一覧は http://127.0.0.1:8000/api/docs）
-python -m yanua serve --dev-login --model qwen2.5:3b --port 8000
+python -m yanua serve --dev-login --model qwen2.5:3b-instruct --port 8000
 ```
 
 ### API（yanua/api）
@@ -117,10 +117,10 @@ curl -b c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
 python -m yanua hr-import demo/company/hr/hr_export_sample.csv --mapping demo/company/hr/mapping_sample.json
 
 # デモ（1：代表アカウント・プリンター、2：障害中、3：不審なメール、4：パスワード忘れ）
-python -m yanua helpdesk --demo 1 --model qwen2.5:3b
+python -m yanua helpdesk --demo 1 --model qwen2.5:3b-instruct
 
 # 対話（--account はログイン中のアカウント。SSOの代わり）
-python -m yanua helpdesk --account yamada.t --model qwen2.5:3b
+python -m yanua helpdesk --account yamada.t --model qwen2.5:3b-instruct
 ```
 
 流れ：本人確認 → お困りごと → 分類 → 状況の聞き返し（2回まで）→ 障害の確認 → 案内 → 解決の確認 → 解決しなければ問い合わせ票
@@ -143,10 +143,10 @@ python -m yanua ingest demo/company/public
 
 # デモ（1：インビテーションコードで来訪、2：電話の問い合わせ、3：Webのクレーム、4：お約束のない営業、
 #       5：社内の情報を聞かれる、6：コードを持たずに来訪）。デモの来訪予定は自動で登録する
-python -m yanua reception --demo 1 --model qwen2.5:3b
+python -m yanua reception --demo 1 --model qwen2.5:3b-instruct
 
 # 対話（--channel は 来訪 / 電話 / Web。--today で来訪予定と照合する日を指定できる）
-python -m yanua reception --channel 来訪 --model qwen2.5:3b
+python -m yanua reception --channel 来訪 --model qwen2.5:3b-instruct
 ```
 
 流れ：（来訪）インビテーションコード → ご用件 → 種類の判定 → 種類ごとの対応 → 社内向けの記録（受付番号、引き継ぎ先、優先度）と、担当者へのお知らせ

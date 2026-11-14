@@ -127,6 +127,23 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
     app.state.jobs = jobs
     errors.install(app)
 
+    def openapi():
+        # API の一覧（/api/docs）に X-Yanua-Client ヘッダーを書いておく。
+        # 画面の「Authorize」で1回入れれば、試すときのすべてのリクエストに付く
+        if app.openapi_schema:
+            return app.openapi_schema
+        from fastapi.openapi.utils import get_openapi
+
+        schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+        schema.setdefault("components", {})["securitySchemes"] = {
+            "client": {"type": "apiKey", "in": "header", "name": CSRF_HEADER,
+                       "description": "GET 以外のリクエストに必要（CSRF 対策）。値は何でもよい"}}
+        schema["security"] = [{"client": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = openapi
+
     @app.middleware("http")
     async def csrf(request: Request, call_next):
         if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/") \

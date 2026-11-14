@@ -150,6 +150,12 @@ def test_error_shape(client):
         assert set(err) == {"code", "message"} and err["message"]
 
 
+def test_openapi_documents_client_header(client):
+    schema = client.get("/api/openapi.json").json()
+    assert schema["components"]["securitySchemes"]["client"]["name"] == "X-Yanua-Client"
+    assert schema["security"] == [{"client": []}]
+
+
 def test_health(client):
     r = client.get("/health").json()
     assert r["status"] == "ok" and r["documents"] > 0

@@ -12,7 +12,7 @@ import urllib.request
 from typing import Protocol
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen2.5:3b"
+DEFAULT_MODEL = "qwen2.5:3b-instruct"
 
 
 class LLMError(RuntimeError):
