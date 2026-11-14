@@ -13,8 +13,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: OCR（スキャンしたPDFを読む）の準備
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-jpn poppler-utils
+      - name: OCR（スキャンしたPDF・会議の画面の名前を読む）と日本語フォントの準備
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-jpn poppler-utils fonts-ipafont-gothic
       - run: pip install -r requirements-dev.txt
       - name: 依存ライブラリの脆弱性検査
         run: pip-audit -r requirements.txt

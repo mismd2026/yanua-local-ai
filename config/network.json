@@ -1,0 +1,12 @@
+{
+  "_説明": "Yanua が通信してよい相手（許可リスト）。ここにない宛先には通信しない。通信するのは models pull などの明示したコマンドのときだけ。会社のファイアウォール・プロキシでも、同じ宛先だけを許可すること。",
+  "allowed_hosts": [
+    "huggingface.co",
+    "*.huggingface.co",
+    "*.hf.co"
+  ],
+  "models": {
+    "whisper-small": {"repo": "Systran/faster-whisper-small", "revision": ""},
+    "whisper-medium": {"repo": "Systran/faster-whisper-medium", "revision": ""}
+  }
+}
