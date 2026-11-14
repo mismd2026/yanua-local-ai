@@ -21,6 +21,8 @@
                                                            # スキャンしたPDFを、ルールに沿って名前を付けて仕分ける
     python -m yanua pdf-rule-draft 見本.pdf                 # 見本のPDFから、仕分けルールの下書きを作る
     python -m yanua pdf-convert 請求書.pdf --to xlsx        # PDFを Word（docx）/ Excel（xlsx）に変換する
+    python -m yanua models pull whisper-small               # 文字起こしのモデルを入手する（許可リストの宛先からだけ）
+    python -m yanua meeting 録画.mp4 --title 定例会 --tool zoom  # 会議の録画から議事録を作る
 """
 
 from __future__ import annotations
@@ -147,6 +149,30 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--rules", type=Path, help="仕分けルール。当てはまるルールに様式があれば、様式に差し込む")
     s.add_argument("--rule", help="ルールを指定する（--rules と一緒に）")
 
+    s = sub.add_parser("models", help="モデルの入手（pull）・照合（verify）・一覧（list）")
+    s.add_argument("action", choices=["pull", "verify", "list"])
+    s.add_argument("name", nargs="?", default="whisper-small")
+    s.add_argument("--update", action="store_true", help="記録した版ではなく、いまの版を入手する")
+    s.add_argument("--models-dir", type=Path, default=Path("data/models"))
+
+    s = sub.add_parser("meeting", help="会議の録画・録音から議事録を作る（文字起こし・話し手・要約）")
+    s.add_argument("media", type=Path, help="録画（mp4 など）か録音（wav / m4a / mp3 など）")
+    s.add_argument("--title", required=True, help="会議名")
+    s.add_argument("--date", help="開催日（YYYY-MM-DD。省略時は今日）")
+    s.add_argument("--place", default="", help="場所（任意）")
+    s.add_argument("--tool", choices=["zoom", "teams", "meet", "none"], default="zoom",
+                   help="録画した会議ツール（画面の名前から話し手を読む）。none なら話し手を読まない")
+    s.add_argument("--participants", default="", help="出席者（カンマ区切り。会議室の名前なども）。話し手の表記合わせに使う")
+    s.add_argument("--glossary", type=Path, help="用語集（1行に1語）。文字起こしのヒントにする")
+    s.add_argument("--segments", type=Path, help="文字起こし済みの発言（JSON）。あれば文字起こしをしない")
+    s.add_argument("--model-name", default="whisper-small", help="文字起こしのモデル（models pull で入手したもの）")
+    s.add_argument("--models-dir", type=Path, default=Path("data/models"))
+    s.add_argument("--template", type=Path, help="議事録の様式（Word）。省略時は Markdown だけ")
+    s.add_argument("--out", type=Path, default=Path("data/minutes"), help="議事録の出力先")
+    s.add_argument("--no-summary", action="store_true", help="要約しない（LLMを使わない）")
+    s.add_argument("--debug-frames", type=Path, help="話し手の読み取りに使った画像を保存する（位置や色の調整用）")
+    llm_options(s)
+
     s = sub.add_parser("serve", help="HTTP API を起動する")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
@@ -157,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command.startswith("pdf-"):
         return _paper(args)
+    if args.command == "models":
+        return _models(args)
 
     if args.command == "serve":
         if not Store(args.db).documents():
@@ -208,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
             return _reception(args, store)
         if args.command in ("visit-create", "visit-import", "visit-list", "notifications"):
             return _visits(args, store)
+        if args.command == "meeting":
+            return _meeting(args, store)
         if args.command == "ask":
             try:
                 result = answer_question(store, OllamaChat(args.model, args.ollama), args.question, args.department, args.top_k)
@@ -433,6 +463,73 @@ def _paper(args) -> int:
         print(e)
         return 1
     return 1
+
+
+
+def _models(args) -> int:
+    from . import models
+    from .netpolicy import NetworkBlocked, load_policy
+
+    policy = load_policy()
+    try:
+        if args.action == "list":
+            lock = models.read_lock(args.models_dir)
+            for name, spec in policy.models.items():
+                got = lock.get(name)
+                print(f"{name}：{spec['repo']}　" + (f"入手済み（版 {got['revision'][:12]}、{got['pulled_at']}）" if got else "未入手"))
+            print(f"通信してよい宛先：{'、'.join(policy.allowed_hosts)}（config/network.json）")
+            return 0
+        if args.action == "pull":
+            entry = models.pull(args.name, policy, args.models_dir, update=args.update)
+            print(f"{args.name} を入手しました（版 {entry['revision'][:12]}、ファイル {len(entry['files'])} 件を記録）。")
+            return 0
+        path = models.verify(args.name, args.models_dir)
+        print(f"{args.name}：記録と一致しました（{path}）。")
+        return 0
+    except (models.ModelError, NetworkBlocked) as e:
+        print(e)
+        return 1
+
+
+def _meeting(args, store: Store) -> int:
+    from datetime import date
+
+    from . import models
+    from .meeting import run as meeting_run
+    from .meeting.transcribe import WhisperTranscriber, read_glossary
+
+    if not args.media.exists():
+        print(f"{args.media} がありません。")
+        return 1
+    names, depts = meeting_run.company_words(store.db)
+    participants = [p.strip() for p in args.participants.split(",") if p.strip()]
+    transcriber, segments = None, None
+    try:
+        if args.segments:
+            segments = meeting_run.load_segments(args.segments)
+        else:
+            transcriber = WhisperTranscriber(models.verify(args.model_name, args.models_dir))
+        llm = None
+        if not args.no_summary:
+            llm = OllamaChat(args.model, args.ollama)
+            llm.check()
+    except (models.ModelError, LLMError) as e:
+        print(e)
+        return 1
+    print("文字起こし・話し手の読み取り・要約をしています（長い会議は時間がかかります）…")
+    result = meeting_run.run(
+        args.media, title=args.title, out_dir=args.out, llm=llm, transcriber=transcriber, segments=segments,
+        tool=args.tool, names=names, depts=depts, participants=participants, glossary=read_glossary(args.glossary),
+        template=args.template, meeting_date=date.fromisoformat(args.date) if args.date else None, place=args.place,
+        debug=args.debug_frames)
+    info = result.info
+    if "elapsed" in info:
+        print(f"文字起こし：{info['duration']}秒の録音を {info['elapsed']}秒で処理しました。")
+    if "speakers_found" in info:
+        print(f"話し手：{len(result.segments)} 件の発言のうち {info['speakers_found']} 件で、画面から名前を読み取りました。")
+    for f in result.files:
+        print(f"→ {f}")
+    return 0
 
 
 if __name__ == "__main__":
