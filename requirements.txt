@@ -1,3 +1,7 @@
 # 本体が使うライブラリ（版を固定する。更新するときは pip-audit で確認してから上げる）
-langgraph==1.2.21   # 会話の流れ（yanua/flows）
-openpyxl==3.1.5     # 人事データのExcel読み込み（yanua/hr.py）
+langgraph==1.2.21     # 会話の流れ（yanua/flows）
+openpyxl==3.1.5       # 人事データのExcel読み込み（yanua/hr.py）、PDFからExcelへの変換
+pdfplumber==0.11.10   # PDFの文字と表の取り出し（yanua/paper）
+python-docx==1.2.0    # PDFからWordへの変換
+pytesseract==0.3.13   # スキャンしたPDFのOCR（tesseract を呼ぶ。tesseract 本体は別に入れる）
+pdf2image==1.17.0     # OCRの前にPDFを画像にする（poppler を呼ぶ）
