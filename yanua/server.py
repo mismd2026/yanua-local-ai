@@ -1,4 +1,6 @@
-"""社内向けのHTTP API。
+"""前の HTTP API（serve-legacy）。新しい API は yanua/api（docs/screens.md）。
+
+評価と既存のテストのために残している。
 
     POST /ask     {"question": "...", "department": "営業部"}
                   -> {"answer": "...", "sources": [{"doc_id": ..., "title": ..., "section": ...}], "refused": false}

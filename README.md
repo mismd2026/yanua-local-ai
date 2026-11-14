@@ -23,9 +23,11 @@ yanua/                     本体（取り込み・権限つき検索・出典�
 yanua/flows/internal/      社内向けの会話の流れ（helpdesk）
 yanua/flows/external/      社外向けの会話の流れ（reception）
 yanua/paper/               紙の書類のPDF（文字の取り出し・OCR、仕分けのルール、Word・Excelへの変換）
+yanua/api/                 Web画面・クライアントアプリ向けの API（ログイン・役割・ジョブ・会話）
 yanua/meeting/             打ち合わせの記録（文字起こし・画面の名前から話し手・要約・議事録）
 yanua/netpolicy.py, models.py  通信の方針（許可リスト）と、モデルの入手・ハッシュでの照合
 config/network.json        通信してよい宛先と、入手するモデルの一覧
+config/roles.json          役割（総務・情シス・人事・管理者）を部署か社員番号で決める
 demo/company/docs/         デモ用の架空の会社の社内資料（20文書・5部署）
 demo/company/public/       社外公開の文書（会社案内・来訪の案内・社外向けの窓口など4文書）
 demo/company/hr/           人事システムの出力のサンプルと、列名の対応表
@@ -57,11 +59,31 @@ python -m yanua search "在宅勤務は週に何日までできますか？" --d
 python -m yanua docs
 
 # Ollamaで出典つきの回答を作る（Ollamaが動いていること）
-python -m yanua ask "在宅勤務は週に何日までできますか？" --department 営業部 --model qwen2.5:3b
+python -m yanua ask "在宅勤務は週に何日までできますか？" --department 営業部 --model qwen2.5:3b-instruct
 
-# HTTP API を起動する（POST /ask、GET /health）
-python -m yanua serve --model qwen2.5:3b --port 8000
+# Web画面・クライアントアプリ向けの API を起動する（開発用ログインつき。API の一覧は http://127.0.0.1:8000/api/docs）
+python -m yanua serve --dev-login --model qwen2.5:3b-instruct --port 8000
 ```
+
+### API（yanua/api）
+
+画面の一覧・API の一覧・共通の決まりは [docs/screens.md](docs/screens.md) にあります。今あるのは段階1（ログイン・権限・ジョブ・質問・検索・文書・ヘルプデスクの会話）です。
+
+- **ログイン**：今は開発用ログイン（`--dev-login`、社員番号を送る）だけで、127.0.0.1 で待ち受けるときしか使えません。本番の SSO は K-008 で作ります。毎回のリクエストで人事データを引き直すので、退職した人はその時点で使えなくなります。
+- **役割**：ログインした人は全員「社員」です。総務・情シス・人事・管理者は `config/roles.json` で、部署か社員番号から決めます。できる操作は `yanua/api/roles.py` の一覧にあるものだけです。
+- **部署**：質問・検索に使う部署は、ログインした人の部署です。リクエストの本文で部署を渡しても使いません。
+- **CSRF 対策**：GET 以外のリクエストには `X-Yanua-Client` ヘッダーが必要です。
+- **ジョブ**：取り込みのような重い処理はジョブで受け付けます（`202` とジョブの番号を返す）。同時に流すのは1つずつです。
+- **会話**：ヘルプデスクの会話の途中の状態は `data/chat.db` に残すので、サーバーを再起動しても続けられます。30分返事がない会話は消えます。
+
+```bash
+curl -c c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
+     -d '{"employee_no": "10004"}' http://127.0.0.1:8000/api/auth/dev-login
+curl -b c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
+     -d '{"question": "在宅勤務は週に何日までできますか？"}' http://127.0.0.1:8000/api/ask
+```
+
+前の API（`POST /ask` だけ）は `python -m yanua serve-legacy` で起動できます。
 
 ### 回答
 
@@ -95,10 +117,10 @@ python -m yanua serve --model qwen2.5:3b --port 8000
 python -m yanua hr-import demo/company/hr/hr_export_sample.csv --mapping demo/company/hr/mapping_sample.json
 
 # デモ（1：代表アカウント・プリンター、2：障害中、3：不審なメール、4：パスワード忘れ）
-python -m yanua helpdesk --demo 1 --model qwen2.5:3b
+python -m yanua helpdesk --demo 1 --model qwen2.5:3b-instruct
 
 # 対話（--account はログイン中のアカウント。SSOの代わり）
-python -m yanua helpdesk --account yamada.t --model qwen2.5:3b
+python -m yanua helpdesk --account yamada.t --model qwen2.5:3b-instruct
 ```
 
 流れ：本人確認 → お困りごと → 分類 → 状況の聞き返し（2回まで）→ 障害の確認 → 案内 → 解決の確認 → 解決しなければ問い合わせ票
@@ -121,10 +143,10 @@ python -m yanua ingest demo/company/public
 
 # デモ（1：インビテーションコードで来訪、2：電話の問い合わせ、3：Webのクレーム、4：お約束のない営業、
 #       5：社内の情報を聞かれる、6：コードを持たずに来訪）。デモの来訪予定は自動で登録する
-python -m yanua reception --demo 1 --model qwen2.5:3b
+python -m yanua reception --demo 1 --model qwen2.5:3b-instruct
 
 # 対話（--channel は 来訪 / 電話 / Web。--today で来訪予定と照合する日を指定できる）
-python -m yanua reception --channel 来訪 --model qwen2.5:3b
+python -m yanua reception --channel 来訪 --model qwen2.5:3b-instruct
 ```
 
 流れ：（来訪）インビテーションコード → ご用件 → 種類の判定 → 種類ごとの対応 → 社内向けの記録（受付番号、引き継ぎ先、優先度）と、担当者へのお知らせ
