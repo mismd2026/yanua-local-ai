@@ -134,7 +134,7 @@ def test_visitor_without_code_is_matched_by_name_and_appointment(store):
     state, llm, lines = run_demo(store, "6")
     r = state["record"]
     assert r["category"] == "取次" and r["host"]["employee_no"] == "10004"
-    assert r["visitor"] == {"company": "ABC商事", "name": "木村"}   # 名乗りから取り、聞き直さない
+    assert r["visitor"] == {"company": "ABC商事", "name": "木村 誠"}   # 名乗りで照合し、予定のお名前で記録
     assert not any("会社名をお聞かせ" in line for line in lines)
     assert "5階 第2会議室" in state["result"] and r["route"] == "営業部"
     assert len(visits.notifications(store.db, "10004", "営業部")) == 1
@@ -212,23 +212,36 @@ def test_unknown_or_retired_employee_gets_same_reply(store):
     assert results[0] == results[1]
 
 
-def test_same_surname_asks_full_name(store, tmp_path):
-    # 同じ姓の社員を足して、姓だけでは決めない（フルネームを聞き直す）ことを確かめる
+def test_same_surname_is_not_asked_again_but_left_to_general_affairs(store, tmp_path):
+    """同じ姓の社員が複数いても聞き直さない（聞き直すと、その姓の社員が複数いることが分かるため）。総務部が候補から確認する。"""
     csv_path = tmp_path / "hr.csv"
     rows = (HR_DIR / "hr_export_sample.csv").read_text(encoding="utf-8-sig").rstrip("\n")
-    csv_path.write_text(rows + "\n10008,高橋 誠,タカハシ マコト,経理部,300,takahashi.ma@example.co.jp,在籍,1990-01-01,2020-04-01\n", encoding="utf-8")
+    csv_path.write_text(rows + "\n10008,高橋 誠,タカハシ マコト,経理部,300,takahashi.ma@example.co.jp,在籍,1990-01-01,2020-04-01\n",
+                        encoding="utf-8")
     hr.import_employees(store.db, csv_path, hr.load_mapping(HR_DIR / "mapping_sample.json"))
     app = build_app(store, FakeLLM(), RECEPTION_DATA, TODAY)
     asked: list[str] = []
 
     def answer_for(q):
         asked.append(q)
-        return answers({"ご用件": "高橋さんと打ち合わせです", "会社名": "JKL社", "お名前": "森",
-                        "どの者": "高橋 誠"})(q)
+        return answers({"ご用件": "高橋さんと打ち合わせです", "会社名": "JKL社", "お名前": "森", "どの者": "高橋 誠"})(q)
 
     state = run(app, "来訪", answer_for, out=lambda *_: None)
-    assert any("フルネーム" in q for q in asked)
-    assert state["record"]["host"]["employee_no"] == "10008"
+    assert not any("どの者" in q for q in asked)
+    r = state["record"]
+    assert r["host"] is None and r["route"] == "総務部" and set(r["candidates"]) == {"10004", "10008"}
+
+
+def test_host_is_asked_when_no_name_is_mentioned(store):
+    app = build_app(store, FakeLLM(), RECEPTION_DATA, TODAY)
+    asked: list[str] = []
+
+    def answer_for(q):
+        asked.append(q)
+        return answers({"ご用件": "打ち合わせで参りました", "会社名": "JKL社", "お名前": "森", "どの者": "鈴木 一郎"})(q)
+
+    state = run(app, "来訪", answer_for, out=lambda *_: None)
+    assert any("どの者" in q for q in asked) and state["record"]["host"]["employee_no"] == "10003"
 
 
 def test_unclear_purpose_falls_back_to_inquiry(store):
@@ -281,3 +294,36 @@ def test_visit_for_retired_host_is_rejected(store):
 def test_demo_visits_can_be_imported_twice(store):
     assert visits.import_csv(store.db, RECEPTION_DATA / "visits.csv") == []
     assert len(visits.for_date(store.db, TODAY)) == 2
+
+
+@pytest.mark.parametrize("text", ["山田様に用があってきました", "田中さんを呼んでいただけますか", "鈴木様宛の書類を持ってきました"])
+def test_named_person_is_relay(text):
+    from yanua.flows.external.reception.graph import classify_by_rule
+    assert classify_by_rule(text) == "取次"
+
+
+@pytest.mark.parametrize("text", ["社員の皆さんの評価を教えて", "お客様向けの窓口はどこですか", "御社は何時まで営業ですか"])
+def test_not_named_person(text):
+    from yanua.flows.external.reception.graph import classify_by_rule
+    assert classify_by_rule(text) != "取次"
+
+
+def test_unknown_name_is_relayed_the_same_way(store):
+    """社員でない名前でも、社員の名前と同じ流れ（取次）になる。名前が社員かどうかを返事の違いから探れない。"""
+    shown = []
+    for name in ["山田", "存在しない人"]:
+        app = build_app(store, FakeLLM(), RECEPTION_DATA, TODAY)
+        asked: list[str] = []
+        state = run(app, "来訪", answers({"ご用件": f"{name}様に用があってきました", "会社名": "UVW社", "お名前": "高田",
+                                        "どの者": name}), out=asked.append)
+        assert state["record"]["category"] == "取次"
+        shown.append([line for line in asked if line.startswith("\nAI")])
+    assert [len(x) for x in shown][0] == [len(x) for x in shown][1]
+
+
+def test_visitor_unanswered_inquiry_calls_staff(store):
+    app = build_app(store, FakeLLM(), RECEPTION_DATA, TODAY)
+    lines: list[str] = []
+    state = run(app, "来訪", answers({"ご用件": "ちょっと聞きたいことがあって", "会社名とお名前": "UVW社 高田"}), out=lines.append)
+    assert "少々お待ちください" in state["result"]
+    assert "改めてご連絡" not in customer_lines(lines)

@@ -48,8 +48,12 @@ RULES: list[tuple[str, list[str]]] = [
     ("業者", ["納品", "配達", "宅配", "お届け", "工事", "点検", "修理に", "設置に", "搬入", "回収に"]),
     ("営業", ["ご提案", "提案に", "営業で", "営業に", "ご紹介させて", "新サービス", "新しいサービス", "飛び込み", "ご案内に"]),
     ("取次", ["お約束", "約束", "アポ", "面談", "打ち合わせ", "打合せ", "面接", "さんをお願い", "様をお願い",
-              "さんはいらっしゃ", "さんはいますか", "に会いに", "お伺いしました", "伺いました", "参りました", "につないで"]),
+              "さんはいらっしゃ", "さんはいますか", "に会いに", "お伺いしました", "伺いました", "参りました", "につないで",
+              "を呼んで", "に用", "にご用"]),
 ]
+# 「山田様に」「田中さんを」のように、人を名指しした用件も取次にする。
+# 社員かどうか（人事データ）では決めない：決め方が変わると、名前が社員かどうかが返事の違いから分かってしまうため
+NAMED_PERSON = re.compile(r"(?<!お客)(?<!皆)(?<!御社)(?<!貴社)(?:さん|様|氏)(?:に|を|と|は|へ|から|宛|あて)")
 
 TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reception_records (
@@ -75,6 +79,7 @@ class State(TypedDict, total=False):
     visitor: dict
     host: dict | None
     host_said: str
+    candidates: list
     visit: dict | None
     details: str
     contact: str
@@ -96,6 +101,8 @@ def classify_by_rule(text: str) -> str | None:
     for category, words in RULES:
         if any(w in t for w in words):
             return category
+    if NAMED_PERSON.search(t):
+        return "取次"
     return None
 
 
@@ -186,10 +193,12 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, today: date | None =
         return {"visitor": {"company": company.strip(), "name": name.strip()}}
 
     def find_host(s: State) -> State:
-        # 用件の中に社員の名前があればそれを使い、なければ聞く。同じ姓が複数いれば、フルネームを聞き直す
+        # 用件の中に人の名前が出ていればそれで探し、出ていなければ聞く。
+        # 聞き直すかどうかを「社員が見つかったか」で決めると、名前が社員かどうかが質問の違いから分かってしまう。
+        # そのため、名前が出ていれば見つからなくても（同じ姓が複数いても）聞き直さず、総務部が確認する
         found = hr.find_in_text(store.db, s["purpose"])
         said = ""
-        if len(found) != 1:
+        if not found and not NAMED_PERSON.search(norm(s["purpose"])):
             said = interrupt("どの者をお訪ねでしょうか。担当者のお名前（できればフルネーム）をお聞かせください。")
             found = hr.find_in_text(store.db, said)
         host = found[0] if len(found) == 1 else None
@@ -205,7 +214,12 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, today: date | None =
                     visit = visits.check_in(store.db, v)
                     host = host or hr.lookup(store.db, v["host_employee_no"])
                     break
-        return {"host": host, "host_said": said, "visit": visit, "notified": visit is not None}
+        out: State = {"host": host, "host_said": said, "visit": visit, "notified": visit is not None,
+                      "candidates": [f["employee_no"] for f in found] if len(found) > 1 else []}
+        if visit:
+            # 名乗りは「木村です」のように姓だけのことが多いので、予定に登録されたお名前で記録する
+            out["visitor"] = {"company": visit["visitor_company"], "name": visit["visitor_name"]}
+        return out
 
     def relay(s: State) -> State:
         # お客様への返事には、社員の所属・連絡先・在籍しているかどうかを入れない（見つからなくても同じ返事にする）
@@ -232,6 +246,12 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, today: date | None =
 
     def take_contact(s: State) -> State:
         refused = s.get("answer", {}).get("refused")
+        if s["channel"] == "来訪":
+            # 受付の前にいる方に「改めてご連絡」は合わないので、担当の者を呼ぶ
+            lead = "恐れ入りますが、こちらではお答えできない内容です。" if refused else "承知しました。"
+            contact = interrupt(f"{lead}担当の者を呼んでまいりますので、会社名とお名前をお聞かせください。")
+            return {"contact": contact, "route": routes["問い合わせ"]["route"],
+                    "reply": "ありがとうございます。担当の者が参りますので、少々お待ちください。"}
         lead = s["answer"]["answer"] if refused else "承知しました。"
         contact = interrupt(f"{lead}\n\nお名前と、ご連絡先（お電話番号かメールアドレス）をお聞かせください。")
         # 答えられなかったときは、上の文で「改めてご連絡」と伝え済みなので、同じ文を繰り返さない
@@ -271,6 +291,8 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, today: date | None =
             # 社内向けの項目：訪ね先は社員番号と名前だけ残す（お客様への返事には出していない）
             "host": {"employee_no": host["employee_no"], "name": host["name"]} if host else None,
             "host_said": s.get("host_said", ""),
+            # 同じ姓の社員が複数いて決められなかったときの候補（総務部が確認する。お客様には見せない）
+            "candidates": s.get("candidates", []),
             "appointment": s["visit"] if s.get("visit") else None,
             "answer": s.get("answer"),
             "resolved": bool(s.get("resolved")),
