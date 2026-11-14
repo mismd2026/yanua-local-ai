@@ -17,6 +17,10 @@
         --company ABC商事 --visitor "木村 誠"               # 来訪予定を登録し、インビテーションコードを作る
     python -m yanua visit-list --date 2026-11-20           # 来訪予定の一覧
     python -m yanua notifications --employee 10004         # 担当者へのお知らせ
+    python -m yanua pdf-sort demo/company/paper/inbox --rules demo/company/paper/rules.json --out 仕分け済み --dry-run
+                                                           # スキャンしたPDFを、ルールに沿って名前を付けて仕分ける
+    python -m yanua pdf-rule-draft 見本.pdf                 # 見本のPDFから、仕分けルールの下書きを作る
+    python -m yanua pdf-convert 請求書.pdf --to xlsx        # PDFを Word（docx）/ Excel（xlsx）に変換する
 """
 
 from __future__ import annotations
@@ -109,6 +113,40 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--all", action="store_true", help="既読も表示する")
     s.add_argument("--mark-read", action="store_true", help="表示したお知らせを既読にする")
 
+    s = sub.add_parser("pdf-text", help="PDFの文字を取り出す（文字のないページはOCR）")
+    s.add_argument("source", type=Path)
+    s.add_argument("--no-ocr", action="store_true", help="OCRをしない")
+
+    s = sub.add_parser("pdf-rules", help="仕分けルールの一覧")
+    s.add_argument("--rules", type=Path, required=True)
+
+    s = sub.add_parser("pdf-rule-draft", help="見本のPDFから、仕分けルールの下書きを作る")
+    s.add_argument("source", type=Path)
+    s.add_argument("--name", help="書類の種類の名前（省略時は書類から推測）")
+    s.add_argument("--add-to", type=Path, help="下書きを、このルールのファイルの最後に足す")
+    s.add_argument("--use-llm", action="store_true", help="見分けに使う言葉を、LLM（社内）にも挙げさせる")
+    llm_options(s)
+
+    s = sub.add_parser("pdf-sort", help="PDFをルールに沿って名前を付け、保存先へ仕分ける")
+    s.add_argument("source", type=Path, help="PDFのファイル、またはPDFの入ったフォルダ")
+    s.add_argument("--rules", type=Path, required=True)
+    s.add_argument("--out", type=Path, required=True, help="保存先のフォルダ（この中に、ルールのフォルダを作る）")
+    s.add_argument("--rule", help="ルールを指定する（すべてのPDFにこのルールを使う）")
+    s.add_argument("--dry-run", action="store_true", help="置かずに、予定だけを表示する")
+    s.add_argument("--move", action="store_true", help="元のファイルを移す（既定はコピー）")
+    s.add_argument("--text", action="store_true", help="取り出した文字を、同じ名前の .txt でも残す")
+    s.add_argument("--form", action="store_true", help="ルールに様式があれば、様式に差し込んだファイルも置く")
+    s.add_argument("--no-ocr", action="store_true", help="OCRをしない")
+    s.add_argument("--use-llm", action="store_true", help="どのルールにも当たらないとき、LLM（社内）にルールを選ばせる")
+    llm_options(s)
+
+    s = sub.add_parser("pdf-convert", help="PDFを Word（docx）/ Excel（xlsx）に変換する")
+    s.add_argument("source", type=Path)
+    s.add_argument("--to", choices=["docx", "xlsx"], required=True)
+    s.add_argument("--out", type=Path, help="出力先（省略時は元のファイルと同じ場所・同じ名前）")
+    s.add_argument("--rules", type=Path, help="仕分けルール。当てはまるルールに様式があれば、様式に差し込む")
+    s.add_argument("--rule", help="ルールを指定する（--rules と一緒に）")
+
     s = sub.add_parser("serve", help="HTTP API を起動する")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
@@ -116,6 +154,9 @@ def main(argv: list[str] | None = None) -> int:
     llm_options(s)
 
     args = p.parse_args(argv)
+
+    if args.command.startswith("pdf-"):
+        return _paper(args)
 
     if args.command == "serve":
         if not Store(args.db).documents():
@@ -300,6 +341,98 @@ def _visits(args, store: Store) -> int:
     if args.mark_read and items:
         visits.mark_read(store.db, [i["notification_id"] for i in items])
     return 0
+
+
+
+def _paper(args) -> int:
+    from .paper import convert, rules, sort
+    from .paper.extract import OCRUnavailable, read_pdf
+
+    def llm_or_none():
+        if not getattr(args, "use_llm", False):
+            return None
+        llm = OllamaChat(args.model, args.ollama)
+        llm.check()
+        return llm
+
+    try:
+        if args.command == "pdf-text":
+            doc = read_pdf(args.source, ocr=not args.no_ocr)
+            for page in doc.pages:
+                print(f"--- {page.number}ページ{'（OCR）' if page.ocr else ''} ---\n{page.text}")
+            return 0
+        if args.command == "pdf-rules":
+            rs = rules.load_rules(args.rules)
+            for r in rs.rules:
+                print(f"{r.name}：言葉 {'・'.join(r.any + r.all) or '（なし）'} → {r.folder}/{r.filename}")
+            print(f"（どれにも当たらない → {rs.unmatched_folder}/{rs.unmatched_filename}）")
+            return 0
+        if args.command == "pdf-rule-draft":
+            doc = read_pdf(args.source)
+            draft = rules.draft_rule(doc.text, args.name, llm_or_none())
+            print(json.dumps(draft, ensure_ascii=False, indent=2))
+            if args.add_to:
+                rs = rules.load_rules(args.add_to)
+                if draft["name"] in rs.names():
+                    print(f"「{draft['name']}」は、もう {args.add_to} にあります。足しませんでした。")
+                    return 1
+                data = json.loads(args.add_to.read_text(encoding="utf-8"))
+                data.setdefault("rules", []).append(draft)
+                args.add_to.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                rules.load_rules(args.add_to)   # 足したあとも読めることを確かめる
+                print(f"{args.add_to} に足しました。言葉・ファイル名・保存先を確かめて、必要なら直してください。")
+            else:
+                print("\n※ 下書きです。確かめてから、ルールのファイルの rules に足してください（--add-to でも足せます）。")
+            return 0
+        if args.command == "pdf-sort":
+            rs = rules.load_rules(args.rules)
+            src = args.source
+            pdfs = sorted(src.glob("*.pdf")) + sorted(src.glob("*.PDF")) if src.is_dir() else [src]
+            if not pdfs:
+                print(f"{src} にPDFがありません。")
+                return 1
+            plans = sort.plan(pdfs, rs, llm_or_none(), args.rule, ocr=not args.no_ocr)
+            for pl in plans:
+                how = {"rule": "", "llm": "（LLMが選択）", "forced": "（指定）", "none": ""}[pl.by]
+                ocr = "［OCR］" if pl.ocr else ""
+                print(f"{pl.source.name}{ocr} → " + (f"読めません: {pl.error}" if pl.error else
+                                                      f"{pl.rule or '未分類'}{how}：{pl.dest}"))
+            if args.dry_run:
+                print("\n（--dry-run のため、置いていません）")
+                return 0
+            placed = sort.execute(plans, args.out, move=args.move, text=args.text, form=args.form, rules=rs)
+            print(f"\n{len(placed)} 件を {args.out} に{'移しました' if args.move else 'コピーしました'}。"
+                  f"記録：{args.out / sort.LOG_NAME}")
+            return 1 if any(pl.error for pl in plans) else 0
+        if args.command == "pdf-convert":
+            out = args.out or args.source.with_suffix("." + args.to)
+            if out.resolve() == args.source.resolve():
+                print("出力先が元のファイルと同じです。")
+                return 1
+            if args.rules:
+                from .paper import form
+
+                rs = rules.load_rules(args.rules)
+                doc = read_pdf(args.source, tables=True)
+                m = rules.choose(rs, doc.text, forced=args.rule)
+                template = m.rule.templates.get(args.to) if m.rule else None
+                if template:
+                    done = form.fill(template, out, doc, rules.find_fields(doc.text, m.rule, rs.self_names))
+                    print(f"「{m.rule.name}」の様式（{template.name}）に差し込みました：{done}")
+                    print("読み取った内容は、元の書類と照らして確認してください。")
+                    return 0
+                print(("どのルールにも当たらないため" if not m.rule else f"「{m.rule.name}」に {args.to} の様式がないため")
+                      + "、様式なしで変換します。")
+                (convert.to_docx if args.to == "docx" else convert.to_xlsx)(args.source, out, doc)
+                print(f"{out} に変換しました。")
+                return 0
+            (convert.to_docx if args.to == "docx" else convert.to_xlsx)(args.source, out)
+            print(f"{out} に変換しました。")
+            return 0
+    except (rules.RuleError, OCRUnavailable, LLMError, FileNotFoundError, ValueError) as e:
+        print(e)
+        return 1
+    return 1
 
 
 if __name__ == "__main__":

@@ -1,0 +1,91 @@
+{
+  "self_names": [
+    "デモ商事"
+  ],
+  "rules": [
+    {
+      "name": "請求書",
+      "keywords": {
+        "any": [
+          "請求書",
+          "ご請求",
+          "御請求"
+        ],
+        "all": [],
+        "none": [
+          "見積",
+          "納品いたしました"
+        ]
+      },
+      "fields": {
+        "invoice_no": "請求番号\\s*[:：]\\s*([A-Za-z0-9\\-]+)"
+      },
+      "filename": "{date}_請求書_{company}_{amount}円.pdf",
+      "folder": "経理/請求書/{yyyy}/{mm}",
+      "priority": 0,
+      "templates": {
+        "xlsx": "templates/請求書.xlsx",
+        "docx": "templates/請求書.docx"
+      }
+    },
+    {
+      "name": "見積書",
+      "keywords": {
+        "any": [
+          "見積書",
+          "御見積",
+          "お見積"
+        ],
+        "all": [],
+        "none": []
+      },
+      "fields": {},
+      "filename": "{date}_見積書_{company}_{amount}円.pdf",
+      "folder": "総務/見積書/{yyyy}",
+      "priority": 0,
+      "templates": {
+        "xlsx": "templates/見積書.xlsx"
+      }
+    },
+    {
+      "name": "納品書",
+      "keywords": {
+        "any": [
+          "納品書",
+          "納品いたしました"
+        ],
+        "all": [],
+        "none": []
+      },
+      "fields": {
+        "delivery_no": "納品番号\\s*[:：]\\s*([A-Za-z0-9\\-]+)"
+      },
+      "filename": "{date}_納品書_{company}_{delivery_no}.pdf",
+      "folder": "総務/納品書/{yyyy}/{mm}",
+      "priority": 0,
+      "templates": {
+        "docx": "templates/納品書.docx"
+      }
+    },
+    {
+      "name": "議事録",
+      "keywords": {
+        "any": [
+          "議事録"
+        ],
+        "all": [],
+        "none": []
+      },
+      "fields": {
+        "meeting": "会議名\\s*[:：]\\s*([^\\n（(]+)"
+      },
+      "filename": "{date}_議事録_{meeting}.pdf",
+      "folder": "総務/議事録/{yyyy}",
+      "priority": 0
+    }
+  ],
+  "unmatched": {
+    "folder": "未分類",
+    "filename": "{original}"
+  }
+}
