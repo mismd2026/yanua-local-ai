@@ -124,8 +124,11 @@ def extract_slots(llm: ChatModel, problem: str, answer: str) -> dict:
     return out
 
 
-def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5):
-    """ヘルプデスクのグラフを作る。store は取り込み済みの社内文書と人事データを持つ保存先。"""
+def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, checkpointer=None):
+    """ヘルプデスクのグラフを作る。store は取り込み済みの社内文書と人事データを持つ保存先。
+
+    checkpointer は会話の途中の状態の保存先。省略時はメモリ（CLI 用）。API では SQLite に保存する。
+    """
     kb_rows = _read_csv(data_dir / "kb.csv")
     accounts = {r["account"]: r for r in _read_csv(data_dir / "accounts.csv")}
     outages = [r for r in _read_csv(data_dir / "outages.csv") if r["active"] == "yes"]
@@ -300,4 +303,4 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5):
     g.add_conditional_edges("confirm", after_confirm, ["done", "ticket"])
     g.add_edge("done", END)
     g.add_edge("ticket", END)
-    return g.compile(checkpointer=InMemorySaver())
+    return g.compile(checkpointer=checkpointer or InMemorySaver())
