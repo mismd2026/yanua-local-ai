@@ -3,7 +3,8 @@
 人事DBには直接つながない。人事システムから出力したファイル（CSV / Excel / JSON）を取り込む。
 人事システムごとに列名や形式が違うので、「対応表（mapping）」で Yanua の決まった項目に読み替える。
 
-- 取り込むのは本人確認に必要な項目だけ（従業員番号・氏名・部署・部署番号・在籍の状態）。
+- 取り込むのは本人確認と取次に必要な項目だけ（従業員番号・氏名・部署・部署番号・在籍の状態・メールアドレス）。
+  メールアドレスは任意で、Googleカレンダーなどで登録した来訪予定の担当者を、社員番号に結びつけるときに使う。
   生年月日や住所などの列が出力に含まれていても、読み込んだ時点で捨てる。
 - 取り込みは毎回まるごと入れ替える（人事システムの出力を正とする）。
 - 在籍していない人（退職者など）は、照合で一致しない。
@@ -32,7 +33,7 @@ from pathlib import Path
 
 from .llm import ChatModel
 
-FIELDS = ("employee_no", "name", "dept", "dept_code", "status")
+FIELDS = ("employee_no", "name", "dept", "dept_code", "status", "email")
 REQUIRED = ("employee_no", "name", "dept")
 LABELS = {
     "employee_no": "従業員番号",
@@ -40,6 +41,7 @@ LABELS = {
     "dept": "部署",
     "dept_code": "部署番号",
     "status": "在籍の状態",
+    "email": "メールアドレス",
 }
 
 # 列名から対応表の下書きを作るときの手がかり（決まったルール。AIはこれで決まらないときだけ使う）
@@ -49,6 +51,7 @@ HINTS = {
     "dept": ["所属", "部署", "所属部署", "部署名", "所属名", "department", "dept", "組織名"],
     "dept_code": ["所属コード", "部署コード", "部署番号", "所属番号", "組織コード", "deptcode", "departmentcode"],
     "status": ["在籍区分", "在籍状況", "在籍", "雇用状態", "ステータス", "status", "退職区分"],
+    "email": ["メールアドレス", "メール", "社用メール", "email", "mail", "e-mail", "mailaddress"],
 }
 
 HR_SCHEMA = """
@@ -57,7 +60,8 @@ CREATE TABLE IF NOT EXISTS employees (
     name        TEXT NOT NULL,
     dept        TEXT NOT NULL,
     dept_code   TEXT NOT NULL DEFAULT '',
-    active      INTEGER NOT NULL
+    active      INTEGER NOT NULL,
+    email       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS hr_imports (
     imported_at TEXT NOT NULL,
@@ -180,6 +184,9 @@ def suggest_mapping(headers: list[str], llm: ChatModel | None = None) -> dict:
 
 def ensure_schema(db) -> None:
     db.executescript(HR_SCHEMA)
+    # メールアドレスの列がない古い保存先には、列を足す
+    if "email" not in {r[1] for r in db.execute("PRAGMA table_info(employees)")}:
+        db.execute("ALTER TABLE employees ADD COLUMN email TEXT NOT NULL DEFAULT ''")
 
 
 def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
@@ -211,14 +218,16 @@ def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
             report.errors.append(f"{path.name} {i}行目: 従業員番号 {no} が重複しています")
             continue
         active = (norm(rec["status"]) in active_values) if cols.get("status") else True
-        records[no] = (no, rec["name"].strip(), rec["dept"].strip(), rec["dept_code"].strip(), int(active))
+        records[no] = (no, rec["name"].strip(), rec["dept"].strip(), rec["dept_code"].strip(), int(active),
+                       rec["email"].strip().lower())
 
     if report.errors:
         return report   # 1件でも不備があれば入れ替えない（中途半端な名簿にしない）
 
     with db:
         db.execute("DELETE FROM employees")
-        db.executemany("INSERT INTO employees VALUES (?, ?, ?, ?, ?)", list(records.values()))
+        db.executemany("INSERT INTO employees (employee_no, name, dept, dept_code, active, email) VALUES (?, ?, ?, ?, ?, ?)",
+                       list(records.values()))
         report.active = sum(1 for r in records.values() if r[4])
         report.inactive = len(records) - report.active
         db.execute(
@@ -246,6 +255,18 @@ def lookup(db, employee_no: str) -> dict | None:
     row = db.execute(
         "SELECT employee_no, name, dept, dept_code FROM employees WHERE employee_no = ? AND active = 1",
         (norm(employee_no),),
+    ).fetchone()
+    return {"employee_no": row[0], "name": row[1], "dept": row[2], "dept_code": row[3]} if row else None
+
+
+def lookup_by_email(db, email: str) -> dict | None:
+    """カレンダーの予定の主催者（メールアドレス）から、在籍中の社員を探す。"""
+    ensure_schema(db)
+    e = (email or "").strip().lower()
+    if not e:
+        return None
+    row = db.execute(
+        "SELECT employee_no, name, dept, dept_code FROM employees WHERE email = ? AND active = 1", (e,)
     ).fetchone()
     return {"employee_no": row[0], "name": row[1], "dept": row[2], "dept_code": row[3]} if row else None
 

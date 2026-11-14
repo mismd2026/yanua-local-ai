@@ -13,6 +13,10 @@
     python -m yanua ingest demo/company/public             # 社外公開の文書を取り込む（受付が使う）
     python -m yanua reception --channel 電話               # 社外向けの受付（対話）
     python -m yanua reception --demo 1                     # 受付のデモ
+    python -m yanua visit-create --host 10004 --date 2026-11-20 --time 14:00 --room "5階 第2会議室" \
+        --company ABC商事 --visitor "木村 誠"               # 来訪予定を登録し、インビテーションコードを作る
+    python -m yanua visit-list --date 2026-11-20           # 来訪予定の一覧
+    python -m yanua notifications --employee 10004         # 担当者へのお知らせ
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from .store import Store
 DEFAULT_DB = Path("data/index.db")
 DEFAULT_HELPDESK_DATA = Path("demo/company/flows/helpdesk")
 DEFAULT_RECEPTION_DATA = Path("demo/company/flows/reception")
+DEFAULT_PASSES = Path("data/passes")
 HR_STALE_DAYS = 30   # 人事データがこれより古ければ警告する
 
 
@@ -77,10 +82,32 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("reception", help="社外向けの受付（会話）。社外公開の文書だけを使う")
     s.add_argument("--channel", choices=["来訪", "電話", "Web"], default="電話", help="どこからの問い合わせか")
-    s.add_argument("--demo", choices=["1", "2", "3", "4", "5"], help="用意したデモを流す")
+    s.add_argument("--demo", choices=["1", "2", "3", "4", "5", "6"], help="用意したデモを流す")
     s.add_argument("--today", help="来訪予定と照合する日（YYYY-MM-DD）。省略時は今日。--demo ではデモの日")
     s.add_argument("--data", type=Path, default=DEFAULT_RECEPTION_DATA, help="引き継ぎ先・来訪予定のフォルダ")
     llm_options(s)
+
+    s = sub.add_parser("visit-create", help="来訪予定を登録し、インビテーションコードと案内文を作る")
+    s.add_argument("--host", required=True, help="担当者の社員番号")
+    s.add_argument("--date", required=True, help="YYYY-MM-DD")
+    s.add_argument("--time", required=True, help="例: 14:00")
+    s.add_argument("--room", required=True)
+    s.add_argument("--company", required=True, help="訪問者の会社名")
+    s.add_argument("--visitor", required=True, help="訪問者のお名前")
+    s.add_argument("--purpose", default="")
+    s.add_argument("--contact", default="", help="訪問者に見せてよい担当者の連絡先（例: 内線4100）")
+
+    s = sub.add_parser("visit-import", help="来訪予定のCSVをまとめて登録する（Googleカレンダーから書き出したCSVも可）")
+    s.add_argument("source", type=Path)
+
+    s = sub.add_parser("visit-list", help="来訪予定の一覧（コードは表示しない）")
+    s.add_argument("--date", help="YYYY-MM-DD（省略時は今日）")
+
+    s = sub.add_parser("notifications", help="担当者・部署へのお知らせ（未読）")
+    s.add_argument("--employee", default="", help="社員番号")
+    s.add_argument("--dept", default="", help="部署（部署あてのお知らせ）")
+    s.add_argument("--all", action="store_true", help="既読も表示する")
+    s.add_argument("--mark-read", action="store_true", help="表示したお知らせを既読にする")
 
     s = sub.add_parser("serve", help="HTTP API を起動する")
     s.add_argument("--host", default="127.0.0.1")
@@ -138,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
             return _helpdesk(args, store)
         if args.command == "reception":
             return _reception(args, store)
+        if args.command in ("visit-create", "visit-import", "visit-list", "notifications"):
+            return _visits(args, store)
         if args.command == "ask":
             try:
                 result = answer_question(store, OllamaChat(args.model, args.ollama), args.question, args.department, args.top_k)
@@ -214,8 +243,12 @@ def _reception(args, store: Store) -> int:
     except LLMError as e:
         print(e)
         return 1
+    from . import visits
+
+    if args.demo:
+        visits.import_csv(store.db, args.data / "visits.csv")   # デモの予定（何度取り込んでも重ならない）
     today = args.today or (DEMO_TODAY if args.demo else None)
-    app = build_app(store, llm, args.data, date.fromisoformat(today) if today else None, args.top_k)
+    app = build_app(store, llm, args.data, date.fromisoformat(today) if today else None, args.top_k, DEFAULT_PASSES)
     if args.demo:
         channel, title, answer_for = demo_answers(args.demo)
         print(f"=== 受付デモ{args.demo}：{title}（{channel}） ===")
@@ -223,6 +256,49 @@ def _reception(args, store: Store) -> int:
     else:
         print(f"=== 受付（{args.channel}） ===")
         run(app, args.channel, lambda q: input("お客様> "))
+    return 0
+
+
+
+def _visits(args, store: Store) -> int:
+    from datetime import date
+
+    from . import hr, visits
+
+    if args.command == "visit-create":
+        try:
+            visit, code = visits.create(store.db, host_employee_no=args.host, visit_date=args.date, time=args.time,
+                                        room=args.room, visitor_company=args.company, visitor_name=args.visitor,
+                                        purpose=args.purpose, host_contact=args.contact)
+        except visits.VisitError as e:
+            print(e)
+            return 1
+        host = hr.lookup(store.db, visit["host_employee_no"])
+        print("■ 訪問者に送る案内文（コードは、ここでしか表示しません）\n")
+        print(visits.invitation_text(visit, code, host["name"]))
+        return 0
+    if args.command == "visit-import" and visits.is_calendar_export(args.source):
+        report = visits.import_calendar_csv(store.db, args.source)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 1 if report["errors"] else 0
+    if args.command == "visit-import":
+        try:
+            created = visits.import_csv(store.db, args.source)
+        except (visits.VisitError, KeyError) as e:
+            print(f"取り込めませんでした: {e}")
+            return 1
+        for visit, code in created:
+            print(f"{visit['date']} {visit['time']} {visit['visitor_company']} {visit['visitor_name']}様：{visits.format_code(code)}")
+        print(f"{len(created)} 件を登録しました。")
+        return 0
+    if args.command == "visit-list":
+        day = date.fromisoformat(args.date) if args.date else date.today()
+        print(json.dumps(visits.for_date(store.db, day), ensure_ascii=False, indent=2))
+        return 0
+    items = visits.notifications(store.db, args.employee, args.dept, unread_only=not args.all)
+    print(json.dumps(items, ensure_ascii=False, indent=2))
+    if args.mark_read and items:
+        visits.mark_read(store.db, [i["notification_id"] for i in items])
     return 0
 
 
