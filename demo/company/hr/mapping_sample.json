@@ -4,7 +4,8 @@
     "name": "氏名",
     "dept": "所属",
     "dept_code": "所属コード",
-    "status": "在籍区分"
+    "status": "在籍区分",
+    "email": "メールアドレス"
   },
   "active_values": ["在籍", "休職"]
 }

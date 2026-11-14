@@ -1,0 +1,30 @@
+{
+  "timeZone": "Asia/Tokyo",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      { "userSymbol": "Calendar", "serviceId": "calendar", "version": "v3" }
+    ]
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/calendar.addons.execute",
+    "https://www.googleapis.com/auth/calendar.addons.current.event.read",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/script.send_mail",
+    "https://www.googleapis.com/auth/script.scriptapp",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Yanua 受付コード",
+      "logoUrl": "https://www.gstatic.com/images/icons/material/system/1x/badge_black_48dp.png",
+      "homepageTrigger": { "runFunction": "onHome" }
+    },
+    "calendar": {
+      "eventOpenTrigger": { "runFunction": "onEventOpen" },
+      "currentEventAccess": "READ"
+    }
+  }
+}

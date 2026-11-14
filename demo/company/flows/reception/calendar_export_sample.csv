@@ -1,0 +1,3 @@
+issued_at,event_id,date,time,room,host_email,host_contact,visitor_company,visitor_name,visitor_email,code_hash,status
+2026-11-10 09:12:00,ev-abc-0001,2026-11-16,13:00,5階 第3会議室,suzuki.i@example.co.jp,内線4300,LMN物産,石井 涼,ishii@lmn.example,2d32d44061696bc673c67c1ef1873e30b6a19ca4e29e25d3d32254dcb3b9ab59,発行済み
+2026-11-10 09:12:00,ev-abc-0002,2026-11-18,11:00,5階 第1会議室,yamada.t@example.co.jp,,OPQ監査法人,岡田 真,okada@opq.example,f5dd110a31d915ce9a510120aa6767e4a9591f21897625cdeee4c86270d2b135,取消

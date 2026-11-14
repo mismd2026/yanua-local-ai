@@ -24,6 +24,19 @@ def db():
     conn.close()
 
 
+def basic_mapping():
+    """メールアドレスの列がない出力用の対応表（メールアドレスは任意の項目）。"""
+    m = hr.load_mapping(MAPPING)
+    m["columns"] = {k: v for k, v in m["columns"].items() if k != "email"}
+    return m
+
+
+def test_email_is_optional_and_links_calendar_organizer(db):
+    hr.import_employees(db, SAMPLE, hr.load_mapping(MAPPING))
+    assert hr.lookup_by_email(db, "Takahashi.M@example.co.jp")["employee_no"] == "10004"
+    assert hr.lookup_by_email(db, "watanabe.t@example.co.jp") is None   # 退職者は結びつけない
+
+
 def test_import_keeps_only_needed_columns(db):
     report = hr.import_employees(db, SAMPLE, hr.load_mapping(MAPPING))
     assert report.errors == []
@@ -31,7 +44,7 @@ def test_import_keeps_only_needed_columns(db):
     # 本人確認に使わない列は、読み込んだ時点で捨てる
     assert set(report.dropped_columns) == {"氏名カナ", "生年月日", "入社日"}
     cols = [r[1] for r in db.execute("PRAGMA table_info(employees)")]
-    assert cols == ["employee_no", "name", "dept", "dept_code", "active"]
+    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email"]
 
 
 def test_verify_needs_both_number_and_name(db):
@@ -53,7 +66,7 @@ def test_import_replaces_everything(db, tmp_path):
     hr.import_employees(db, SAMPLE, hr.load_mapping(MAPPING))
     small = tmp_path / "small.csv"
     small.write_text("社員番号,氏名,所属,所属コード,在籍区分\n20001,新人 一郎,営業部,400,在籍\n", encoding="utf-8")
-    hr.import_employees(db, small, hr.load_mapping(MAPPING))
+    hr.import_employees(db, small, basic_mapping())
     assert hr.verify(db, "10001", "山田 太郎") is None   # 前回の名簿は残らない
     assert hr.verify(db, "20001", "新人 一郎") is not None
 
@@ -62,7 +75,7 @@ def test_bad_rows_do_not_replace(db, tmp_path):
     hr.import_employees(db, SAMPLE, hr.load_mapping(MAPPING))
     bad = tmp_path / "bad.csv"
     bad.write_text("社員番号,氏名,所属,所属コード,在籍区分\n1,a,営業部,4,在籍\n1,b,営業部,4,在籍\n", encoding="utf-8")
-    report = hr.import_employees(db, bad, hr.load_mapping(MAPPING))
+    report = hr.import_employees(db, bad, basic_mapping())
     assert report.errors   # 番号の重複
     assert hr.verify(db, "10001", "山田 太郎") is not None   # 不備があれば入れ替えない
 
@@ -84,7 +97,7 @@ def test_excel_and_json(db, tmp_path):
     ws.append([30001, "表計 花子", "総務部", 200, "在籍", "東京都"])
     xlsx = tmp_path / "hr.xlsx"
     wb.save(xlsx)
-    mapping = {**hr.load_mapping(MAPPING), "sheet": "社員一覧"}
+    mapping = {**basic_mapping(), "sheet": "社員一覧"}
     report = hr.import_employees(db, xlsx, mapping)
     assert report.errors == [] and report.dropped_columns == ["住所"]
     assert hr.verify(db, "30001", "表計 花子")["dept"] == "総務部"
@@ -92,7 +105,7 @@ def test_excel_and_json(db, tmp_path):
     js = tmp_path / "hr.json"
     js.write_text(json.dumps({"employees": [{"社員番号": "40001", "氏名": "情報 次郎", "所属": "人事部",
                                              "所属コード": "100", "在籍区分": "在籍"}]}, ensure_ascii=False), encoding="utf-8")
-    assert hr.import_employees(db, js, hr.load_mapping(MAPPING)).errors == []
+    assert hr.import_employees(db, js, basic_mapping()).errors == []
     assert hr.verify(db, "40001", "情報 次郎") is not None
 
 
