@@ -4,7 +4,7 @@
 → 案内（社内文書から出典つきで答える。なければ一般的な手順で補う）→ 解決の確認 → 解決しなければ問い合わせ票
 
 - 本人確認：画面からログインしている人とSSOの個人アカウントは、人事データの本人を確認するだけ。代表アカウントなどは、
-  所属部署・お名前・従業員番号をまとめて聞き、3つのうち2つが同じ1人を指したら確定する（yanua/identity.py）。
+  本人確認の方針（config/identity.json）に沿って聞き、決めた組み合わせが同じ1人を指したら確定する（yanua/identity.py）。
   言われた内容はそのまま票に残す。人事データの中身（候補の名前や部署）は相手に見せない。
 - 照合できた人は、その部署の権限で社内文書を検索する。照合できない人は「全社」の文書だけを使う。
 - セキュリティの問い合わせ（不審なメールなど）は、検索の出来に関係なく決まったルールで拾い、
@@ -139,11 +139,14 @@ def extract_slots(llm: ChatModel, problem: str, answer: str) -> dict:
     return out
 
 
-def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, checkpointer=None):
+def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, checkpointer=None,
+              policy: identity.Policy | None = None):
     """ヘルプデスクのグラフを作る。store は取り込み済みの社内文書と人事データを持つ保存先。
 
     checkpointer は会話の途中の状態の保存先。省略時はメモリ（CLI 用）。API では SQLite に保存する。
+    policy は本人確認の方針（config/identity.json）。省略時は既定（標準）。
     """
+    policy = policy or identity.Policy.default()
     kb_rows = _read_csv(data_dir / "kb.csv")
     accounts = {r["account"]: r for r in _read_csv(data_dir / "accounts.csv")}
     outages = [r for r in _read_csv(data_dir / "outages.csv") if r["active"] == "yes"]
@@ -166,12 +169,15 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
                 return {"requester": {**p, **base, "verified": "SSO"}}
             base["account_type"] = "personal（本人以外が使用）"
 
-        # 聞き方は1つ。番号・名前・部署のうち2つが同じ1人を指したら確定（yanua/identity.py）
-        said = [interrupt(identity.QUESTION)]
-        r = identity.check(store.db, said)
-        if not r.person and r.missing:
-            said.append(interrupt(identity.follow_up(r.missing)))   # 足りないものだけ、1回だけ聞く
-            r = identity.check(store.db, said)
+        # 何を聞き、どの組み合わせで確定するかは本人確認の方針で決める（yanua/identity.py）
+        said = [interrupt(policy.question)]
+        r = identity.check(store.db, said, policy)
+        for _ in range(policy.max_follow_ups):
+            if r.person or not r.ask:
+                break
+            # 返ってきた言葉に合わせて、確定に足りないものだけを聞く
+            said.append(interrupt(r.question()))
+            r = identity.check(store.db, said, policy)
         return {"requester": r.requester(base)}
 
     def intake(s: State) -> State:

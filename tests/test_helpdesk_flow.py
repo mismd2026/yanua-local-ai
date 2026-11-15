@@ -205,3 +205,40 @@ def test_priority_high_when_department_stops():
 
     slots = extract_slots(Says("不明", "止まっている"), "印刷できない", "部署の全員が印刷できず、業務が止まっています。")
     assert calc_priority(slots, urgent=False) == "高"
+
+
+def test_identity_follow_ups_in_conversation(store):
+    """部署だけ → 「お名前か従業員番号」→ 名前がヒットしない → 「従業員番号」→ 番号と部署で確定。"""
+    app = build_app(store, FakeLLM(), HELPDESK_DATA)
+    asked = []
+    answers = iter(["営業部です", "石母田です", "10004", "パスワードを忘れました", "はい"])
+
+    def ask(q):
+        asked.append(q)
+        return next(answers)
+
+    state = run(app, "eigyo-common", ask, out=lambda *_: None)
+    assert "本人確認を行う都合上" in asked[0]
+    assert "お名前か従業員番号" in asked[1]
+    assert "従業員番号を教えて" in asked[2] and "お名前" not in asked[2]
+    assert asked[3].startswith("高橋 美咲さん、ありがとうございます")
+    r = state["requester"]
+    assert r["verified"] == "人事データと一致" and r["matched"] == ["従業員番号", "部署"]
+    assert r["declared"]["name"] == "石母田"
+
+
+def test_identity_gives_up_but_takes_request(store):
+    """聞き返しても確定しなければ、申告内容を控えて依頼は受ける（聞き返しは方針の回数まで）。"""
+    app = build_app(store, FakeLLM(), HELPDESK_DATA)
+    asked = []
+    answers = iter(["私ですが", "わからない", "わからない", "パスワードを忘れました", "いいえ", "内線1234"])
+
+    def ask(q):
+        asked.append(q)
+        return next(answers)
+
+    state = run(app, "eigyo-common", ask, out=lambda *_: None)
+    assert sum("恐れ入りますが" in q for q in asked) == 2
+    assert asked[3].startswith("ありがとうございます。どのようなことでお困りですか")
+    assert state["ticket"]["requester"]["verified"] == "照合できず"
+    assert state["ticket"]["requester"]["declared"]["said"] == "私ですが / わからない / わからない"

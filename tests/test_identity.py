@@ -35,15 +35,13 @@ def check(db, *said):
     # 3つとも合う。言う順番や言い方は問わない
     ("営業部の高橋美咲です。番号は10004です。", "10004", ["従業員番号", "名前", "部署"]),
     ("10004、高橋 美咲、営業", "10004", ["従業員番号", "名前", "部署"]),
-    ("えっと、高橋です。営業部で、従業員番号は１０００４です", "10004", ["従業員番号", "名前", "部署"]),
+    ("えっと、高橋です。営業部で、従業員番号は１０００４です", "10004", ["従業員番号", "部署"]),
     # 番号を覚えていない：名前と部署で確定（「総務」は総務部の呼び方）
     ("総務の佐藤花子です。番号はわかりません", "10002", ["名前", "部署"]),
     # 番号を聞き間違えた（10044）：名前と部署で確定する
     ("営業部の高橋美咲、10044です", "10004", ["名前", "部署"]),
     # 名前を聞き間違えた（シモダ→？）：番号と部署で確定する
     ("経理部のヤマダです。10001", "10001", ["従業員番号", "部署"]),
-    # 姓だけでも、番号と合えば確定
-    ("鈴木です。10003", "10003", ["従業員番号", "名前"]),
 ])
 def test_two_of_three_confirms(db, said, no, matched):
     r = check(db, said)
@@ -68,14 +66,27 @@ def test_one_clue_is_not_enough(db, said):
     assert check(db, said).person is None
 
 
-def test_missing_items_are_asked_once(db):
-    r = check(db, "高橋美咲です")
-    assert r.missing == ["dept", "employee_no"]
-    q = identity.follow_up(r.missing)
-    assert "所属部署と従業員番号" in q and "わからない" in q
-    # 2回目の返事と合わせて照合する
-    r = check(db, "高橋美咲です", "営業です。番号はわかりません")
-    assert r.person["employee_no"] == "10004"
+def test_follow_up_matches_what_was_said(db):
+    """返ってきた言葉に合わせて、確定に足りないものを聞く。"""
+    r = check(db, "高橋美咲です")          # 名前だけ → 部署か番号のどちらか
+    assert (r.ask, r.ask_any) == (["dept", "employee_no"], True)
+    assert "所属部署か従業員番号" in r.question() and "わからない" in r.question()
+    assert check(db, "高橋美咲です", "営業です").person["employee_no"] == "10004"
+
+    r = check(db, "営業部です")             # 部署だけ → 名前か番号のどちらか
+    assert (r.ask, r.ask_any) == (["name", "employee_no"], True)
+
+    r = check(db, "営業部の石母田です")     # 名前がヒットしない → 番号
+    assert r.ask == ["employee_no"] and not r.ask_any
+    assert check(db, "営業部の石母田です", "10004").person["employee_no"] == "10004"
+
+    r = check(db, "鈴木です。10003")        # 姓だけは名前として数えない → 部署かフルネーム
+    assert r.person is None and r.ask_any and set(r.ask) == {"dept", "name"}
+    assert "お名前（フルネーム）" in r.question()
+    assert check(db, "鈴木です。10003", "営業部です").person["employee_no"] == "10003"
+
+    r = check(db, "私ですが")               # 何もない → 方針の手がかりのどれか
+    assert r.person is None and r.ask
 
 
 def test_same_surname_in_same_department_is_not_confirmed(db):
@@ -83,7 +94,7 @@ def test_same_surname_in_same_department_is_not_confirmed(db):
     db.execute("INSERT INTO employees (employee_no, name, dept, dept_code, active, email, name_key, surname_key, dept_key) "
                "VALUES ('10010', '高橋 誠', '営業部', '400', 1, '', '高橋誠', '高橋', '営業部')")
     r = check(db, "営業部の高橋です")
-    assert r.person is None and "複数" in r.note and "employee_no" in r.missing
+    assert r.person is None and "複数" in r.note and "employee_no" in r.ask
     assert check(db, "営業部の高橋です", "10010").person["name"] == "高橋 誠"
 
 
@@ -131,6 +142,14 @@ def test_old_database_gets_key_columns(tmp_path):
     assert hr.find_in_text(db, "石母田さんをお願いします")[0]["employee_no"] == "1"
 
 
+def test_old_department_list_gets_codes(db):
+    """部署コードの列がない部署の一覧（前の版で作った保存先）は、作り直してコードを入れる。"""
+    db.executescript("DROP TABLE hr_departments; CREATE TABLE hr_departments (dept TEXT PRIMARY KEY);"
+                     "INSERT INTO hr_departments VALUES ('営業部');")
+    assert hr.dept_by_code(db, "400") == "営業部"
+    assert hr.dept_by_code(db, "200") == "総務部"
+
+
 def test_lookup_uses_indexes(db):
     """名前・部署の照合は索引で引く（在籍者を全部読まない）。"""
     for col in ("name_key", "surname_key"):
@@ -161,3 +180,59 @@ def test_fast_with_many_employees(tmp_path):
     elapsed = time.perf_counter() - started
     assert r.person and r.person["employee_no"] == target[0]
     assert elapsed < 1.0, elapsed
+
+
+# ---------------------------------------------------------------- 本人確認の方針
+
+
+def policy(**kw):
+    return identity.build_policy(kw)
+
+
+def test_policy_without_employee_code(db):
+    """社員コードを極秘にしている会社：部署（部署名か部署コード）と名前で確定し、番号は聞かない。"""
+    p = policy(preset="社員コードを使わない")
+    assert "従業員番号" not in p.question
+    assert check_p(db, p, "営業部の高橋美咲です").person["employee_no"] == "10004"
+    assert check_p(db, p, "高橋美咲、部署コードは400です").person["employee_no"] == "10004"
+    r = check_p(db, p, "高橋美咲です")
+    assert r.person is None and r.ask == ["dept"]
+    assert "従業員番号" not in r.question()
+    # 番号を言われても使わない
+    assert check_p(db, p, "10004の高橋です").person is None
+
+
+def test_policy_employee_code_required(db):
+    p = policy(preset="社員コード必須")
+    r = check_p(db, p, "営業部の高橋美咲です")      # 名前と部署だけでは確定しない
+    assert r.person is None and r.ask == ["employee_no"]
+    assert check_p(db, p, "高橋美咲、10004").person["employee_no"] == "10004"
+
+
+def test_policy_leave_it_to_caller(db):
+    p = policy(preset="相手に委ねる")
+    assert "または従業員番号" in p.question
+    r = check_p(db, p, "営業部です")
+    assert "お名前か従業員番号" in r.question()
+
+
+def test_policy_surname_counts(db):
+    p = policy(surname_counts=True)
+    r = check_p(db, p, "鈴木です。10003")
+    assert r.person["employee_no"] == "10003" and r.matched == ["従業員番号", "名前"]
+
+
+def test_policy_overrides_and_errors(tmp_path):
+    p = policy(preset="標準", question="お名前と部署をどうぞ", max_follow_ups=1)
+    assert p.question == "お名前と部署をどうぞ" and p.max_follow_ups == 1 and p.confirm
+    for bad in ({"preset": "ない型"}, {"clues": ["name", "birthday"]}, {"confirm": [["name"]]},
+                {"clues": ["name", "dept"], "confirm": [["name", "employee_no"]]}, {"max_follow_ups": 9},
+                {"question": " "}):
+        with pytest.raises(identity.PolicyError):
+            identity.build_policy(bad)
+    assert identity.load_policy(tmp_path / "none.json").preset == "標準"
+    assert identity.load_policy(ROOT / "config" / "identity.json").preset == "標準"
+
+
+def check_p(db, p, *said):
+    return identity.check(db, list(said), p)

@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS employees (
     email       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS hr_departments (
-    dept TEXT PRIMARY KEY
+    dept      TEXT PRIMARY KEY,
+    dept_code TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS hr_imports (
     imported_at TEXT NOT NULL,
@@ -222,6 +223,9 @@ def ensure_schema(db) -> None:
     for c in added:
         db.execute(f"ALTER TABLE employees ADD COLUMN {c} TEXT NOT NULL DEFAULT ''")
     db.executescript(INDEXES)
+    if "dept_code" not in {r[1] for r in db.execute("PRAGMA table_info(hr_departments)")}:
+        db.execute("ALTER TABLE hr_departments ADD COLUMN dept_code TEXT NOT NULL DEFAULT ''")
+        db.execute("DELETE FROM hr_departments")
     if (not db.execute("SELECT 1 FROM hr_departments LIMIT 1").fetchone()
             and db.execute("SELECT 1 FROM employees LIMIT 1").fetchone()):
         refresh_departments(db)
@@ -236,7 +240,8 @@ def refresh_departments(db) -> None:
     """部署の一覧（在籍者のいる部署）を作り直す。照合のたびに在籍者全員を読まないために、取り込みのときに作っておく。"""
     with db:
         db.execute("DELETE FROM hr_departments")
-        db.execute("INSERT INTO hr_departments SELECT DISTINCT dept FROM employees WHERE active = 1")
+        db.execute("INSERT OR IGNORE INTO hr_departments SELECT dept, MAX(dept_code) FROM employees "
+                   "WHERE active = 1 GROUP BY dept")
 
 
 def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
@@ -280,7 +285,11 @@ def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
                        "name_key, surname_key, dept_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        [(*r, *_keys(r[1], r[2])) for r in records.values()])
         db.execute("DELETE FROM hr_departments")
-        db.executemany("INSERT INTO hr_departments VALUES (?)", [(d,) for d in {r[2] for r in records.values() if r[4]}])
+        depts: dict[str, str] = {}
+        for r in records.values():
+            if r[4]:
+                depts[r[2]] = depts.get(r[2]) or r[3]
+        db.executemany("INSERT INTO hr_departments VALUES (?, ?)", list(depts.items()))
         report.active = sum(1 for r in records.values() if r[4])
         report.inactive = len(records) - report.active
         db.execute(
@@ -394,6 +403,16 @@ def _dept_aliases(depts: tuple[str, ...]) -> dict[str, str | None]:
         for n in names:
             out[n] = dept if out.get(n, dept) == dept else None
     return out
+
+
+def dept_by_code(db, code: str) -> str:
+    """部署コードから部署名。なければ空。"""
+    ensure_schema(db)
+    c = norm(code)
+    if not c:
+        return ""
+    row = db.execute("SELECT dept FROM hr_departments WHERE dept_code = ?", (c,)).fetchone()
+    return row[0] if row else ""
 
 
 def dept_in_text(db, text: str) -> tuple[str, str]:

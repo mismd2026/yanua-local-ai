@@ -39,6 +39,7 @@ from .server import serve
 from .store import Store
 
 DEFAULT_DB = Path("data/index.db")
+DEFAULT_IDENTITY = Path("config/identity.json")
 DEFAULT_HELPDESK_DATA = Path("demo/company/flows/helpdesk")
 DEFAULT_RECEPTION_DATA = Path("demo/company/flows/reception")
 DEFAULT_PASSES = Path("data/passes")
@@ -84,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--account", default="", help="ログイン中のアカウント（SSOの代わり）")
     s.add_argument("--demo", choices=["1", "2", "3", "4"], help="用意したデモを流す")
     s.add_argument("--data", type=Path, default=DEFAULT_HELPDESK_DATA, help="手順・アカウント・障害情報のフォルダ")
+    s.add_argument("--identity", type=Path, default=DEFAULT_IDENTITY, help="本人確認の方針（何で相手を特定するか）")
     llm_options(s)
 
     s = sub.add_parser("reception", help="社外向けの受付（会話）。社外公開の文書だけを使う")
@@ -181,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--chat-db", type=Path, default=Path("data/chat.db"), help="会話の途中の状態の保存先")
     s.add_argument("--roles", type=Path, default=Path("config/roles.json"), help="役割の設定")
     s.add_argument("--helpdesk-data", type=Path, default=DEFAULT_HELPDESK_DATA)
+    s.add_argument("--identity", type=Path, default=DEFAULT_IDENTITY, help="本人確認の方針")
     llm_options(s)
 
     s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")
@@ -296,7 +299,14 @@ def _helpdesk(args, store: Store) -> int:
     except LLMError as e:
         print(e)
         return 1
-    app = build_app(store, llm, args.data, args.top_k)
+    from .identity import PolicyError, load_policy
+
+    try:
+        policy = load_policy(args.identity)
+    except PolicyError as e:
+        print(e)
+        return 1
+    app = build_app(store, llm, args.data, args.top_k, policy=policy)
     if args.demo:
         account, title, answer_for = demo_answers(args.demo)
         print(f"=== デモ{args.demo}：{title}（アカウント：{account}） ===")
@@ -552,11 +562,15 @@ def _serve(args) -> int:
     if not Store(args.db).documents():
         print(f"{args.db} に文書がありません。先に ingest を実行してください。")
         return 1
+    from .identity import load_policy
+
     settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
-                        roles_path=args.roles, top_k=args.top_k, host=args.host, dev_login=args.dev_login)
+                        roles_path=args.roles, identity_path=args.identity, top_k=args.top_k, host=args.host,
+                        dev_login=args.dev_login)
     try:
         settings.check()
         load_roles(settings.roles_path)
+        load_policy(settings.identity_path)
     except (ValueError, RoleConfigError) as e:
         print(e)
         return 1

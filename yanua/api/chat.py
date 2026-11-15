@@ -42,7 +42,8 @@ def _now() -> datetime:
 
 class HelpdeskSessions:
     def __init__(self, db_path: Path, chat_db_path: Path, helpdesk_data: Path, llm: ChatModel, top_k: int,
-                 idle_minutes: int):
+                 idle_minutes: int, policy=None):
+        self.policy = policy
         self.db_path = db_path
         self.helpdesk_data = helpdesk_data
         self.llm = llm
@@ -68,7 +69,7 @@ class HelpdeskSessions:
         if not hasattr(self._local, "app"):
             self._local.store = Store(self.db_path)
             self._local.app = build_app(self._local.store, self.llm, self.helpdesk_data, self.top_k,
-                                        checkpointer=self.saver)
+                                        checkpointer=self.saver, policy=self.policy)
         return self._local.app
 
     def _app_store(self) -> Store:
