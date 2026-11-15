@@ -157,3 +157,44 @@ def test_business_impact_is_corrected_by_rule():
     assert out["business"] == "止まっている"
     out = extract_slots(SaysNoImpact(), "印刷できない", "自分だけです。業務は止まっていません。")
     assert out["business"] == "支障なし"
+
+
+class Says:
+    """範囲と業務への影響を決まった値で返す偽のモデル。"""
+
+    name = "fake"
+
+    def __init__(self, scope, business="不明"):
+        self.scope, self.business = scope, business
+
+    def chat(self, messages):
+        return json.dumps({"device": "複合機", "location": "本社2階", "scope": self.scope, "business": self.business},
+                          ensure_ascii=False)
+
+
+@pytest.mark.parametrize("model_scope, answer, expected", [
+    # モデルが取りこぼした「全員」は、ルールで「部署・複数人」に補う（実機の3bで起きた）
+    ("不明", "部署の全員", "部署・複数人"),
+    ("不明", "本社2階の営業部の複合機です。部署の全員が印刷できず、業務が止まっています。", "部署・複数人"),
+    ("自分だけ", "周りの人も印刷できません", "部署・複数人"),
+    ("不明", "他の店でも同じです", "全社"),
+    ("不明", "自分だけです", "自分だけ"),
+    ("不明", "ほかの人は使えています", "自分だけ"),
+    # 言葉がなければ、モデルの答えのまま
+    ("不明", "複合機です", "不明"),
+    ("自分だけ", "複合機です", "自分だけ"),
+    ("不明", "部署の複合機です", "不明"),
+    ("不明", "部署の複合機ですが、使えないのは自分だけです", "自分だけ"),
+    # 「全員」だけで「全社」にはしない（今までのルール）
+    ("全社", "部署の全員が使えません", "部署・複数人"),
+])
+def test_scope_is_completed_by_rule(model_scope, answer, expected):
+    assert extract_slots(Says(model_scope), "印刷できない", answer)["scope"] == expected
+
+
+def test_priority_high_when_department_stops():
+    """「部署の全員が止まっている」は、モデルが範囲を取りこぼしても優先度「高」になる。"""
+    from yanua.flows.internal.helpdesk.graph import calc_priority
+
+    slots = extract_slots(Says("不明", "止まっている"), "印刷できない", "部署の全員が印刷できず、業務が止まっています。")
+    assert calc_priority(slots, urgent=False) == "高"

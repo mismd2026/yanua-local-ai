@@ -45,6 +45,10 @@ SCOPES = ["自分だけ", "部署・複数人", "全社"]
 BUSINESS = ["止まっている", "一部できない", "支障なし"]
 # 「全社」と判定してよい言葉。返事にこれがなければ、LLMが「全社」と答えても「部署・複数人」に直す
 WIDE_WORDS = ["全社", "会社全体", "全拠点", "全店", "すべての店", "ほかの店", "他の店", "他店", "ほかの拠点", "他の拠点", "どの拠点も"]
+# 複数人に及んでいると判定してよい言葉。小さなモデルが「不明」「自分だけ」と返しても、返事にあれば「部署・複数人」に直す
+GROUP_WORDS = ["全員", "みんな", "皆さん", "ほかの人も", "他の人も", "周りの人も", "周りも", "複数", "何人も"]
+# 本人だけと判定してよい言葉。範囲が「不明」のときだけ使う
+SELF_WORDS = ["自分だけ", "私だけ", "わたしだけ", "自分のPCだけ", "ほかの人は使え", "他の人は使え", "ほかの人はでき", "他の人はでき"]
 # 「業務が止まっている」と判定してよい言葉。小さなモデルが「支障なし」と取り違えるので、返事にあれば補正する
 STOP_WORDS = ["止まっ", "仕事にならない", "業務ができない", "仕事ができない", "何もできない", "業務に支障"]
 NOT_STOP_WORDS = ["止まっていない", "止まってない", "止まってはいない", "止まっていません", "止まってません"]
@@ -118,6 +122,16 @@ def extract_slots(llm: ChatModel, problem: str, answer: str) -> dict:
     # 小さなモデルは「全員」を「全社」と取りがちなので、決まったルールで補正する
     if out["scope"] == "全社" and not any(w in answer for w in WIDE_WORDS):
         out["scope"] = "部署・複数人"
+    # 逆に、返事に範囲の言葉があるのにモデルが取りこぼしたときは、ルールで補う
+    # （「自分だけ」とはっきり書いてあれば、それを優先する）
+    self_only = any(w in answer for w in SELF_WORDS)
+    if out["scope"] in ("不明", "自分だけ") and not self_only:
+        if any(w in answer for w in WIDE_WORDS):
+            out["scope"] = "全社"
+        elif any(w in answer for w in GROUP_WORDS):
+            out["scope"] = "部署・複数人"
+    if out["scope"] == "不明" and self_only:
+        out["scope"] = "自分だけ"
     if (out["business"] != "止まっている" and any(w in answer for w in STOP_WORDS)
             and not any(w in answer for w in NOT_STOP_WORDS)):
         out["business"] = "止まっている"
