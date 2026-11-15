@@ -3,12 +3,11 @@
 - 会話の状態は LangGraph のチェックポイントとして SQLite（chat.db）に残す。サーバーを再起動しても続けられる
 - 会話はそれを始めた人しか続けられない。ほかの人の会話の番号を送っても「見つかりません」と返す
 - 返事のないまま chat_idle_minutes が過ぎた会話は消す
-- 本人確認はログインした人の個人アカウントから始める（accounts.csv で社員番号を引く）
+- ログインした人は、ログインの時点で本人が分かっているので、本人確認を省いてお困りごとから始める
 """
 
 from __future__ import annotations
 
-import csv
 import sqlite3
 import threading
 import uuid
@@ -18,6 +17,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from .. import hr
 from ..flows.internal.helpdesk import build_app
 from ..llm import ChatModel
 from ..store import Store
@@ -38,15 +38,6 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def account_for(helpdesk_data: Path, employee_no: str) -> str:
-    """その社員の個人アカウント。なければ空（ヘルプデスクが従業員番号から聞く）。"""
-    with (helpdesk_data / "accounts.csv").open(encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            if r["type"] == "personal" and r["employee_no"] == employee_no:
-                return r["account"]
-    return ""
 
 
 class HelpdeskSessions:
@@ -79,6 +70,10 @@ class HelpdeskSessions:
             self._local.app = build_app(self._local.store, self.llm, self.helpdesk_data, self.top_k,
                                         checkpointer=self.saver)
         return self._local.app
+
+    def _app_store(self) -> Store:
+        self._app()
+        return self._local.store
 
     def _session_lock(self, session_id: str) -> threading.Lock:
         with self._lock:
@@ -118,10 +113,15 @@ class HelpdeskSessions:
                                (session_id, user.employee_no, now, now))
             self._conn.commit()
         if account is None:
-            account = account_for(self.helpdesk_data, user.employee_no)
+            p = hr.lookup(self._app_store().db, user.employee_no) or {}
+            start = {"account": "", "requester": {
+                "employee_no": user.employee_no, "name": user.name, "dept": user.dept,
+                "dept_code": p.get("dept_code", ""), "account": "", "account_type": "ログイン", "verified": "ログイン"}}
+        else:
+            start = {"account": account}   # 開発用：代表アカウントなどからの問い合わせを試す
         config = {"configurable": {"thread_id": session_id}}
         with self._session_lock(session_id):
-            state = self._app().invoke({"account": account}, config)
+            state = self._app().invoke(start, config)
         return self._reply(session_id, state)
 
     def send(self, user: User, session_id: str, text: str) -> dict:

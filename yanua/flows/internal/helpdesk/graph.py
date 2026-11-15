@@ -3,8 +3,9 @@
 本人確認 → お困りごと → 分類 → 状況の聞き返し（2回まで）→ 障害の確認
 → 案内（社内文書から出典つきで答える。なければ一般的な手順で補う）→ 解決の確認 → 解決しなければ問い合わせ票
 
-- 本人確認：SSOの個人アカウントなら人事データの本人を確認するだけ。代表アカウントなどは、
-  従業員番号と氏名の両方を聞き、取り込んだ人事データ（yanua.hr）と照合する。人事データの中身は画面に出さない。
+- 本人確認：画面からログインしている人とSSOの個人アカウントは、人事データの本人を確認するだけ。代表アカウントなどは、
+  所属部署・お名前・従業員番号をまとめて聞き、3つのうち2つが同じ1人を指したら確定する（yanua/identity.py）。
+  言われた内容はそのまま票に残す。人事データの中身（候補の名前や部署）は相手に見せない。
 - 照合できた人は、その部署の権限で社内文書を検索する。照合できない人は「全社」の文書だけを使う。
 - セキュリティの問い合わせ（不審なメールなど）は、検索の出来に関係なく決まったルールで拾い、
   聞き返しより先に「ネットワークから切り離す」などの案内を出して、必ず引き継ぐ。
@@ -25,12 +26,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from .... import hr
+from .... import hr, identity
 from ....answer import answer_question
 from ....llm import ChatModel
 from ....search import bm25
 from ....store import Store, StoredChunk
-from ...base import ask_json, is_yes, norm
+from ...base import ask_json, is_yes
 
 MAX_CLARIFY = 2
 KB_MIN_SCORE = 8.0   # 手順の資料との一致を採用する最低のBM25スコア（正しい一致は10以上、無関係なものは5未満だった）
@@ -45,6 +46,10 @@ SCOPES = ["自分だけ", "部署・複数人", "全社"]
 BUSINESS = ["止まっている", "一部できない", "支障なし"]
 # 「全社」と判定してよい言葉。返事にこれがなければ、LLMが「全社」と答えても「部署・複数人」に直す
 WIDE_WORDS = ["全社", "会社全体", "全拠点", "全店", "すべての店", "ほかの店", "他の店", "他店", "ほかの拠点", "他の拠点", "どの拠点も"]
+# 複数人に及んでいると判定してよい言葉。小さなモデルが「不明」「自分だけ」と返しても、返事にあれば「部署・複数人」に直す
+GROUP_WORDS = ["全員", "みんな", "皆さん", "ほかの人も", "他の人も", "周りの人も", "周りも", "複数", "何人も"]
+# 本人だけと判定してよい言葉。範囲が「不明」のときだけ使う
+SELF_WORDS = ["自分だけ", "私だけ", "わたしだけ", "自分のPCだけ", "ほかの人は使え", "他の人は使え", "ほかの人はでき", "他の人はでき"]
 # 「業務が止まっている」と判定してよい言葉。小さなモデルが「支障なし」と取り違えるので、返事にあれば補正する
 STOP_WORDS = ["止まっ", "仕事にならない", "業務ができない", "仕事ができない", "何もできない", "業務に支障"]
 NOT_STOP_WORDS = ["止まっていない", "止まってない", "止まってはいない", "止まっていません", "止まってません"]
@@ -118,6 +123,16 @@ def extract_slots(llm: ChatModel, problem: str, answer: str) -> dict:
     # 小さなモデルは「全員」を「全社」と取りがちなので、決まったルールで補正する
     if out["scope"] == "全社" and not any(w in answer for w in WIDE_WORDS):
         out["scope"] = "部署・複数人"
+    # 逆に、返事に範囲の言葉があるのにモデルが取りこぼしたときは、ルールで補う
+    # （「自分だけ」とはっきり書いてあれば、それを優先する）
+    self_only = any(w in answer for w in SELF_WORDS)
+    if out["scope"] in ("不明", "自分だけ") and not self_only:
+        if any(w in answer for w in WIDE_WORDS):
+            out["scope"] = "全社"
+        elif any(w in answer for w in GROUP_WORDS):
+            out["scope"] = "部署・複数人"
+    if out["scope"] == "不明" and self_only:
+        out["scope"] = "自分だけ"
     if (out["business"] != "止まっている" and any(w in answer for w in STOP_WORDS)
             and not any(w in answer for w in NOT_STOP_WORDS)):
         out["business"] = "止まっている"
@@ -139,6 +154,8 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
     # ------------------------------------------------------------ ノード
 
     def identify(s: State) -> State:
+        if s.get("requester"):
+            return {}   # 画面からログインしている人（API）は、ログインの時点で本人が分かっている
         acc = accounts.get(s.get("account", ""))
         acc_type = acc["type"] if acc else "不明"
         base = {"account": s.get("account", ""), "account_type": acc_type}
@@ -149,17 +166,17 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
                 return {"requester": {**p, **base, "verified": "SSO"}}
             base["account_type"] = "personal（本人以外が使用）"
 
-        no = interrupt("従業員番号を教えてください。")
-        name = interrupt("お名前（フルネーム）を教えてください。")
-        p = hr.verify(store.db, no, name)   # 番号と氏名の両方が在籍中の人と一致したときだけ
-        if p:
-            return {"requester": {**p, **base, "verified": "人事データと一致"}}
-        dept = interrupt("所属部署を教えてください。")
-        return {"requester": {"employee_no": norm(no), "name": name, "dept": dept, "dept_code": "",
-                              **base, "verified": "照合できず"}}
+        # 聞き方は1つ。番号・名前・部署のうち2つが同じ1人を指したら確定（yanua/identity.py）
+        said = [interrupt(identity.QUESTION)]
+        r = identity.check(store.db, said)
+        if not r.person and r.missing:
+            said.append(interrupt(identity.follow_up(r.missing)))   # 足りないものだけ、1回だけ聞く
+            r = identity.check(store.db, said)
+        return {"requester": r.requester(base)}
 
     def intake(s: State) -> State:
-        problem = interrupt(f"{s['requester']['name']}さん、ありがとうございます。どのようなことでお困りですか？")
+        name = s["requester"].get("name", "")
+        problem = interrupt(f"{name + 'さん、' if name else ''}ありがとうございます。どのようなことでお困りですか？")
         return {"problem": problem, "slots": {}, "clarify_rounds": 0, "tried": [], "sources": []}
 
     def classify(s: State) -> State:

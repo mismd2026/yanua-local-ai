@@ -325,15 +325,14 @@ def chat(client, text, sid):
     return r.json()
 
 
-def test_helpdesk_starts_from_logged_in_account(client):
-    """個人アカウントのある人（佐藤・総務部）は、名前の確認から始まる。"""
+def test_helpdesk_skips_identity_for_logged_in_user(client):
+    """ログインしている人は本人確認を聞かれず、お困りごとから始まる。"""
     login(client, "10002")
     r = client.post("/api/chat/sessions", json={}, headers=H)
     assert r.status_code == 201
     first = r.json()
-    assert "総務部の佐藤 花子さんでよろしいですか" in first["reply"] and not first["finished"]
+    assert first["reply"].startswith("佐藤 花子さん、ありがとうございます。どのようなことでお困りですか") and not first["finished"]
     sid = first["session_id"]
-    assert "お困り" in chat(client, "はい", sid)["reply"]
     last = chat(client, "パスワードを忘れました", sid)
     assert "解決しましたか" in last["reply"]
     end = chat(client, "はい", sid)
@@ -342,11 +341,30 @@ def test_helpdesk_starts_from_logged_in_account(client):
     assert r.status_code == 409
 
 
-def test_helpdesk_ticket_with_shared_account(client):
-    """代表アカウント（開発用ログインのときだけ指定できる）からは、従業員番号を聞いて票まで進む。"""
+def test_helpdesk_ticket_records_login(client, settings):
     login(client, "10004")
-    sid = client.post("/api/chat/sessions", json={"account": "eigyo-common"}, headers=H).json()["session_id"]
-    for text in ("10004", "高橋 美咲", "プリンターから印刷できません",
+    sid = client.post("/api/chat/sessions", json={}, headers=H).json()["session_id"]
+    for text in ("プリンターから印刷できません",
+                 "本社2階の営業部の複合機です。部署の全員が印刷できず、業務が止まっています。"):
+        r = chat(client, text, sid)
+    if "解決しましたか" in r["reply"]:
+        r = chat(client, "いいえ", sid)
+    end = chat(client, "内線4100、9時から18時", sid)
+    assert end["finished"] and end["ticket_id"].startswith("HD-")
+    s = Store(settings.db_path)
+    t = json.loads(s.db.execute("SELECT payload FROM helpdesk_tickets").fetchone()[0])
+    s.close()
+    assert t["requester"]["verified"] == "ログイン" and t["requester"]["dept"] == "営業部"
+    assert t["priority"] == "高"
+
+
+def test_helpdesk_ticket_with_shared_account(client):
+    """代表アカウント（開発用ログインのときだけ指定できる）からは、本人確認を聞いて票まで進む。"""
+    login(client, "10004")
+    first = client.post("/api/chat/sessions", json={"account": "eigyo-common"}, headers=H).json()
+    assert "本人確認を行う都合上" in first["reply"]
+    sid = first["session_id"]
+    for text in ("営業部の高橋美咲です。10004です。", "プリンターから印刷できません",
                  "本社2階の営業部の複合機です。部署の全員が印刷できず、業務が止まっています。"):
         r = chat(client, text, sid)
     if "解決しましたか" in r["reply"]:
@@ -373,7 +391,7 @@ def test_helpdesk_continues_after_restart(settings):
         sid = c.post("/api/chat/sessions", json={}, headers=H).json()["session_id"]
         cookies = dict(c.cookies)
     with TestClient(create_app(settings, FakeLLM()), cookies=cookies) as c:
-        assert "お困り" in chat(c, "はい", sid)["reply"]
+        assert "解決しましたか" in chat(c, "パスワードを忘れました", sid)["reply"]
 
 
 def test_account_override_needs_dev_login(settings):
