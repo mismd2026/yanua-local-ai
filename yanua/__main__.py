@@ -4,7 +4,7 @@
     python -m yanua search "在宅勤務は週何日？" --department 営業部
     python -m yanua docs                                 # 取り込んだ文書の一覧
     python -m yanua ask "在宅勤務は週何日？" --department 営業部   # Ollamaで回答を作る
-    python -m yanua serve --port 8000                    # HTTP API を起動する
+    python -m yanua serve --dev-login                    # Web画面向けの API を起動する（開発用ログイン）
 
     python -m yanua hr-mapping-draft 人事出力.csv          # 人事データの対応表の下書きを作る
     python -m yanua hr-import 人事出力.csv --mapping 対応表.json   # 人事データを取り込む
@@ -173,7 +173,17 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--debug-frames", type=Path, help="話し手の読み取りに使った画像を保存する（位置や色の調整用）")
     llm_options(s)
 
-    s = sub.add_parser("serve", help="HTTP API を起動する")
+    s = sub.add_parser("serve", help="Web画面・クライアントアプリ向けの API を起動する（docs/screens.md）")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--dev-login", action="store_true",
+                   help="開発用ログイン（SSOなしで社員番号を選ぶ）。127.0.0.1 で待ち受けるときだけ使える")
+    s.add_argument("--chat-db", type=Path, default=Path("data/chat.db"), help="会話の途中の状態の保存先")
+    s.add_argument("--roles", type=Path, default=Path("config/roles.json"), help="役割の設定")
+    s.add_argument("--helpdesk-data", type=Path, default=DEFAULT_HELPDESK_DATA)
+    llm_options(s)
+
+    s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--debug", action="store_true", help="LLMが実際に返した文（model_text）も応答に含める。評価・調査用")
@@ -187,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
         return _models(args)
 
     if args.command == "serve":
+        return _serve(args)
+
+    if args.command == "serve-legacy":
         if not Store(args.db).documents():
             print(f"{args.db} に文書がありません。先に ingest を実行してください。")
             return 1
@@ -529,6 +542,37 @@ def _meeting(args, store: Store) -> int:
         print(f"話し手：{len(result.segments)} 件の発言のうち {info['speakers_found']} 件で、画面から名前を読み取りました。")
     for f in result.files:
         print(f"→ {f}")
+    return 0
+
+
+def _serve(args) -> int:
+    from .api import Settings, create_app
+    from .api.roles import RoleConfigError, load_roles
+
+    if not Store(args.db).documents():
+        print(f"{args.db} に文書がありません。先に ingest を実行してください。")
+        return 1
+    settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
+                        roles_path=args.roles, top_k=args.top_k, host=args.host, dev_login=args.dev_login)
+    try:
+        settings.check()
+        load_roles(settings.roles_path)
+    except (ValueError, RoleConfigError) as e:
+        print(e)
+        return 1
+    llm = OllamaChat(args.model, args.ollama)
+    try:
+        llm.check()
+    except LLMError as e:
+        print(e)
+        return 1
+    import uvicorn
+
+    app = create_app(settings, llm)
+    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {args.model}）。止めるには Ctrl+C")
+    if args.dev_login:
+        print(f"開発用ログインが有効です。API の一覧: http://{args.host}:{args.port}/api/docs")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
 
