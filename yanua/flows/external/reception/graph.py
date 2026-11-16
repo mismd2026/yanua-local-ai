@@ -112,7 +112,7 @@ def as_company_voice(text: str) -> str:
 
 
 def build_app(store: Store, llm: ChatModel, data_dir: Path, today: date | None = None, top_k: int = 5,
-              passes_dir: Path | None = None):
+              passes_dir: Path | None = None, checkpointer=None):
     """受付のグラフを作る。store は社外公開の文書・人事データ・来訪予定を持つ保存先。
 
     passes_dir を渡すと、インビテーションコードで受け付けたときに印刷用の入館票（HTML）をそこに書き出す。
@@ -352,4 +352,5 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, today: date | None =
     for name in ("welcome", "relay", "take_contact", "claim", "sales", "vendor", "done"):
         g.add_edge(name, "record")
     g.add_edge("record", END)
-    return g.compile(checkpointer=InMemorySaver())
+    # 画面（受付端末）からは SQLite のチェックポイントを渡す（再起動しても会話が続く）
+    return g.compile(checkpointer=checkpointer or InMemorySaver())

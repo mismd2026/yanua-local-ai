@@ -5,6 +5,11 @@ import Login from "./pages/Login";
 import Home from "./pages/Home";
 import Chat from "./pages/Chat";
 import Jobs from "./pages/Jobs";
+import Notifications from "./pages/Notifications";
+import Reception from "./pages/Reception";
+import Tickets from "./pages/Tickets";
+import Visits from "./pages/Visits";
+import VisitsAll from "./pages/VisitsAll";
 
 type State = { kind: "loading" } | { kind: "out"; notice?: string } | { kind: "in"; me: Me } | { kind: "error"; message: string };
 
@@ -63,9 +68,43 @@ export default function App() {
         <button className="link" onClick={() => void logout()}>ログアウト</button>
       </header>
       <main>
-        {path === "/chat" ? <Chat me={me} /> : path === "/jobs" ? <Jobs me={me} /> : path === "/" ? <Home me={me} /> : <NotFound />}
+        <Page path={path} me={me} />
       </main>
     </div>
+  );
+}
+
+// 画面の URL → 画面。使えるかどうか（permissions）はメニューと同じ決まりで見る。守りは API の側
+function Page({ path, me }: { path: string; me: Me }) {
+  const can = (p: string) => me.permissions.includes(p);
+  switch (path) {
+    case "/":
+      return <Home me={me} />;
+    case "/chat":
+      return <Chat me={me} />;
+    case "/jobs":
+      return <Jobs me={me} />;
+    case "/notifications":
+      return can("notifications") ? <Notifications /> : <NoPermission />;
+    case "/visits":
+      return can("visits.own") ? <Visits /> : <NoPermission />;
+    case "/visits/all":
+      return can("visits.all") ? <VisitsAll /> : <NoPermission />;
+    case "/reception":
+      return can("reception.records") ? <Reception /> : <NoPermission />;
+    case "/tickets":
+      return can("tickets") ? <Tickets /> : <NoPermission />;
+    default:
+      return <NotFound />;
+  }
+}
+
+function NoPermission() {
+  return (
+    <section className="card">
+      <h1>この画面を使う権限がありません</h1>
+      <p><a href="/" onClick={(e) => { e.preventDefault(); navigate("/"); }}>ホームに戻る</a></p>
+    </section>
   );
 }
 

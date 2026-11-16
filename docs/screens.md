@@ -44,6 +44,9 @@
 
 - 社内の画面は1つにまとめ、役割に応じてメニューを出し分けます
 - 受付端末は別の画面です。社内の画面のログインは使えず、受付端末のトークンは `/api/kiosk/...` 以外では拒否されます
+- 端末トークンは `Authorization: Bearer ...` で送ります。`/api/kiosk/...` は端末トークン専用で、社内のログインのクッキーでは使えません（例外なし）。端末トークンでほかの API を呼ぶと拒否します。端末の登録は管理者の `/api/admin/kiosk-devices` です
+- 入館票は、受付端末の画面が照合の返事（予定）から作って印刷します。サーバーには入館票を残しません
+- コードを1分に10回を超えて間違えた端末は、しばらく照合しません。返事は間違えたときとまったく同じにし、止めているかどうかを返事から分からせません。受付端末の画面は、自分で数えた失敗の回数（1分に3回から）で「受付の者をお呼びください」の案内を出します
 - 電話・Web の受付は、受付端末と同じ受付の API を使います（電話は前身の ai-callcenter-ollama の音声の仕組みからつなぐ）
 
 ## 4. 画面の一覧
@@ -89,10 +92,10 @@
 | ID | 画面 | 主な操作 | 呼ぶ API | 関連 | 段階 |
 |---|---|---|---|---|---|
 | S-40 | 受付 | 挨拶→「コードをお持ちの方」「お持ちでない方」→コードの入力、または用件の会話 | `POST /api/kiosk/sessions`、`POST /api/kiosk/sessions/{id}/messages` | K-043, K-017 | 2 |
-| S-41 | 予定の表示と入館票 | 照合できた予定の表示、入館票の印刷、担当者へのお知らせ | `POST /api/kiosk/check-in`、`GET /api/kiosk/passes/{id}.html` | K-043, K-018 | 2 |
+| S-41 | 予定の表示と入館票 | 照合できた予定の表示、入館票の印刷、担当者へのお知らせ | `POST /api/kiosk/check-in`（入館票は画面が返事から作る） | K-043, K-018 | 2 |
 
 - 受付端末の画面にはメニューもリンクも置かず、一定時間触られなければ最初の画面に戻ります
-- 違う日・間違い・取り消しのコードは同じ返事にします（今の visits.py と同じ）。API も同じ形・同じ時間で返します
+- 違う日・間違い・取り消しのコードは同じ返事にします（今の visits.py と同じ）。API も同じ形・同じ時間で返します（受付の API は、決まった時間（既定0.6秒）より早くは返しません）
 
 ### 管理者
 
@@ -102,7 +105,7 @@
 | S-51 | 人事データ | 人事・管理者 | ファイルを選ぶ→対応表の下書き→確認→取り込み→結果（在籍・退職・エラー） | `POST /api/hr/mapping-draft`、`POST /api/hr/imports`、`GET /api/hr/imports` | K-016 | 4 |
 | S-52 | 設定 | 管理者（種類によって総務・情シス・人事も） | 設定の種類を選ぶ→今の中身→編集→検証（エラーの表示）→保存。変更の履歴と前の版への戻し | `GET /api/settings`、`GET /api/settings/{kind}`、`POST /api/settings/{kind}/validate`、`PUT /api/settings/{kind}`、`GET /api/settings/{kind}/history` | K-042, K-009 | 4 |
 | S-53 | 通信とモデル | 管理者 | 許可リストの宛先、モデルの一覧・版・ハッシュ、入手（pull）・照合（verify） | `GET /api/models`、`POST /api/models/{name}/pull`（ジョブ）、`POST /api/models/{name}/verify`、設定の `network` | K-023, K-011 | 4 |
-| S-54 | 役割の割り当て | 管理者 | 人ごとの役割、SSO のグループとの対応、受付端末の登録・取り消し | `GET /api/roles`、`PUT /api/roles/{employee_no}`、`POST /api/kiosk/devices`、`DELETE /api/kiosk/devices/{id}` | K-049 | 4 |
+| S-54 | 役割の割り当て | 管理者 | 人ごとの役割、SSO のグループとの対応、受付端末の登録・取り消し | `GET /api/roles`、`PUT /api/roles/{employee_no}`、`POST /api/admin/kiosk-devices`、`DELETE /api/admin/kiosk-devices/{id}` | K-049 | 4 |
 | S-55 | 監査ログ | 管理者 | 誰が・いつ・何をしたか（質問・出典・設定変更・ログイン）の検索 | `GET /api/audit` | K-009 | 4 |
 | S-56 | 評価 | 管理者 | 質問セットでの採点の実行、モデルごとの比較 | `POST /api/eval/runs`（ジョブ）、`GET /api/eval/runs` | K-005, K-006 | 5 |
 
