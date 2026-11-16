@@ -52,7 +52,8 @@ class HelpdeskSessions:
         Path(chat_db_path).parent.mkdir(parents=True, exist_ok=True)
         # チェックポイント用と、会話の一覧（chat_sessions）用で接続を分ける（書き込みのまとまりが混ざらないように）
         self._saver_conn = sqlite3.connect(str(chat_db_path), check_same_thread=False, timeout=10)
-        self._conn = sqlite3.connect(str(chat_db_path), check_same_thread=False, timeout=10)
+        # 会話の一覧用の接続は自動で確定する（書き込みを開いたままにして、もう片方を待たせないため）
+        self._conn = sqlite3.connect(str(chat_db_path), check_same_thread=False, timeout=10, isolation_level=None)
         self._conn.executescript(SCHEMA)
         self.saver = SqliteSaver(self._saver_conn)
         self.saver.setup()
@@ -86,11 +87,13 @@ class HelpdeskSessions:
             old = [r[0] for r in self._conn.execute(
                 "SELECT session_id FROM chat_sessions WHERE last_used < ? OR finished = 1 AND last_used < ?",
                 (limit, limit))]
+            # 会話の一覧の行は、1つ消すたびに確定する。確定しないまま次のチェックポイントを消そうとすると、
+            # もう片方の接続（チェックポイント用）が書き込みを待たされて「database is locked」になる
             for sid in old:
                 self.saver.delete_thread(sid)
                 self._conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (sid,))
+                self._conn.commit()
                 self._session_locks.pop(sid, None)
-            self._conn.commit()
 
     def _reply(self, session_id: str, state: dict) -> dict:
         finished = "__interrupt__" not in state

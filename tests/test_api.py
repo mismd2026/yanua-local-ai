@@ -394,6 +394,25 @@ def test_helpdesk_continues_after_restart(settings):
         assert "解決しましたか" in chat(c, "パスワードを忘れました", sid)["reply"]
 
 
+def test_many_expired_sessions_are_removed(settings):
+    """期限切れの会話が2つ以上あっても、消すときに「database is locked」にならない（実機で起きた）。"""
+    import sqlite3
+
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        login(c, "10002")
+        sids = [c.post("/api/chat/sessions", json={}, headers=H).json()["session_id"] for _ in range(3)]
+    db = sqlite3.connect(settings.chat_db_path)
+    with db:
+        db.execute("UPDATE chat_sessions SET last_used = '2000-01-01T00:00:00+00:00'")
+    db.close()
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        login(c, "10002")
+        r = c.post("/api/chat/sessions", json={}, headers=H)
+        assert r.status_code == 201
+        for sid in sids:   # 消えた会話には送れない
+            assert c.post(f"/api/chat/sessions/{sid}/messages", json={"text": "はい"}, headers=H).status_code == 404
+
+
 def test_account_override_needs_dev_login(settings):
     settings.dev_login = False
     app = create_app(settings, FakeLLM())
