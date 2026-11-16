@@ -47,6 +47,22 @@ describe("S-10 チャット：社内文書に質問", () => {
     expect(screen.queryByRole("complementary", { name: "出典" })).not.toBeInTheDocument();
   });
 
+  it("出典の欄は、ヘルプデスクのタブに切り替えたら閉じる", async () => {
+    fakeApi({
+      "POST /api/ask/stream": sse([...PROGRESS, ["result", ANSWER]]),
+      "GET /api/documents/A01": { doc_id: "A01", title: "就業規則", updated: "", sections: [{ section: "在宅勤務", text: "週3日まで。" }] },
+    });
+    render(<Chat me={ME_EMPLOYEE} />);
+    await userEvent.type(screen.getByLabelText("メッセージ"), "在宅勤務は？{Enter}");
+    await userEvent.click(await screen.findByRole("button", { name: "就業規則（在宅勤務）" }));
+    expect(await screen.findByRole("complementary", { name: "出典" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "ヘルプデスクに相談" }));
+    expect(screen.queryByRole("complementary", { name: "出典" })).not.toBeInTheDocument();
+    // 質問のタブに戻っても、会話は残っている
+    await userEvent.click(screen.getByRole("tab", { name: "社内文書に質問" }));
+    expect(screen.getByText("在宅勤務は週3日までです[1]。")).toBeInTheDocument();
+  });
+
   it("答えられないときは出典を出さない", async () => {
     fakeApi({
       "POST /api/ask/stream": sse([...PROGRESS, ["result", { answer: "社内の資料からは見つかりませんでした。", sources: [{ doc_id: "A01", title: "就業規則", section: "" }], refused: true, elapsed_sec: 0.5 }]]),

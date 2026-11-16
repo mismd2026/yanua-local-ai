@@ -55,7 +55,10 @@ export default function App() {
     <div className="layout">
       <header className="topbar">
         <a href="/" className="brand" onClick={(e) => { e.preventDefault(); navigate("/"); }}>Yanua</a>
-        <span className="who">{me.dept}　{me.name} さん</span>
+        <span className="who">
+          {me.dept}　{me.name} さん
+          <span className="roles" aria-label="役割">{rolesLabel(me.roles)}</span>
+        </span>
         <button className="link" onClick={() => void logout()}>ログアウト</button>
       </header>
       <main>
@@ -63,6 +66,12 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+// 全員が持つ「社員」は、ほかの役割があるときは省く（例：情シス・管理者）
+export function rolesLabel(roles: string[]): string {
+  const extra = roles.filter((r) => r !== "社員");
+  return (extra.length ? extra : roles).join("・");
 }
 
 function NotFound() {

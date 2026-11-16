@@ -78,6 +78,14 @@ def build_messages(question: str, hits: list[Hit], system_prompt: str = SYSTEM_P
 
 
 _CITATION = re.compile(r"\[(\d+)\]")
+# 文の頭に付いた出典の番号（「[1] 就業規則の…」。小さなモデルの書き方の癖）
+_LEADING_CITATIONS = re.compile(r"^\s*(?:\[\d+\]\s*[、,，:：]?\s*)+")
+
+
+def strip_leading_citations(text: str) -> str:
+    """文の頭の出典の番号だけを外す。文中・文末の番号はそのまま。番号しかないときは元のまま返す。"""
+    rest = _LEADING_CITATIONS.sub("", text, count=1)
+    return rest if rest.strip() else text
 
 
 def cited_hits(text: str, hits: list[Hit]) -> list[Hit]:
@@ -124,4 +132,5 @@ def answer_question(store: Store, llm: ChatModel, question: str, department: str
     cited = cited_hits(text, hits)
     # 番号を付け忘れた回答は、いちばん近い検索結果を出典とする
     sources = [source_of(h) for h in (cited or hits[:1])]
-    return Answer(text, sources, refused=False, model_text=text)
+    # 出典は番号から決めたあとなので、文の頭の番号は外してよい（model_text には元の文を残す）
+    return Answer(strip_leading_citations(text), sources, refused=False, model_text=text)

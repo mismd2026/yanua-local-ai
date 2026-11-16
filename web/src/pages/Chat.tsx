@@ -22,6 +22,11 @@ export default function Chat({ me }: { me: Me }) {
   const canHelpdesk = me.permissions.includes("helpdesk");
   const [mode, setMode] = useState<Mode>(canAsk ? "ask" : "helpdesk");
   const [opened, setOpened] = useState<Source | null>(null);
+  // 出典の欄はタブごとのものなので、切り替えたら閉じる
+  const switchTo = (m: Mode) => {
+    if (m !== mode) setOpened(null);
+    setMode(m);
+  };
 
   if (!canAsk && !canHelpdesk) {
     return <section className="card"><p className="muted">チャットを使う権限がありません。</p></section>;
@@ -32,12 +37,12 @@ export default function Chat({ me }: { me: Me }) {
       <div className="chat-main">
         <div className="tabs" role="tablist" aria-label="相談の種類">
           {canAsk && (
-            <button role="tab" aria-selected={mode === "ask"} className={mode === "ask" ? "tab on" : "tab"} onClick={() => setMode("ask")}>
+            <button role="tab" aria-selected={mode === "ask"} className={mode === "ask" ? "tab on" : "tab"} onClick={() => switchTo("ask")}>
               社内文書に質問
             </button>
           )}
           {canHelpdesk && (
-            <button role="tab" aria-selected={mode === "helpdesk"} className={mode === "helpdesk" ? "tab on" : "tab"} onClick={() => setMode("helpdesk")}>
+            <button role="tab" aria-selected={mode === "helpdesk"} className={mode === "helpdesk" ? "tab on" : "tab"} onClick={() => switchTo("helpdesk")}>
               ヘルプデスクに相談
             </button>
           )}
@@ -198,14 +203,14 @@ function Log({ messages, empty, busy, stage, onOpen }: {
   stage?: string;
   onOpen: (s: Source) => void;
 }) {
-  const end = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const seconds = useElapsed(busy);
   useEffect(() => {
-    end.current?.scrollIntoView?.({ block: "end" });
+    if (box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [messages.length, busy, stage]);
 
   return (
-    <div className="log" aria-live="polite">
+    <div className="log" aria-live="polite" ref={box}>
       {messages.length === 0 && !busy && <p className="muted">{empty}</p>}
       {messages.map((m) => (
         <div key={m.id} className={`bubble ${m.from}${m.refused ? " refused" : ""}`}>
@@ -229,7 +234,6 @@ function Log({ messages, empty, busy, stage, onOpen }: {
           <p className="text">{stage || "考えています"}…{seconds >= 3 ? `（${seconds}秒）` : ""}</p>
         </div>
       )}
-      <div ref={end} />
     </div>
   );
 }
@@ -268,6 +272,8 @@ function Composer({ disabled, placeholder, onSend }: { disabled: boolean; placeh
 function SourcePanel({ source, onClose }: { source: Source; onClose: () => void }) {
   const [doc, setDoc] = useState<DocumentBody | null>(null);
   const [error, setError] = useState("");
+  const panel = useRef<HTMLElement>(null);
+  const head = useRef<HTMLDivElement>(null);
   const target = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -279,12 +285,16 @@ function SourcePanel({ source, onClose }: { source: Source; onClose: () => void 
   }, [source.doc_id]);
 
   useEffect(() => {
-    target.current?.scrollIntoView?.({ block: "start" });
+    // 欄の中だけを動かして、その節を文書名・閉じるボタンのすぐ下に出す（ページ全体は動かさない）
+    const p = panel.current;
+    const t = target.current;
+    if (!p) return;
+    p.scrollTop = t ? Math.max(0, t.offsetTop - (head.current?.offsetHeight ?? 0) - 8) : 0;
   }, [doc, source.section]);
 
   return (
-    <aside className="panel" aria-label="出典">
-      <div className="panel-head">
+    <aside className="panel" aria-label="出典" ref={panel}>
+      <div className="panel-head" ref={head}>
         <h2>{doc?.title ?? source.title}</h2>
         <button className="link" onClick={onClose}>閉じる</button>
       </div>

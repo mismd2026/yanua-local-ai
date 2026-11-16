@@ -59,7 +59,8 @@ input, textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px
 .layout { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar { display: flex; align-items: center; gap: 1rem; padding: 0.6rem 1rem; background: var(--card); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .brand { font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text); margin-right: auto; }
-.who { color: var(--muted); }
+.who { color: var(--muted); display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.roles { font-size: 0.8rem; border: 1px solid var(--line); border-radius: 999px; padding: 0 0.6em; }
 main { padding: 1.2rem 1rem; max-width: 1200px; width: 100%; margin: 0 auto; flex: 1; }
 .page-title { margin-bottom: 1rem; }
 
@@ -100,7 +101,8 @@ main { padding: 1.2rem 1rem; max-width: 1200px; width: 100%; margin: 0 auto; fle
 .composer textarea { resize: vertical; }
 .actions { display: flex; justify-content: flex-end; }
 
-.panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.2rem; max-height: 80vh; overflow-y: auto; }
-.panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+/* 出典の欄：画面の上に留め、欄の中だけを動かす。文書名と閉じるボタンは欄の上に固定する */
+.panel { position: sticky; top: 1rem; align-self: start; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 0 1.2rem 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; }
+.panel-head { position: sticky; top: 0; z-index: 1; background: var(--card); padding: 1rem 0 0.5rem; display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; border-bottom: 1px solid var(--line); margin-bottom: 0.5rem; }
 .doc section { padding: 0.4rem 0.6rem; border-radius: 6px; }
 .doc section.hit { background: var(--hit); }

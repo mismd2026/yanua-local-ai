@@ -1,7 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { rolesLabel } from "./App";
+import Login from "./pages/Login";
 import { fakeApi, ME_EMPLOYEE, NOT_LOGGED_IN } from "./test/fakeApi";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -39,6 +40,20 @@ describe("S-01 ログイン", () => {
     const login = calls.filter((c) => c.method === "POST");
     expect(login.length).toBeGreaterThan(0);
     expect(login.every((c) => c.headers["X-Yanua-Client"])).toBe(true);
+  });
+
+  it("ログアウトの知らせは、ログインを試してエラーが出たら消す", async () => {
+    fakeApi({
+      "GET /api/me": () => NOT_LOGGED_IN,
+      "GET /api/auth/login": { method: "dev" },
+      "POST /api/auth/dev-login": () => ({ status: 401, json: { error: { code: "login_failed", message: "その社員番号ではログインできません" } } }),
+    });
+    render(<Login notice="ログアウトしました" onLoggedIn={() => {}} />);
+    expect(screen.getByText("ログアウトしました")).toBeInTheDocument();
+    await userEvent.type(await screen.findByLabelText("社員番号"), "99999");
+    await userEvent.click(screen.getByRole("button", { name: "ログイン" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("その社員番号ではログインできません");
+    expect(screen.queryByText("ログアウトしました")).not.toBeInTheDocument();
   });
 
   it("SSO が設定されていないときは、そのことを出す", async () => {
@@ -102,6 +117,13 @@ describe("S-02 ホーム", () => {
     expect(screen.getByText(/実行中・取り込みの準備/)).toBeInTheDocument();
     expect(screen.getAllByRole("progressbar")).toHaveLength(1);
     await waitFor(() => expect(screen.queryByRole("heading", { name: "お知らせ" })).not.toBeInTheDocument());
+  });
+
+  it("右上に役割を出す。ほかの役割があれば「社員」は省く", async () => {
+    fakeApi({ "GET /api/me": { ...ME_EMPLOYEE, roles: ["社員", "情シス", "管理者"] }, "GET /api/jobs": { jobs: [] } });
+    render(<App />);
+    expect(await screen.findByLabelText("役割")).toHaveTextContent("情シス・管理者");
+    expect(rolesLabel(["社員"])).toBe("社員");
   });
 
   it("使える操作がなければ、メニューにチャットを出さない", async () => {

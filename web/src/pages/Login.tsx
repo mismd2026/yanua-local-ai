@@ -9,6 +9,8 @@ export default function Login({ notice, onLoggedIn }: { notice?: string; onLogge
   const [employeeNo, setEmployeeNo] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // 「ログアウトしました」などの知らせは、ログインを試したら消す（エラーと並ばないように）
+  const [showNotice, setShowNotice] = useState(true);
 
   useEffect(() => {
     api<{ method: string }>("GET", "/api/auth/login")
@@ -22,6 +24,7 @@ export default function Login({ notice, onLoggedIn }: { notice?: string; onLogge
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    setShowNotice(false);
     const no = employeeNo.trim();
     if (!no) {
       setError("社員番号を入れてください");
@@ -42,7 +45,7 @@ export default function Login({ notice, onLoggedIn }: { notice?: string; onLogge
     <main className="login">
       <section className="card">
         <h1>Yanua にログイン</h1>
-        {notice && <p className="notice" role="status">{notice}</p>}
+        {notice && showNotice && <p className="notice" role="status">{notice}</p>}
         {method.kind === "loading" && <p className="muted">読み込んでいます…</p>}
         {method.kind === "unavailable" && <p className="error" role="alert">{method.message}</p>}
         {method.kind === "dev" && (
