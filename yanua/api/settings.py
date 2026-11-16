@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 @dataclass
@@ -30,6 +31,8 @@ class Settings:
     # 文書の取り込み（管理者のジョブ）で指定できるフォルダ。ここの下にあるフォルダだけを取り込む
     ingest_roots: list[Path] = field(default_factory=lambda: [Path("demo/company")])
     job_workers: int = 1                 # 重いジョブを同時に流す数（GPU がないので既定は1）
+    # 組み立てた Web画面（cd web && npm run build）。なければ API だけを動かす
+    web_dist: Path | None = WEB_DIST
 
     @property
     def local_only(self) -> bool:

@@ -56,7 +56,8 @@ def settings(tmp_path):
     hr.import_employees(s.db, DEMO / "hr" / "hr_export_sample.csv", hr.load_mapping(DEMO / "hr" / "mapping_sample.json"))
     s.close()
     return Settings(db_path=db, chat_db_path=tmp_path / "chat.db", helpdesk_data=DEMO / "flows" / "helpdesk",
-                    roles_path=ROOT / "config" / "roles.json", dev_login=True, ingest_roots=[DEMO])
+                    roles_path=ROOT / "config" / "roles.json", dev_login=True, ingest_roots=[DEMO],
+                    web_dist=None)
 
 
 @pytest.fixture
@@ -428,3 +429,71 @@ def test_account_override_needs_dev_login(settings):
         c.cookies.set(auth.COOKIE, token)
         r = c.post("/api/chat/sessions", json={"account": "eigyo-common"}, headers=H)
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------- 出典を開く（S-10）
+
+
+def test_document_sections_only_for_viewable(client):
+    login(client, "10004")   # 営業部
+    doc = client.get("/api/documents/A01").json()
+    assert doc["doc_id"] == "A01" and doc["title"] and doc["sections"]
+    assert all(set(s) == {"section", "text"} for s in doc["sections"])
+    assert "path" not in doc
+    # 検索のために付けた「文書名 / 見出し」の行は本文に入れない
+    assert not any(s["text"].startswith(doc["title"]) for s in doc["sections"])
+    # 経理部だけの文書は、ない文書と同じ返事にする
+    hidden = client.get("/api/documents/K01")
+    missing = client.get("/api/documents/ZZZ99")
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.json() == missing.json()
+    login(client, "10001")   # 経理部
+    assert client.get("/api/documents/K01").status_code == 200
+
+
+def test_document_needs_login(client):
+    assert client.get("/api/documents/A01").status_code == 401
+
+
+# ---------------------------------------------------------------- Web画面の配信
+
+
+@pytest.fixture
+def web_client(settings, tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>Yanua</title>", encoding="utf-8")
+    (dist / "assets" / "app-abc.js").write_text("console.log(1)", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("外のファイル", encoding="utf-8")
+    settings.web_dist = dist
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        yield c
+
+
+def test_web_serves_index_for_screens(web_client):
+    for path in ("/", "/login", "/chat"):
+        r = web_client.get(path)
+        assert r.status_code == 200 and "<title>Yanua</title>" in r.text, path
+        assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    r = web_client.get("/assets/app-abc.js")
+    assert r.status_code == 200 and "immutable" in r.headers["cache-control"]
+    assert web_client.head("/").status_code == 200
+
+
+def test_web_does_not_cover_api_kiosk_or_missing_files(web_client):
+    r = web_client.get("/api/nothing")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+    assert web_client.get("/kiosk").status_code == 404
+    assert web_client.get("/assets/missing.js").status_code == 404
+    assert web_client.get("/health").json()["status"] == "ok"
+    assert web_client.get("/api/me").status_code == 401
+
+
+def test_web_does_not_serve_outside_dist(web_client):
+    for path in ("/../secret.txt", "/%2e%2e/secret.txt", "/assets/..%2f..%2fsecret.txt"):
+        r = web_client.get(path)
+        assert "外のファイル" not in r.text, path
+
+
+def test_no_web_without_build(client):
+    assert client.get("/").status_code == 404

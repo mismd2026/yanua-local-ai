@@ -584,6 +584,10 @@ def _serve(args) -> int:
 
     app = create_app(settings, llm)
     print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {args.model}）。止めるには Ctrl+C")
+    if settings.web_dist and (settings.web_dist / "index.html").is_file():
+        print(f"Web画面: http://{args.host}:{args.port}/")
+    else:
+        print("Web画面はまだ組み立てられていません（cd web && npm ci && npm run build）。API だけを動かします")
     if args.dev_login:
         print(f"開発用ログインが有効です。API の一覧: http://{args.host}:{args.port}/api/docs")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

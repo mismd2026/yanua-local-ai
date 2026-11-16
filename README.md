@@ -24,6 +24,7 @@ yanua/flows/internal/      社内向けの会話の流れ（helpdesk）
 yanua/flows/external/      社外向けの会話の流れ（reception）
 yanua/paper/               紙の書類のPDF（文字の取り出し・OCR、仕分けのルール、Word・Excelへの変換）
 yanua/api/                 Web画面・クライアントアプリ向けの API（ログイン・役割・ジョブ・会話）
+web/                       Web画面（React＋TypeScript・Vite）。組み立てた web/dist を API と同じサーバーから配る
 yanua/meeting/             打ち合わせの記録（文字起こし・画面の名前から話し手・要約・議事録）
 yanua/netpolicy.py, models.py  通信の方針（許可リスト）と、モデルの入手・ハッシュでの照合
 config/network.json        通信してよい宛先と、入手するモデルの一覧
@@ -85,6 +86,26 @@ curl -b c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
 ```
 
 前の API（`POST /ask` だけ）は `python -m yanua serve-legacy` で起動できます。
+
+### Web画面（web/）
+
+段階1の画面（S-01 ログイン・S-02 ホーム・S-10 チャット）があります。Node.js 20.19 以上で組み立てます。組み立てるときだけ npm からライブラリを入手し、動かすときは社外と通信しません。
+
+```bash
+cd web
+npm ci            # ライブラリを入れる（版は package-lock.json で固定）
+npm test          # 画面のテスト（偽の API で確かめる。サーバーも Ollama も使わない）
+npm run build     # 組み立てる → web/dist
+cd ..
+python -m yanua serve --dev-login   # http://127.0.0.1:8000/ で画面が開く
+```
+
+画面を直しながら試すときは、API を `serve --dev-login` で動かしたまま、`cd web && npm run dev` で http://127.0.0.1:5173/ を開きます（/api は 8000 番に渡します）。
+
+- **ログイン（S-01）**：開発用ログインのときは社員番号を入れます。SSO（K-008）はまだです
+- **ホーム（S-02）**：使える画面のメニュー（`/api/me` の permissions で出し分け）、実行中のジョブ。お知らせの件数は、お知らせの API（段階2）ができたら出ます
+- **チャット（S-10）**：「社内文書に質問」は出典つきの回答で、出典を押すと文書のその節を横に開きます（`GET /api/documents/{doc_id}`。見られる文書だけ）。「ヘルプデスクに相談」は本人確認を省いてお困りごとから始め、解決しなければ問い合わせ票の番号を出します
+- 画面でボタンを隠すのは使いやすさのためです。権限は API の側で確かめます
 
 ### 回答
 
