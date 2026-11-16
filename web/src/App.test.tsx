@@ -145,6 +145,21 @@ describe("S-02 ホーム", () => {
     expect(screen.getByText("実行中のジョブはありません。")).toBeInTheDocument();
   });
 
+  it("実行中のジョブから、ジョブの一覧に移れる", async () => {
+    fakeApi({
+      "GET /api/me": ME_EMPLOYEE,
+      "GET /api/jobs": { jobs: [{ job_id: "j1", kind: "ingest", status: "実行中", progress: 10, stage: "", created_at: "" }] },
+      "GET /api/jobs/j1": { job_id: "j1", kind: "ingest", status: "実行中", progress: 10, stage: "", created_at: "" },
+    });
+    render(<App />);
+    await userEvent.click(await screen.findByRole("link", { name: "文書の取り込み" }));
+    expect(window.location.pathname + window.location.search).toBe("/jobs?job=j1");
+    expect(await screen.findByRole("complementary", { name: "ジョブの詳しい内容" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("link", { name: "Yanua" }));
+    await userEvent.click(await screen.findByRole("link", { name: "ジョブの一覧へ" }));
+    expect(window.location.pathname).toBe("/jobs");
+  });
+
   it("メニューからチャットに移れる", async () => {
     fakeApi({ "GET /api/me": ME_EMPLOYEE, "GET /api/jobs": { jobs: [] } });
     render(<App />);

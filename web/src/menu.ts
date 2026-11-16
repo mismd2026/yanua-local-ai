@@ -17,6 +17,13 @@ export const MENU: MenuItem[] = [
     description: "社内の規程や手順を質問できます。パソコンや機器のお困りごとは、ヘルプデスクに相談できます。",
     needs: ["ask", "helpdesk"],
   },
+  {
+    id: "S-03",
+    path: "/jobs",
+    label: "ジョブ",
+    description: "文書の取り込みなど、時間のかかる処理の進み具合と結果を見られます。取り消しもできます。",
+    needs: ["jobs.own"],
+  },
 ];
 
 export function menuFor(permissions: string[]): MenuItem[] {

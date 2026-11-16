@@ -12,6 +12,7 @@
     GET    /api/documents          見られる文書の一覧
     GET    /api/documents/{doc_id} 文書の中身（出典を開く。見られる文書だけ）
     POST   /api/documents/ingest   文書の取り込み（管理者・ジョブ）
+    GET    /api/documents/ingest/sources  取り込めるフォルダの一覧（管理者。設定の ingest_roots とその直下）
     POST   /api/chat/sessions                  ヘルプデスクの会話を始める
     POST   /api/chat/sessions/{id}/messages    返事を送る
     DELETE /api/chat/sessions/{id}             会話をやめる
@@ -310,6 +311,24 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
         if not doc:
             raise not_found("文書")
         return doc
+
+    @app.get("/api/documents/ingest/sources")
+    def ingest_sources(user: User = Depends(require("documents.ingest"))):
+        out, seen = [], set()
+        for root in settings.ingest_roots:
+            r = root.resolve()
+            if not r.is_dir():
+                continue
+            for d in [r, *sorted(c for c in r.iterdir() if c.is_dir() and not c.name.startswith("."))]:
+                if d in seen:
+                    continue
+                seen.add(d)
+                try:
+                    label = str(d.relative_to(Path.cwd().resolve()))
+                except ValueError:
+                    label = str(d)
+                out.append({"path": str(d), "label": label})
+        return {"sources": out}
 
     @app.post("/api/documents/ingest", status_code=202)
     def ingest(req: Ingest, user: User = Depends(require("documents.ingest"))):

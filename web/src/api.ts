@@ -139,10 +139,20 @@ export interface DocumentBody {
 export interface Job {
   job_id: string;
   kind: string;
+  owner?: string;
   status: string;
   progress: number;
   stage: string;
+  params?: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
 }
+
+// ジョブの種類の表示名（yanua/api/app.py で register したもの）
+export const JOB_NAMES: Record<string, string> = { ingest: "文書の取り込み" };
+export const jobName = (kind: string) => JOB_NAMES[kind] ?? kind;
 
 export const RUNNING_STATUSES = ["待ち", "実行中"];

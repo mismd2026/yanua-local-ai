@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 const EVENT = "yanua:navigate";
 
 export function navigate(path: string): void {
-  if (window.location.pathname !== path) {
+  if (window.location.pathname + window.location.search !== path) {
     window.history.pushState(null, "", path);
     window.dispatchEvent(new Event(EVENT));
   }
