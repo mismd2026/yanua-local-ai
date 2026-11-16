@@ -47,6 +47,7 @@ class Settings:
     pdf_max_bytes: int = 50_000_000              # PDF のアップロードの上限（50MB）
     recording_max_bytes: int = 2_000_000_000     # 録画・録音のアップロードの上限（2GB）
     segments_max_bytes: int = 5_000_000          # 文字起こし済みの発言（JSON）の上限
+    work_max_bytes: int = 20_000_000_000         # 作業用フォルダの合計の上限（20GB）。超えるアップロードは断る
     # PDF の仕分け・変換
     paper_inbox: Path = Path("demo/company/paper/inbox")     # 受信箱（スキャナーが PDF を置くフォルダ）
     paper_out: Path = Path("data/paper/sorted")              # 仕分けの保存先（_仕分け記録.csv もここ）

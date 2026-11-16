@@ -6,6 +6,7 @@
 
 import json
 import shutil
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -131,6 +132,26 @@ def test_upload_limits_and_checks(client, settings):
     assert [p.name for p in (settings.work_dir / "uploads").iterdir()] == [body["file_id"] + ".pdf"]
 
 
+def test_upload_rejected_when_work_dir_is_full(client, settings):
+    settings.work_max_bytes = 300
+    login(client, "10002")
+    first = upload(client, "pdf", "a.pdf", b"%PDF-" + b"0" * 195)        # 200 バイト
+    assert first.status_code == 201
+    # 合計が上限を超えるものは断り、受け取りかけたファイルも残さない
+    full = upload(client, "pdf", "b.pdf", b"%PDF-" + b"0" * 195)
+    assert full.status_code == 507 and full.json()["error"]["code"] == "work_full"
+    assert [p.name for p in (settings.work_dir / "uploads").iterdir()] == [first.json()["file_id"] + ".pdf"]
+    # ほかの人のファイルも合計に入る（社員の録音も、総務の PDF と同じ場所を使う）
+    login(client, "10004")
+    assert upload(client, "recording", "r.m4a", b"0" * 150).status_code == 507
+    assert upload(client, "recording", "r.m4a", b"0" * 80).status_code == 201
+    # 期限が来て消えたら、また送れる
+    with sqlite3.connect(settings.db_path) as db:
+        db.execute("UPDATE work_files SET expires_at = '2000-01-01T00:00:00+00:00'")
+    login(client, "10002")
+    assert upload(client, "pdf", "b.pdf", b"%PDF-" + b"0" * 195).status_code == 201
+
+
 def test_bad_segments_json_is_rejected(client):
     login(client, "10004")
     assert upload(client, "segments", "s.json", b"{not json").status_code == 400
@@ -183,8 +204,9 @@ def test_paper_plan_rechoose_execute_and_history(client, settings):
     history = client.get("/api/paper/history").json()["records"]
     assert len(history) == 3 and {h["source"] for h in history} == {"scan_0001.pdf", "scan_0002.pdf", "scan_0005.pdf"}
 
-    # ほかの総務の人には、この予定は見えない（ないものと同じ）
+    # ほかの総務の人には、この予定は見えない（ないものと同じ）。仕分けの記録は総務の全員が見られる
     login(client, "10003")
+    assert client.get("/api/paper/history").json()["records"] == history
     other = client.get(f"/api/paper/plans/{plan_id}")
     assert other.status_code == 404 and other.json() == client.get("/api/paper/plans/nothing").json()
     assert client.post(f"/api/paper/plans/{plan_id}/execute", json={}, headers=H).status_code == 404

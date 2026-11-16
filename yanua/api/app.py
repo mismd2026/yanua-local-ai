@@ -836,6 +836,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
 
     # ------------------------------------------------ ファイルの受け渡し（段階3）
 
+    uploading: dict[str, int] = {}      # 受け取り中のアップロード（番号 → 受け取った大きさ）
+
+    def work_full() -> ApiError:
+        return ApiError(507, "work_full", "サーバーの作業用の場所がいっぱいです。古いファイルは "
+                        f"{settings.file_keep_hours} 時間で消えるので、しばらくしてからもう一度送ってください")
+
     @app.post("/api/uploads", status_code=201)
     async def upload(request: Request, kind: str, name: str = "", user: User = Depends(current_user)):
         if kind not in UPLOAD_KINDS:
@@ -850,11 +856,22 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > limit:
             raise ApiError(413, "too_large", f"ファイルが大きすぎます（上限 {limit // 1_000_000}MB）")
+
+        def used_now() -> int:
+            with closing(connect()) as db:
+                files.cleanup(db, settings.work_dir)
+                return files.total_size(db)
+
+        # 作業用フォルダの合計：置いているファイル＋ほかに受け取り中のファイル＋これから受け取る大きさ
+        used = await run_in_threadpool(used_now)
+        if used + sum(uploading.values()) + (int(declared) if declared and declared.isdigit() else 0) > settings.work_max_bytes:
+            raise work_full()
         file_id = files.new_id()
         folder = settings.work_dir / "uploads"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{file_id}{Path(shown).suffix.lower()}"
         size, head = 0, b""
+        uploading[file_id] = 0
         try:
             with path.open("wb") as out:
                 # 受け取りながら大きさを数え、上限を超えたらその場で止める（全部を受け取ってから断らない）
@@ -862,6 +879,9 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
                     size += len(chunk)
                     if size > limit:
                         raise ApiError(413, "too_large", f"ファイルが大きすぎます（上限 {limit // 1_000_000}MB）")
+                    uploading[file_id] = size
+                    if used + sum(uploading.values()) > settings.work_max_bytes:
+                        raise work_full()
                     if len(head) < 8:
                         head += chunk[:8]
                     out.write(chunk)
@@ -876,9 +896,14 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
                 except (ValueError, AssertionError, UnicodeDecodeError) as e:
                     raise ApiError(400, "invalid_type", "文字起こし済みの発言（JSON）の形が正しくありません") from e
 
+            others = sum(v for k, v in uploading.items() if k != file_id)
+
             def register():
                 with closing(connect()) as db:
                     files.cleanup(db, settings.work_dir)
+                    # 受け取っている間に、ほかのアップロードが終わって置かれた分も入れて、もう一度確かめる
+                    if files.total_size(db) + size + others > settings.work_max_bytes:
+                        raise work_full()
                     return files.add(db, file_id=file_id, owner=user.employee_no, kind=kind, perm=perm, name=shown,
                                      path=path, keep_hours=settings.file_keep_hours)
 
@@ -886,6 +911,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         except BaseException:
             path.unlink(missing_ok=True)
             raise
+        finally:
+            uploading.pop(file_id, None)
 
     def my_file(file_id: str, user: User, kind: str | None = None) -> dict:
         with closing(connect()) as db:

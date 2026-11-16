@@ -4,6 +4,8 @@
   受け取りながら大きさを数え、上限を超えたらその場で止めて消す
 - 置き場所はサーバーの作業用フォルダ（settings.work_dir）。ファイル名はサーバーが決める（送られた名前は表示にだけ使う）
 - アップロードしたファイルも結果のファイルも、期限（settings.file_keep_hours）が来たら消す
+- 作業用フォルダの合計にも上限（settings.work_max_bytes）がある。置いているファイルと、受け取り中のファイルの
+  合計が上限を超えるアップロードは断る（ディスクがいっぱいになって、ほかの処理が止まらないように）
 - 開けるのは、そのファイルを作った人だけ。そのうえで、その種類の操作の権限（perm）を今も持っていること。
   ほかの人のファイル・期限切れ・ないものは、どれも同じ「見つかりません」にする
 """
@@ -68,6 +70,13 @@ def add(db: sqlite3.Connection, *, file_id: str, owner: str, kind: str, perm: st
 def public(f: dict) -> dict:
     """画面に返す項目（置き場所のパスは返さない）。"""
     return {k: f[k] for k in ("file_id", "kind", "name", "size", "created_at", "expires_at")}
+
+
+def total_size(db: sqlite3.Connection) -> int:
+    """作業用フォルダに置いているファイル（期限の来ていないもの）の大きさの合計。"""
+    ensure_schema(db)
+    return db.execute("SELECT COALESCE(SUM(size), 0) FROM work_files WHERE expires_at >= ?",
+                      (_now().isoformat(),)).fetchone()[0]
 
 
 def get(db: sqlite3.Connection, file_id: str, owner: str, kind: str | None = None) -> dict | None:
