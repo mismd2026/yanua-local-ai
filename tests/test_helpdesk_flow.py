@@ -231,14 +231,16 @@ def test_identity_gives_up_but_takes_request(store):
     """聞き返しても確定しなければ、申告内容を控えて依頼は受ける（聞き返しは方針の回数まで）。"""
     app = build_app(store, FakeLLM(), HELPDESK_DATA)
     asked = []
-    answers = iter(["私ですが", "わからない", "わからない", "パスワードを忘れました", "いいえ", "内線1234"])
+    answers = iter(["私ですが", "わからない", "パスワードを忘れました", "いいえ", "内線1234"])
 
     def ask(q):
         asked.append(q)
         return next(answers)
 
     state = run(app, "eigyo-common", ask, out=lambda *_: None)
-    assert sum("恐れ入りますが" in q for q in asked) == 2
-    assert asked[3].startswith("ありがとうございます。どのようなことでお困りですか")
+    # 何も聞き取れなければ3つとも聞き直し、「わからない」と言われたらそれ以上は聞かない
+    assert "所属部署とお名前と従業員番号" in asked[1]
+    assert sum("恐れ入りますが" in q for q in asked) == 1
+    assert asked[2].startswith("ありがとうございます。どのようなことでお困りですか")
     assert state["ticket"]["requester"]["verified"] == "照合できず"
-    assert state["ticket"]["requester"]["declared"]["said"] == "私ですが / わからない / わからない"
+    assert state["ticket"]["requester"]["declared"]["said"] == "私ですが / わからない"

@@ -69,6 +69,12 @@ FILLERS = sorted([
 NOT_NAME = ["できません", "できない", "ありません", "ので", "ください", "つながら", "使えない", "壊れ", "困っ",
             "お願い", "?", "？", "!", "！"]
 NAME_MARKS = ("と申します", "といいます", "でございます", "です")
+# 「持っていない・わからない」の言葉。言われた手がかりは、もう聞かない
+DECLINE = ["わからない", "わかりません", "分からない", "分かりません", "知らない", "知りません", "覚えていない",
+           "覚えてない", "覚えていません", "忘れ", "まだありません", "まだない", "まだ無い", "ありません", "持っていない"]
+# 返事の中で、どの手がかりについて言っているか（「部署コード」は部署）
+CLUE_WORDS = [("dept", ["部署コード", "部署", "所属"]), ("employee_no", ["従業員番号", "社員番号", "社員コード", "番号", "コード"]),
+              ("name", ["名前", "氏名"])]
 
 
 class PolicyError(ValueError):
@@ -237,6 +243,32 @@ class Result:
         return {**r, "matched": self.matched, "declared": d.as_dict(), "note": self.note}
 
 
+def _mentioned(text: str) -> set[str]:
+    t = text
+    out = set()
+    for clue, words in CLUE_WORDS:
+        for w in words:
+            if w in t:
+                out.add(clue)
+                t = t.replace(w, " ")   # 「部署コード」を番号の「コード」と数えない
+    return out
+
+
+def _declined(db, said: list[str], policy: Policy) -> set[str]:
+    """「ない」「わからない」と言われた手がかり。言葉の中で名指しされたもの（「番号はまだありません」）か、
+    名指しがなければ、その前に聞いたもの（聞き返しへの「わからない」）。"""
+    out: set[str] = set()
+    for i, text in enumerate(said):
+        if not any(w in text for w in DECLINE):
+            continue
+        named = _mentioned(text)
+        if named:
+            out |= named
+        elif i > 0:
+            out |= set(check(db, said[:i], policy).ask)
+    return out
+
+
 def check(db, said: list[str], policy: Policy | None = None) -> Result:
     """方針の組み合わせのどれかが同じ1人を指したら、その人と確定する。"""
     policy = policy or Policy.default()
@@ -302,7 +334,8 @@ def check(db, said: list[str], policy: Policy | None = None) -> Result:
     else:
         note = "本人確認に使える内容を聞き取れませんでした"
 
-    ask, ask_any = _next_ask(policy, found, failed, ambiguous=len(sure) > 1 or len(named) > 1)
+    declined = _declined(db, said, policy) - found
+    ask, ask_any = _next_ask(policy, found, failed | declined, ambiguous=len(sure) > 1 or len(named) > 1)
     return Result(None, [], note, d, ask, ask_any, partial_name)
 
 
@@ -321,6 +354,9 @@ def _next_ask(policy: Policy, found: set[str], failed: set[str], ambiguous: bool
             needs.append(need)
     if not needs:
         return [], False
+    if not found:
+        # 何も聞き取れなかった：使える手がかりをすべて聞き直す
+        return [c for c in policy.clues if any(c in n for n in needs)], False
     shortest = min(len(n) for n in needs)
     options = [n for n in needs if len(n) == shortest]
     if shortest == 1:

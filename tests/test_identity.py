@@ -85,8 +85,22 @@ def test_follow_up_matches_what_was_said(db):
     assert "お名前（フルネーム）" in r.question()
     assert check(db, "鈴木です。10003", "営業部です").person["employee_no"] == "10003"
 
-    r = check(db, "私ですが")               # 何もない → 方針の手がかりのどれか
-    assert r.person is None and r.ask
+    r = check(db, "私ですが")               # 何も聞き取れない → 3つとも聞き直す
+    assert r.person is None and (r.ask, r.ask_any) == (["dept", "name", "employee_no"], False)
+    assert "所属部署とお名前と従業員番号" in r.question()
+    assert check(db, "私ですが", "わからない").ask == []   # 「わからない」と言われたら、もう聞かない
+
+
+def test_declined_clue_is_not_asked_again(db):
+    """「番号はまだありません」と言われた番号は、もう聞かない（実機の新人の場面）。"""
+    r = check(db, "総務部の新井ゆいです。今週入社したので番号はまだありません")
+    assert r.person is None and r.ask == []
+    r = check(db, "営業の高橋です。番号は覚えていません")     # 姓だけ＋番号なし → フルネームだけを聞く
+    assert r.ask == ["name"] and "フルネーム" in r.question()
+    r = check(db, "営業部です", "わかりません")               # 聞き返しへの「わかりません」→ 聞いたものはもう聞かない
+    assert r.ask == []
+    r = check(db, "高橋美咲です。部署コードはわかりません")   # 部署コードは部署のこと
+    assert r.ask == ["employee_no"]
 
 
 def test_same_surname_in_same_department_is_not_confirmed(db):
