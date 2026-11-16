@@ -558,3 +558,32 @@ def test_ask_stream_llm_error_is_an_error_event(settings):
     assert events[-1] == ("error", {"code": "llm_unavailable",
                                     "message": "回答を作るAIに接続できません。しばらくしてからやり直してください"})
     assert [e for e, _ in events].count("result") == 0
+
+
+
+# ---------------------------------------------------------------- ジョブの一覧（S-03）
+
+
+def test_ingest_sources_only_admin(client):
+    login(client, "10004")
+    assert client.get("/api/documents/ingest/sources").status_code == 403
+    login(client, "10005")
+    sources = client.get("/api/documents/ingest/sources").json()["sources"]
+    paths = [s["path"] for s in sources]
+    assert str(DEMO.resolve()) in paths and str((DEMO / "docs").resolve()) in paths
+    # 一覧のフォルダは、どれも取り込みで受け付けられる
+    r = client.post("/api/documents/ingest", json={"source": str((DEMO / "public").resolve())}, headers=H)
+    assert r.status_code == 202
+    job = wait_job(client, r.json()["job_id"])
+    assert job["params"] == {"source": str((DEMO / "public").resolve())}
+
+
+def test_job_list_all_only_admin(client):
+    login(client, "10005")
+    job_id = client.post("/api/documents/ingest", json={"source": str(DEMO / "public")}, headers=H).json()["job_id"]
+    wait_job(client, job_id)
+    assert job_id in [j["job_id"] for j in client.get("/api/jobs?all=true").json()["jobs"]]
+    login(client, "10004")
+    assert client.get("/api/jobs?all=true").status_code == 403
+    assert client.get("/api/jobs").json()["jobs"] == []
+    assert client.delete(f"/api/jobs/{job_id}", headers=H).status_code == 404

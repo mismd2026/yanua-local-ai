@@ -136,6 +136,7 @@ class JobQueue:
         return {
             "job_id": r["job_id"], "kind": r["kind"], "owner": r["owner"], "status": r["status"],
             "progress": r["progress"], "stage": r["stage"],
+            "params": json.loads(r["params"]) if r["params"] else {},
             "result": json.loads(r["result"]) if r["result"] else None,
             "error": r["error"], "created_at": r["created_at"],
             "started_at": r["started_at"], "finished_at": r["finished_at"],

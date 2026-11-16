@@ -4,6 +4,7 @@ import { navigate, usePath } from "./router";
 import Login from "./pages/Login";
 import Home from "./pages/Home";
 import Chat from "./pages/Chat";
+import Jobs from "./pages/Jobs";
 
 type State = { kind: "loading" } | { kind: "out"; notice?: string } | { kind: "in"; me: Me } | { kind: "error"; message: string };
 
@@ -62,7 +63,7 @@ export default function App() {
         <button className="link" onClick={() => void logout()}>ログアウト</button>
       </header>
       <main>
-        {path === "/chat" ? <Chat me={me} /> : path === "/" ? <Home me={me} /> : <NotFound />}
+        {path === "/chat" ? <Chat me={me} /> : path === "/jobs" ? <Jobs me={me} /> : path === "/" ? <Home me={me} /> : <NotFound />}
       </main>
     </div>
   );

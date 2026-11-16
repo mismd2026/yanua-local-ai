@@ -106,3 +106,29 @@ main { padding: 1.2rem 1rem; max-width: 1200px; width: 100%; margin: 0 auto; fle
 .panel-head { position: sticky; top: 0; z-index: 1; background: var(--card); padding: 1rem 0 0.5rem; display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; border-bottom: 1px solid var(--line); margin-bottom: 0.5rem; }
 .doc section { padding: 0.4rem 0.6rem; border-radius: 6px; }
 .doc section.hit { background: var(--hit); }
+
+/* ジョブ */
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.row-between h2 { margin: 0; }
+.jobs-page { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); margin-top: 1rem; }
+@media (min-width: 900px) { .jobs-page:has(.detail) { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); } }
+.table-wrap { overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { text-align: left; padding: 0.45rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.table th { font-size: 0.85rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.table tr.selected td { background: var(--info); }
+.table .link { padding: 0; }
+.progress-cell { white-space: nowrap; }
+.progress-cell progress { width: 6rem; vertical-align: middle; }
+.status { font-size: 0.85rem; border-radius: 999px; padding: 0.05em 0.7em; border: 1px solid var(--line); white-space: nowrap; }
+.status.ok { border-color: #2e7d32; }
+.status.ng { border-color: var(--error); color: var(--error); }
+.status.off { color: var(--muted); }
+.status.run { border-color: var(--accent); color: var(--accent); }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0 0 1rem; }
+.facts dt { color: var(--muted); font-size: 0.9rem; }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+.result-list { margin: 0; padding-left: 1.2rem; }
+.ingest-row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.ingest-row select { font: inherit; padding: 0.4em; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: inherit; max-width: 100%; }

@@ -1,13 +1,10 @@
 // S-02 ホーム。役割に応じたメニュー、未読のお知らせの件数、実行中のジョブ
 import { useEffect, useState } from "react";
-import { api, ApiError, Job, Me, RUNNING_STATUSES } from "../api";
+import { api, ApiError, Job, jobName, Me, RUNNING_STATUSES } from "../api";
 import { menuFor } from "../menu";
 import { navigate } from "../router";
 
 const POLL_MS = 5000;
-
-// ジョブの種類の表示名（yanua/api/app.py で register したもの）
-const JOB_NAMES: Record<string, string> = { ingest: "文書の取り込み" };
 
 export default function Home({ me }: { me: Me }) {
   const items = menuFor(me.permissions);
@@ -93,14 +90,19 @@ function RunningJobs() {
         <ul className="jobs">
           {jobs.map((j) => (
             <li key={j.job_id}>
-              <span>{JOB_NAMES[j.kind] ?? j.kind}</span>
+              <a href={`/jobs?job=${encodeURIComponent(j.job_id)}`} onClick={(e) => { e.preventDefault(); navigate(`/jobs?job=${encodeURIComponent(j.job_id)}`); }}>
+                {jobName(j.kind)}
+              </a>
               <span className="muted small">{j.status}{j.stage ? `・${j.stage}` : ""}</span>
-              <progress max={100} value={j.progress} aria-label={`${JOB_NAMES[j.kind] ?? j.kind}の進み具合`} />
+              <progress max={100} value={j.progress} aria-label={`${jobName(j.kind)}の進み具合`} />
               <span className="small">{j.progress}%</span>
             </li>
           ))}
         </ul>
       )}
+      <p className="small">
+        <a href="/jobs" onClick={(e) => { e.preventDefault(); navigate("/jobs"); }}>ジョブの一覧へ</a>
+      </p>
     </section>
   );
 }
