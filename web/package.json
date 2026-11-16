@@ -1,0 +1,30 @@
+{
+  "name": "yanua-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Yanua の社内の画面（docs/screens.md）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.1",
+    "@types/react": "18.3.23",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "6.1.2",
+    "jsdom": "27.4.0",
+    "typescript": "5.8.3",
+    "vite": "8.3.5",
+    "vitest": "4.1.12"
+  }
+}

@@ -62,7 +62,7 @@
 
 | ID | 画面 | 役割 | 主な操作 | 呼ぶ API | 関連 | 段階 |
 |---|---|---|---|---|---|---|
-| S-10 | チャット | 社員 | 質問→出典つきの回答（逐次表示）。出典を開く。ヘルプデスクの会話（本人確認〜問い合わせ票）も同じ画面 | `POST /api/ask`、`POST /api/chat/sessions`、`POST /api/chat/sessions/{id}/messages`、`GET /api/documents/{doc_id}#section` | K-007, K-015 | 1 |
+| S-10 | チャット | 社員 | 質問→出典つきの回答（進み具合を逐次表示）。出典を開く。ヘルプデスクの会話（本人確認〜問い合わせ票）も同じ画面 | `POST /api/ask/stream`、`POST /api/chat/sessions`、`POST /api/chat/sessions/{id}/messages`、`GET /api/documents/{doc_id}#section` | K-007, K-015 | 1 |
 | S-11 | お知らせ | 社員 | 自分あて・部署あての一覧、既読にする | `GET /api/notifications`、`POST /api/notifications/read` | K-045, K-024 | 2 |
 | S-12 | 来訪予定（自分の） | 社員 | 来訪予定の登録→コードと案内文を表示（コードはこのとき1回だけ）、一覧、取り消し | `POST /api/visits`、`GET /api/visits?host=me`、`DELETE /api/visits/{id}` | K-018 | 2 |
 | S-13 | 議事録 | 社員・総務 | 録画のアップロード→進み具合→話し手・決まったこと・宿題の確認と修正→Word 出力。話し手が「不明」の発言をまとめて直す | `POST /api/meetings`（ジョブ）、`GET /api/meetings/{id}`、`PUT /api/meetings/{id}`、`GET /api/meetings/{id}/minutes.docx` | K-046, K-021 | 3 |
@@ -128,7 +128,7 @@
 
 | API | CLI | 役割 | ジョブ |
 |---|---|---|---|
-| `POST /api/ask` | `ask` | 社員 | |
+| `POST /api/ask`、`POST /api/ask/stream`（進み具合を逐次表示） | `ask` | 社員 | |
 | `GET /api/search` | `search` | 社員 | |
 | `POST /api/chat/sessions`、`.../messages` | `helpdesk` | 社員 | |
 | `GET/POST/PUT/DELETE /api/documents` | `ingest`、`docs` | 社員（一覧は見られる文書だけ）、管理者（変更） | 取り込みは○ |
@@ -168,6 +168,7 @@
 - 会話は、サーバーで「会話の番号」ごとに状態を持ちます。今の LangGraph の `interrupt` で質問を返し、次のメッセージで再開します
 - 今は `InMemorySaver` なので、サーバーを再起動すると会話が消えます。API にするときは SQLite に保存する仕組みに替え、一定時間（例：30分）使われなかった会話は消します
 - 返事は逐次表示（Server-Sent Events）にします。小さなモデルでも、待たされている感じを減らすためです
+- 逐次表示で送るのは**進み具合だけ**です（「社内の文書を探しています」「回答を作っています」「回答を確かめています」）。LLM の文は、ルールで確かめ終わってから（答えられないときの判定・出典の付け直しのあと）まとめて送ります。確かめる前の文は画面に出しません（2026-11-16 決定）
 
 ### ジョブ（重い処理）
 

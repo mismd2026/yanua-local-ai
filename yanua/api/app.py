@@ -7,13 +7,16 @@
     POST   /api/auth/logout
     GET    /api/me                 ログイン中の人・役割・できる操作
     POST   /api/ask                出典つきの回答（部署はログインした人のもの）
+    POST   /api/ask/stream         同じ回答を Server-Sent Events で。途中は進み具合だけを送り、文は確かめてから送る
     GET    /api/search             部署の権限つきの検索
     GET    /api/documents          見られる文書の一覧
+    GET    /api/documents/{doc_id} 文書の中身（出典を開く。見られる文書だけ）
     POST   /api/documents/ingest   文書の取り込み（管理者・ジョブ）
     POST   /api/chat/sessions                  ヘルプデスクの会話を始める
     POST   /api/chat/sessions/{id}/messages    返事を送る
     DELETE /api/chat/sessions/{id}             会話をやめる
     GET    /api/jobs, GET/DELETE /api/jobs/{id}
+    GET    /, /chat など           Web画面（web/ を組み立てた web/dist。組み立てていなければ配らない）
 
 画面から呼ぶ前提の決まり：
 - 状態を変えるリクエスト（GET 以外）には、ヘッダー X-Yanua-Client を付ける。
@@ -23,6 +26,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import queue
 import sqlite3
 import threading
 import time
@@ -30,12 +36,12 @@ from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import hr
 from ..answer import answer_question
-from ..llm import ChatModel
+from ..llm import ChatModel, LLMError
 from ..search import search
 from ..store import Store
 from . import auth, errors
@@ -49,6 +55,20 @@ from .settings import Settings
 
 CSRF_HEADER = "X-Yanua-Client"
 MAX_QUESTION = 2000
+STREAM_PING_SEC = 10     # 回答を作っている間も、途中の機器に接続を切られないよう空の行を送る
+
+log = logging.getLogger("yanua.api")
+
+# 逐次表示で画面に出す進み具合（answer_question の段階 → 画面の文言）
+ASK_STAGES = {
+    "search": "社内の文書を探しています",
+    "answer": "回答を作っています",
+    "check": "回答を確かめています",
+}
+
+
+def sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 # ------------------------------------------------------------ リクエストの形
@@ -222,6 +242,47 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
             raise ApiError(400, "invalid_question", str(e)) from e
         return {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}
 
+    @app.post("/api/ask/stream")
+    def ask_stream(req: Ask, user: User = Depends(require("ask"))):
+        # ログイン・権限・質問の形は、送り始める前に確かめる（ふつうのエラーの形で返す）
+        events: queue.Queue[tuple[str, dict] | None] = queue.Queue()
+
+        def work():
+            started = time.monotonic()
+            s = Store(settings.db_path)
+            try:
+                result = answer_question(s, llm, req.question, user.dept, settings.top_k,
+                                         progress=lambda st: events.put(("progress", {"stage": st, "message": ASK_STAGES[st]})))
+                events.put(("result", {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}))
+            except ValueError as e:
+                events.put(("error", errors.body("invalid_question", str(e))["error"]))
+            except LLMError as e:
+                log.error("LLM: %s", e)
+                events.put(("error", errors.body("llm_unavailable",
+                                                 "回答を作るAIに接続できません。しばらくしてからやり直してください")["error"]))
+            except Exception:
+                log.exception("想定していないエラー")
+                events.put(("error", errors.body("internal", "サーバーでエラーが起きました")["error"]))
+            finally:
+                s.close()
+                events.put(None)
+
+        threading.Thread(target=work, name="yanua-ask", daemon=True).start()
+
+        def stream():
+            while True:
+                try:
+                    item = events.get(timeout=STREAM_PING_SEC)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
+                if item is None:
+                    return
+                yield sse(*item)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.get("/api/search")
     def search_docs(q: str, top_k: int = 5, user: User = Depends(require("search"))):
         if not q.strip() or len(q) > MAX_QUESTION:
@@ -240,6 +301,15 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
                 # 置き場所（サーバーのパス）は管理者にだけ見せる
                 docs.append({k: v for k, v in d.items() if k != "path"})
         return {"documents": docs}
+
+    @app.get("/api/documents/{doc_id}")
+    def document(doc_id: str, user: User = Depends(require("documents.list"))):
+        s = store()
+        # 見られない文書は、あるかどうかも分からせない（管理者でも部署の権限で決める）
+        doc = s.document_sections(doc_id) if s.can_view(doc_id, user.dept) else None
+        if not doc:
+            raise not_found("文書")
+        return doc
 
     @app.post("/api/documents/ingest", status_code=202)
     def ingest(req: Ingest, user: User = Depends(require("documents.ingest"))):
@@ -294,4 +364,44 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
             raise ApiError(409, "finished", "このジョブは終わっています")
         return jobs.cancel(job_id)
 
+    # ------------------------------------------------ Web画面（最後に登録する）
+
+    install_web(app, settings.web_dist)
     return app
+
+
+# 社内の画面の HTML に付けるヘッダー。ほかのサイトに埋め込ませない・ほかの宛先から読み込ませない
+WEB_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+                               "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+}
+
+
+def install_web(app: FastAPI, dist: Path | None) -> None:
+    """組み立てた画面（web/dist）を同じサーバーから配る。
+
+    - /assets/... などのファイルはそのまま返す。dist の外のファイルは返さない
+    - それ以外の画面の URL（/、/chat など）は index.html を返し、画面の側で切り替える
+    - /api/... と /kiosk は社内の画面を返さない（受付端末は別の画面。段階2）
+    """
+    if not dist or not (Path(dist) / "index.html").is_file():
+        return
+    root = Path(dist).resolve()
+    index = root / "index.html"
+
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    def web(path: str):
+        first = path.split("/", 1)[0]
+        if first in ("api", "kiosk", "health"):
+            raise not_found()
+        if path:
+            f = (root / path).resolve()
+            if f != root and f.is_relative_to(root) and f.is_file():
+                # 組み立てたファイルは名前にハッシュが付くので、長く覚えさせてよい
+                cache = "public, max-age=31536000, immutable" if first == "assets" else "no-cache"
+                return FileResponse(f, headers={**WEB_HEADERS, "Cache-Control": cache})
+            if "." in path.rsplit("/", 1)[-1]:
+                raise not_found()   # ないファイル（.js など）に index.html を返さない
+        return FileResponse(index, headers={**WEB_HEADERS, "Cache-Control": "no-cache"})

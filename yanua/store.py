@@ -184,6 +184,27 @@ class Store:
         ).fetchone()
         return row is not None
 
+    def document_sections(self, doc_id: str) -> dict | None:
+        """文書の題名と、節ごとの本文を返す（出典を開く画面のため）。見てよいかは呼ぶ側で can_view で確かめる。"""
+        row = self.db.execute("SELECT doc_id, title, updated FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+        if not row:
+            return None
+        sections: list[dict] = []
+        title = row[1]
+        for section, text in self.db.execute(
+            "SELECT section, text FROM chunks WHERE doc_id = ? ORDER BY position", (doc_id,)
+        ):
+            # チャンクの先頭の「文書名 / 見出し」の行（検索のために付けたもの。documents.py）は画面では見出しにするので外す
+            label = f"{title} / {section}" if section else title
+            if text.startswith(label + "\n"):
+                text = text[len(label) + 1:]
+            # 同じ節が続けて分かれているときは1つにまとめる
+            if sections and sections[-1]["section"] == section:
+                sections[-1]["text"] += "\n" + text
+            else:
+                sections.append({"section": section, "text": text})
+        return {"doc_id": row[0], "title": row[1], "updated": row[2], "sections": sections}
+
     def documents(self) -> list[dict]:
         rows = self.db.execute(
             """

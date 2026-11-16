@@ -302,3 +302,21 @@ def test_eval_script_against_api(api, tmp_path):
     code = run_eval.main(["--endpoint", f"{base}/ask", "--only", "Q01,D01,U01", "--out", str(out)])
     summary = json.loads(out.read_text(encoding="utf-8"))["summary"]
     assert code == 0 and summary["passed"] == 3 and summary["permission_violations"] == 0
+
+
+def test_strip_leading_citations():
+    from yanua.answer import strip_leading_citations as strip
+
+    assert strip("[1] 就業規則（抜粋）の在宅勤務の記述から、週3日まで使えます。") == "就業規則（抜粋）の在宅勤務の記述から、週3日まで使えます。"
+    assert strip("[1][2]、在宅勤務は週3日までです。") == "在宅勤務は週3日までです。"
+    assert strip(" [1]：在宅勤務は週3日までです。") == "在宅勤務は週3日までです。"
+    # 文中・文末の番号はそのまま
+    assert strip("在宅勤務は週3日までです[1]。申請は前日まで[2]。") == "在宅勤務は週3日までです[1]。申請は前日まで[2]。"
+    # 番号しかないときは元のまま
+    assert strip("[1]") == "[1]"
+
+
+def test_answer_drops_leading_number_but_keeps_its_source(store):
+    ans = answer_question(store, FakeLLM("[1] 就業規則の在宅勤務の記述から、週3日まで使えます。"), "在宅勤務は週に何日までできますか？", "営業部")
+    assert ans.answer == "就業規則の在宅勤務の記述から、週3日まで使えます。"
+    assert ans.sources and ans.model_text.startswith("[1]")

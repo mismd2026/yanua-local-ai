@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .llm import ChatModel
 from .search import Hit, search, search_public
@@ -77,6 +78,14 @@ def build_messages(question: str, hits: list[Hit], system_prompt: str = SYSTEM_P
 
 
 _CITATION = re.compile(r"\[(\d+)\]")
+# 文の頭に付いた出典の番号（「[1] 就業規則の…」。小さなモデルの書き方の癖）
+_LEADING_CITATIONS = re.compile(r"^\s*(?:\[\d+\]\s*[、,，:：]?\s*)+")
+
+
+def strip_leading_citations(text: str) -> str:
+    """文の頭の出典の番号だけを外す。文中・文末の番号はそのまま。番号しかないときは元のまま返す。"""
+    rest = _LEADING_CITATIONS.sub("", text, count=1)
+    return rest if rest.strip() else text
 
 
 def cited_hits(text: str, hits: list[Hit]) -> list[Hit]:
@@ -96,18 +105,26 @@ def source_of(hit: Hit) -> dict:
 
 
 def answer_question(store: Store, llm: ChatModel, question: str, department: str, top_k: int = 5,
-                    public: bool = False) -> Answer:
-    """public=True のときは社外向け：社外公開の文書だけを検索し、部署は使わない。"""
+                    public: bool = False, progress: Callable[[str], None] | None = None) -> Answer:
+    """public=True のときは社外向け：社外公開の文書だけを検索し、部署は使わない。
+
+    progress には段階の名前だけを知らせる（"search" 検索・"answer" 回答の作成・"check" 回答の確かめ）。
+    LLM の文は確かめ終わるまで外に出さない（画面の逐次表示は進み具合だけ）。
+    """
+    step = progress or (lambda stage: None)
     question = (question or "").strip()
     if not question:
         raise ValueError("質問が空です")
 
     not_found = PUBLIC_NOT_FOUND_MESSAGE if public else NOT_FOUND_MESSAGE
+    step("search")
     hits = search_public(store, question, top_k) if public else search(store, question, department, top_k)
     if not hits:
         return Answer(not_found, [], refused=True)
 
+    step("answer")
     text = llm.chat(build_messages(question, hits, PUBLIC_SYSTEM_PROMPT if public else SYSTEM_PROMPT)).strip()
+    step("check")
 
     if is_refusal(text):
         return Answer(not_found, [], refused=True, model_text=text)
@@ -115,4 +132,5 @@ def answer_question(store: Store, llm: ChatModel, question: str, department: str
     cited = cited_hits(text, hits)
     # 番号を付け忘れた回答は、いちばん近い検索結果を出典とする
     sources = [source_of(h) for h in (cited or hits[:1])]
-    return Answer(text, sources, refused=False, model_text=text)
+    # 出典は番号から決めたあとなので、文の頭の番号は外してよい（model_text には元の文を残す）
+    return Answer(strip_leading_citations(text), sources, refused=False, model_text=text)
