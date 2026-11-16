@@ -68,14 +68,14 @@
 | S-10 | チャット | 社員 | 質問→出典つきの回答（進み具合を逐次表示）。出典を開く。ヘルプデスクの会話（本人確認〜問い合わせ票）も同じ画面 | `POST /api/ask/stream`、`POST /api/chat/sessions`、`POST /api/chat/sessions/{id}/messages`、`GET /api/documents/{doc_id}#section` | K-007, K-015 | 1 |
 | S-11 | お知らせ | 社員 | 自分あて・部署あての一覧、既読にする | `GET /api/notifications`、`POST /api/notifications/read` | K-045, K-024 | 2 |
 | S-12 | 来訪予定（自分の） | 社員 | 来訪予定の登録→コードと案内文を表示（コードはこのとき1回だけ）、一覧、取り消し | `POST /api/visits`、`GET /api/visits?host=me`、`DELETE /api/visits/{id}` | K-018 | 2 |
-| S-13 | 議事録 | 社員・総務 | 録画のアップロード→進み具合→話し手・決まったこと・宿題の確認と修正→Word 出力。話し手が「不明」の発言をまとめて直す | `POST /api/meetings`（ジョブ）、`GET /api/meetings/{id}`、`PUT /api/meetings/{id}`、`GET /api/meetings/{id}/minutes.docx` | K-046, K-021 | 3 |
+| S-13 | 議事録 | 社員・総務 | 録画のアップロード→進み具合→話し手・決まったこと・宿題の確認と修正→Word 出力。話し手が「不明」の発言をまとめて直す | `POST /api/uploads?kind=recording`（文字起こし済みの発言は `kind=segments`）、`POST /api/meetings`（ジョブ）、`GET /api/meetings`、`GET /api/meetings/{id}`、`PUT /api/meetings/{id}`、`GET /api/meetings/{id}/minutes.docx` | K-046, K-021 | 3 |
 
 ### 総務
 
 | ID | 画面 | 役割 | 主な操作 | 呼ぶ API | 関連 | 段階 |
 |---|---|---|---|---|---|---|
-| S-20 | PDF の仕分け | 総務 | 受信箱の PDF→仕分けの予定（dry-run）を確認→ルールを選び直す→実行→記録 | `GET /api/paper/inbox`、`POST /api/paper/plans`（ジョブ）、`POST /api/paper/plans/{id}/execute`、`GET /api/paper/history` | K-047, K-020 | 3 |
-| S-21 | PDF の変換 | 総務 | PDF を選ぶ→Word / Excel / 会社の様式に変換→ダウンロード | `POST /api/paper/convert`（ジョブ） | K-020 | 3 |
+| S-20 | PDF の仕分け | 総務 | 受信箱の PDF→仕分けの予定（dry-run）を確認→ルールを選び直す→実行→記録 | `GET /api/paper/inbox`、`GET /api/paper/rules`、`POST /api/paper/plans`（ジョブ）、`GET /api/paper/plans/{id}`、`PUT /api/paper/plans/{id}/items/{index}`（ルールを選び直す）、`POST /api/paper/plans/{id}/execute`、`GET /api/paper/history` | K-047, K-020 | 3 |
+| S-21 | PDF の変換 | 総務 | PDF を選ぶ→Word / Excel / 会社の様式に変換→ダウンロード | `POST /api/uploads?kind=pdf`、`POST /api/paper/convert`（ジョブ）、`GET /api/files/{file_id}` | K-020 | 3 |
 | S-22 | 来訪予定（全社） | 総務 | 日付ごとの一覧、CSV・カレンダーの取り込みと結果（リスケ・取り消しの反映） | `GET /api/visits?date=`、`POST /api/visits/import` | K-018, K-019 | 2 |
 | S-23 | 受付の記録 | 総務 | 電話・Web・来訪の記録の一覧、対応済みにする | `GET /api/reception/records`、`POST /api/reception/records/{id}/done` | K-045, K-017 | 2 |
 
@@ -141,11 +141,12 @@
 | `POST/GET/DELETE /api/visits`、`POST /api/visits/import` | `visit-create`、`visit-list`、`visit-import` | 社員（自分の）、総務（全社） | |
 | `GET /api/notifications`、`POST /api/notifications/read` | `notifications` | 社員 | |
 | `GET /api/tickets`、`PATCH /api/tickets/{id}` | （新規） | 情シス | |
-| `POST /api/paper/plans`、`.../execute`、`GET /api/paper/history` | `pdf-sort`（`--dry-run` が plans） | 総務 | ○ |
+| `GET /api/paper/inbox`・`rules`、`POST /api/paper/plans`、`PUT .../items/{index}`、`.../execute`、`GET /api/paper/history` | `pdf-sort`（`--dry-run` が plans） | 総務 | plans は○ |
 | `POST /api/paper/convert` | `pdf-convert` | 総務 | ○ |
 | `POST /api/paper/rule-draft` | `pdf-rule-draft` | 総務 | ○ |
 | `POST /api/paper/text` | `pdf-text` | 総務 | ○ |
-| `POST /api/meetings`、`GET/PUT /api/meetings/{id}` | `meeting` | 社員・総務 | ○ |
+| `POST /api/meetings`、`GET /api/meetings`、`GET/PUT /api/meetings/{id}`、`GET .../minutes.docx` | `meeting` | 社員・総務（自分のものだけ） | ○ |
+| `POST /api/uploads`、`GET /api/files/{file_id}` | （新規） | 種類による（PDF は総務、録画は社員）。開けるのは作った本人だけ | |
 | `GET /api/models`、`POST .../pull`、`POST .../verify` | `models list / pull / verify` | 管理者 | pull は○ |
 | `GET/PUT /api/settings/{kind}`、`.../validate`、`.../history` | （新規。今はファイルを直接編集） | 種類による | |
 | `GET /api/roles`、`PUT /api/roles/{employee_no}` | （新規） | 管理者 | |
@@ -184,6 +185,16 @@
 
 - アップロードしたファイル（録画・PDF）は、サーバーの作業用フォルダに置きます。大きさの上限を決めます（録画は例として 2GB）
 - ダウンロードは、その人が見てよいものだけ。リンクを他の人に渡しても開けないよう、毎回セッションで確かめます
+- 段階3で決めたこと（2026-11-16）：
+  - アップロードは `POST /api/uploads?kind=pdf|recording|segments&name=...` に、本文にファイルをそのまま送ります（multipart は使わない）。受け取りながら大きさを数え、上限（PDF 50MB・録画 2GB・発言の JSON 5MB）を超えたらその場で止めて消します。PDF は中身の先頭（`%PDF-`）も確かめます
+  - 置き場所の名前はサーバーが決めます。送られた名前は表示にだけ使い、置き場所のパスは画面にもジョブの内容にも出しません
+  - アップロードしたファイルも結果のファイルも、既定で24時間（`file_keep_hours`）で消します（起動したとき・アップロードのとき・10分ごと）
+  - 作業用フォルダの合計にも上限（`work_max_bytes`、既定 20GB）を決めます。置いているファイルと受け取り中のファイルの合計が上限を超えるアップロードは、`507`（`work_full`）で断り、受け取りかけたファイルを消します。ジョブの結果（変換したファイル）は小さいので、この上限では止めません
+  - 仕分けの予定・アップロード・変換の結果は作った人だけが見られます。仕分けの記録（`GET /api/paper/history`）は、保存先が総務で共通なので、総務の全員が見られます
+  - 開けるのは、そのファイルを作った人で、しかもその種類の権限（PDF は総務、議事録は社員）を今も持っている人だけ。ほかの人・期限切れ・ないものは同じ 404 にします
+  - 仕分けの予定・議事録も、作った人だけが見られます（総務・管理者でも、ほかの人のものは見えない）
+  - 仕分けの予定には取り出した文字も残し、ルールを選び直すときは PDF を読み直しません（OCR をし直さない）。実行のときは、予定を作ったあとにファイルが変わっていないかを確かめ、変わっていたら置きません
+  - 議事録の Word は、出力するたびに今の内容から作ります（ファイルとして残さない）
 - クライアントアプリ（K-048）は、開いたファイルを、利用者が自分で保存したとき以外は手元に残しません
 
 ### 設定の保存

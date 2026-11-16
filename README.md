@@ -93,6 +93,13 @@ curl -b c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
 - **問い合わせ票**（`GET /api/tickets`・`GET/PATCH /api/tickets/{id}`）：情シスだけ。状態は 未対応・対応中・対応済み
 - **受付端末**：管理者が `POST /api/admin/kiosk-devices` で端末を登録すると、端末トークンを1回だけ返します。受付端末は `Authorization: Bearer <端末トークン>` で `/api/kiosk/sessions`・`/api/kiosk/check-in` だけを使えます（`/api/kiosk/...` は端末トークン専用）。違う日・間違い・取り消しのコードには、同じ形・同じ時間で返事をします。入館票は受付端末の画面が返事から作って印刷します
 
+段階3の API（画面は次の段階）：
+
+- **ファイルの受け渡し**：`POST /api/uploads?kind=pdf|recording|segments&name=...` に本文でファイルを送ります（上限：PDF 50MB・録画 2GB）。結果のファイルは `GET /api/files/{file_id}` で受け取ります。開けるのは作った本人で、その種類の権限がある人だけです。アップロードも結果も24時間で消えます。作業用フォルダ（既定 `data/work`）の合計にも上限（`work_max_bytes`、既定 20GB）があり、超えるアップロードは断ります（507）
+- **PDF の仕分け**（総務）：受信箱（既定 `demo/company/paper/inbox`）の一覧 → `POST /api/paper/plans` で予定を作る（ジョブ）→ `PUT /api/paper/plans/{id}/items/{index}` でルールを選び直す → `POST .../execute` で保存先（既定 `data/paper/sorted`）に置く → `GET /api/paper/history` で記録。予定は作った人だけが見られますが、仕分けの記録は総務の全員が見られます
+- **PDF の変換**（総務）：`POST /api/paper/convert`（ジョブ）。アップロードした PDF か受信箱の PDF を、Word・Excel にします。`form: true` なら仕分けルールの会社の様式に差し込みます
+- **議事録**（社員。自分のものだけ）：録画をアップロード → `POST /api/meetings`（ジョブ：文字起こし → 話し手 → 要約）→ `GET/PUT /api/meetings/{id}` で確認と修正（「不明」の話し手を直す、要約・宿題を直す）→ `GET /api/meetings/{id}/minutes.docx`。文字起こしのモデル（`models pull whisper-small`）がないときは、文字起こし済みの発言（`kind=segments`。デモは `demo/company/meeting/demo_zoom_segments.json`）を一緒に渡せば試せます
+
 前の API（`POST /ask` だけ）は `python -m yanua serve-legacy` で起動できます。
 
 ### Web画面（web/）

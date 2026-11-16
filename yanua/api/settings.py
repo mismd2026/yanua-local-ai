@@ -40,6 +40,22 @@ class Settings:
     kiosk_max_failures: int = 10         # 1分にこの回数を超えてコードを間違えた端末は、しばらく照合しない
     visits_import_max_bytes: int = 2_000_000   # 来訪予定の取り込み（CSV）の大きさの上限
     today: date | None = None            # テスト用に「今日」を決める。None なら本当の今日
+
+    # 段階3：ファイルの受け渡し（K-046・K-047）
+    work_dir: Path = Path("data/work")           # アップロードと結果のファイルを置く作業用フォルダ
+    file_keep_hours: int = 24                    # アップロード・結果のファイルを残す時間。過ぎたら消す
+    pdf_max_bytes: int = 50_000_000              # PDF のアップロードの上限（50MB）
+    recording_max_bytes: int = 2_000_000_000     # 録画・録音のアップロードの上限（2GB）
+    segments_max_bytes: int = 5_000_000          # 文字起こし済みの発言（JSON）の上限
+    work_max_bytes: int = 20_000_000_000         # 作業用フォルダの合計の上限（20GB）。超えるアップロードは断る
+    # PDF の仕分け・変換
+    paper_inbox: Path = Path("demo/company/paper/inbox")     # 受信箱（スキャナーが PDF を置くフォルダ）
+    paper_out: Path = Path("data/paper/sorted")              # 仕分けの保存先（_仕分け記録.csv もここ）
+    paper_rules: Path = Path("demo/company/paper/rules.json")  # 仕分けルール（会社の様式の場所もここに書く）
+    # 議事録
+    meeting_template: Path = Path("demo/company/meeting/templates/議事録.docx")   # 議事録の様式（Word）
+    whisper_model: str = "whisper-small"         # 文字起こしのモデル（models pull で入手したもの）
+    models_dir: Path = Path("data/models")
     # 組み立てた Web画面（cd web && npm run build）。なければ API だけを動かす
     web_dist: Path | None = WEB_DIST
 
