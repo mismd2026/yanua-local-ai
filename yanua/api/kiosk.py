@@ -2,11 +2,10 @@
 
 - 受付端末は人ではなく端末。管理者が登録すると端末トークンを1回だけ表示する。保存するのはハッシュだけ
 - 端末トークン（Authorization: Bearer ...）で使えるのは /api/kiosk/... だけ。ほかの API は拒否する（app.py の入口で確かめる）
-- 社内のログインのクッキーでは /api/kiosk/... の受付の API は使えない（端末トークンだけを見る）
-- 入館票の番号は推測できない乱数にする。予定の番号（visit_id）を使うと、番号を変えて他の人の予定を読めてしまうため。
-  発行した端末からだけ、一定時間だけ開ける
+- /api/kiosk/... は端末トークン専用。社内のログインのクッキーでは使えない（端末の登録は /api/admin/kiosk-devices）
+- 入館票は、受付端末の画面が check-in（または受付の会話）の返事の予定から作って印刷する。サーバーには入館票を残さない
 - コードの照合は、違う日・間違い・取り消しのコードに、同じ形の返事を返す（visits.find_by_code が理由を区別しない）。
-  かかる時間もそろえるため、受付の API の返事は決まった時間より早くは返さない（app.py）
+  かかる時間もそろえるため、受付の API の返事は決まった時間より早くは返さない（app.py。待つ間はほかの処理をふさがない）
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kiosk_devices (
@@ -28,13 +27,6 @@ CREATE TABLE IF NOT EXISTS kiosk_devices (
     created_by  TEXT NOT NULL,
     last_used   TEXT,
     revoked_at  TEXT
-);
-CREATE TABLE IF NOT EXISTS kiosk_passes (
-    pass_id     TEXT PRIMARY KEY,
-    visit_id    INTEGER NOT NULL,
-    device_id   TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    expires_at  TEXT NOT NULL
 );
 """
 
@@ -77,8 +69,6 @@ def revoke(db: sqlite3.Connection, device_id: str) -> bool:
     with db:
         cur = db.execute("UPDATE kiosk_devices SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL",
                          (_now().isoformat(timespec="seconds"), device_id))
-        # 取り消した端末の入館票も開けなくする
-        db.execute("DELETE FROM kiosk_passes WHERE device_id = ?", (device_id,))
     return cur.rowcount > 0
 
 
@@ -96,28 +86,10 @@ def device_for_token(db: sqlite3.Connection, token: str) -> dict | None:
     return {"device_id": row[0], "name": row[1]}
 
 
-def issue_pass(db: sqlite3.Connection, visit_id: int, device_id: str, minutes: int) -> str:
-    ensure_schema(db)
-    pass_id = secrets.token_urlsafe(18)
-    now = _now()
-    with db:
-        db.execute("DELETE FROM kiosk_passes WHERE expires_at < ?", (now.isoformat(),))
-        db.execute("INSERT INTO kiosk_passes VALUES (?, ?, ?, ?, ?)",
-                   (pass_id, visit_id, device_id, now.isoformat(), (now + timedelta(minutes=minutes)).isoformat()))
-    return pass_id
-
-
-def pass_visit_id(db: sqlite3.Connection, pass_id: str, device_id: str) -> int | None:
-    """入館票の番号から予定の番号を返す。ほかの端末・期限切れ・ないものは、どれも None（区別しない）。"""
-    ensure_schema(db)
-    row = db.execute("SELECT visit_id FROM kiosk_passes WHERE pass_id = ? AND device_id = ? AND expires_at >= ?",
-                     (pass_id, device_id, _now().isoformat())).fetchone()
-    return row[0] if row else None
-
-
 class FailureLimiter:
     """端末ごとに、コードの照合に失敗した回数を数える。1分に max_per_minute 回を超えたら、照合せずに失敗と同じ返事にする
-    （コードを片端から試されないようにするため。返事の形は失敗のときと同じ）。"""
+    （コードを片端から試されないようにするため）。止めているかどうかは返事に出さない（文言・形・時間とも同じ）。
+    受付端末の画面は、自分で数えた失敗の回数から「受付の者をお呼びください」の案内を出す（web/src/kiosk）。"""
 
     def __init__(self, max_per_minute: int):
         self.max = max_per_minute
