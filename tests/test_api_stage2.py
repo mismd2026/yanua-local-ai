@@ -61,7 +61,7 @@ def new_visit(client, who: str, day: str = "2026-11-16", **over) -> dict:
 
 def register_device(client, name: str = "受付1") -> dict:
     login(client, "10005")
-    r = client.post("/api/kiosk/devices", json={"name": name}, headers=H)
+    r = client.post("/api/admin/kiosk-devices", json={"name": name}, headers=H)
     assert r.status_code == 201, r.text
     return r.json()
 
@@ -84,9 +84,9 @@ def kiosk_headers(device: dict) -> dict:
     ("GET", "/api/visits?date=2026-11-16", "10004", None),
     ("GET", "/api/visits?host=10002", "10004", None),
     ("POST", "/api/visits/import", "10004", None),
-    ("GET", "/api/kiosk/devices", "10002", None),
-    ("POST", "/api/kiosk/devices", "10004", {"name": "x"}),
-    ("DELETE", "/api/kiosk/devices/KD-1", "10002", None),
+    ("GET", "/api/admin/kiosk-devices", "10002", None),
+    ("POST", "/api/admin/kiosk-devices", "10004", {"name": "x"}),
+    ("DELETE", "/api/admin/kiosk-devices/KD-1", "10002", None),
 ])
 def test_forbidden_by_role(client, method, path, who, body):
     login(client, who)
@@ -97,7 +97,7 @@ def test_forbidden_by_role(client, method, path, who, body):
 
 @pytest.mark.parametrize("method,path", [
     ("GET", "/api/notifications"), ("POST", "/api/notifications/read"), ("GET", "/api/visits"),
-    ("POST", "/api/visits"), ("GET", "/api/tickets"), ("GET", "/api/reception/records"), ("GET", "/api/kiosk/devices"),
+    ("POST", "/api/visits"), ("GET", "/api/tickets"), ("GET", "/api/reception/records"), ("GET", "/api/admin/kiosk-devices"),
 ])
 def test_needs_login(client, method, path):
     assert client.request(method, path, json={}, headers=H).status_code == 401
@@ -273,14 +273,14 @@ def test_reception_records_and_done(client, settings):
 def test_device_token_only_for_kiosk_api(client):
     device = register_device(client)
     assert device["token"].startswith("yk_") and device["device_id"].startswith("KD-")
-    listed = client.get("/api/kiosk/devices").json()["devices"]
+    listed = client.get("/api/admin/kiosk-devices").json()["devices"]
     assert [d["device_id"] for d in listed] == [device["device_id"]] and "token" not in listed[0]
     assert "token_hash" not in listed[0]
 
     k = TestClient(client.app)   # 受付端末（クッキーなし）
     kh = kiosk_headers(device)
-    for method, path in [("GET", "/api/me"), ("GET", "/api/tickets"), ("POST", "/api/ask"), ("GET", "/api/kiosk/devices"),
-                         ("POST", "/api/kiosk/devices"), ("GET", "/api/notifications"), ("GET", "/api/jobs")]:
+    for method, path in [("GET", "/api/me"), ("GET", "/api/tickets"), ("POST", "/api/ask"), ("GET", "/api/admin/kiosk-devices"),
+                         ("POST", "/api/admin/kiosk-devices"), ("GET", "/api/notifications"), ("GET", "/api/jobs")]:
         r = k.request(method, path, json={"question": "x", "name": "x"}, headers=kh)
         assert r.status_code == 403, (method, path, r.text)
     assert k.post("/api/kiosk/sessions", headers=kh).status_code == 201
@@ -289,18 +289,26 @@ def test_device_token_only_for_kiosk_api(client):
 def test_login_cookie_cannot_use_kiosk_api(client):
     register_device(client)              # 管理者でログインしたまま（クッキーあり）
     for method, path, body in [("POST", "/api/kiosk/sessions", None), ("POST", "/api/kiosk/check-in", {"code": "ABCD-EFGH"}),
-                               ("GET", "/api/kiosk/passes/x.html", None), ("POST", "/api/kiosk/sessions/x/messages", {"text": "a"})]:
+                               ("POST", "/api/kiosk/sessions/x/messages", {"text": "a"}),
+                               ("GET", "/api/kiosk/anything", None)]:
         r = client.request(method, path, json=body, headers=H)
-        assert r.status_code == 401 and r.json()["error"]["code"] == "kiosk_not_registered", path
+        assert r.status_code in (401, 404, 405), path
+        assert r.status_code != 200
+    # /api/kiosk/ には、社内のログインで使える API が1つもない（端末の登録は /api/admin/kiosk-devices）
+    kiosk_routes = [r for r in client.app.routes if getattr(r, "path", "").startswith("/api/kiosk/")]
+    assert kiosk_routes and all(
+        any(getattr(d.call, "__name__", "") == "current_device" for d in r.dependant.dependencies) for r in kiosk_routes)
+    r = client.post("/api/kiosk/sessions", headers=H)
+    assert r.status_code == 401 and r.json()["error"]["code"] == "kiosk_not_registered"
 
 
 def test_revoked_or_unknown_token_is_rejected(client):
     device = register_device(client)
     k = TestClient(client.app)
     assert k.post("/api/kiosk/sessions", headers={**H, "Authorization": "Bearer yk_wrong"}).status_code == 401
-    assert client.delete(f"/api/kiosk/devices/{device['device_id']}", headers=H).status_code == 200
+    assert client.delete(f"/api/admin/kiosk-devices/{device['device_id']}", headers=H).status_code == 200
     assert k.post("/api/kiosk/sessions", headers=kiosk_headers(device)).status_code == 401
-    assert client.delete(f"/api/kiosk/devices/{device['device_id']}", headers=H).status_code == 404
+    assert client.delete(f"/api/admin/kiosk-devices/{device['device_id']}", headers=H).status_code == 404
 
 
 def test_kiosk_still_needs_client_header(client):
@@ -335,7 +343,7 @@ def test_check_in_same_reply_for_bad_codes_and_pass(client, settings):
     assert next(iter(replies.values())).json()["ok"] is False
 
     ok = k.post("/api/kiosk/check-in", json={"code": good.lower().replace("-", "")}, headers=kh).json()
-    assert ok["ok"] is True and set(ok) == set(replies["wrong"].json())
+    assert ok["ok"] is True and set(ok) == set(replies["wrong"].json()) == {"ok", "message", "visit"}
     assert ok["visit"]["host_name"] == "高橋 美咲" and ok["visit"]["room"] == "5階 第2会議室"
     # 受付端末には、社員番号・部署・予定の番号を出さない
     text = json.dumps(ok, ensure_ascii=False)
@@ -347,14 +355,8 @@ def test_check_in_same_reply_for_bad_codes_and_pass(client, settings):
     login(client, "10002")
     assert [r["category"] for r in client.get("/api/reception/records").json()["records"]] == ["来訪"]
 
-    # 入館票は発行した端末だけが開ける。ほかの端末・ない番号は同じ返事
-    p = k.get(f"/api/kiosk/passes/{ok['pass_id']}.html", headers=kh)
-    assert p.status_code == 200 and "入館票" in p.text and good not in p.text
-    assert "default-src 'none'" in p.headers["content-security-policy"]
-    other = register_device(client, "受付2")
-    o1 = k.get(f"/api/kiosk/passes/{ok['pass_id']}.html", headers=kiosk_headers(other))
-    o2 = k.get("/api/kiosk/passes/nothing.html", headers=kh)
-    assert o1.status_code == o2.status_code == 404 and o1.json() == o2.json()
+    # 入館票はサーバーに残さない（受付端末の画面が、この予定から作って印刷する）
+    assert k.get("/api/kiosk/passes/x.html", headers=kh).status_code == 404
 
 
 def test_kiosk_replies_take_the_same_time(settings):
@@ -378,8 +380,9 @@ def test_too_many_failures_stop_checking(settings):
         kh = kiosk_headers(device)
         for _ in range(3):
             assert k.post("/api/kiosk/check-in", json={"code": "ZZZZ-ZZZZ"}, headers=kh).json()["ok"] is False
-        # 間違いが続いた端末では、正しいコードでも照合しない（返事は失敗と同じ形）
-        assert k.post("/api/kiosk/check-in", json={"code": good}, headers=kh).json()["ok"] is False
+        wrong = k.post("/api/kiosk/check-in", json={"code": "YYYY-YYYY"}, headers=kh).json()
+        # 間違いが続いた端末では、正しいコードでも照合しない。返事は間違えたときとまったく同じ（止めていることを分からせない）
+        assert k.post("/api/kiosk/check-in", json={"code": good}, headers=kh).json() == wrong
         other = register_device(c, "受付2")
         assert k.post("/api/kiosk/check-in", json={"code": good}, headers=kiosk_headers(other)).json()["ok"] is True
 
@@ -398,14 +401,13 @@ def test_kiosk_session_same_reply_for_bad_codes(client):
         sid = k.post("/api/kiosk/sessions", headers=kh).json()["session_id"]
         r = k.post(f"/api/kiosk/sessions/{sid}/messages", json={"text": code}, headers=kh).json()
         replies.append({key: v for key, v in r.items() if key != "session_id"})
-    assert replies[0] == replies[1] == replies[2] and replies[0]["visit"] is None and replies[0]["pass_id"] is None
+    assert replies[0] == replies[1] == replies[2] and replies[0]["visit"] is None
 
     first = k.post("/api/kiosk/sessions", headers=kh).json()
-    assert set(first) == {"session_id", "finished", "reply", "visit", "pass_id"} and "コード" in first["reply"]
+    assert set(first) == {"session_id", "finished", "reply", "visit"} and "コード" in first["reply"]
     end = k.post(f"/api/kiosk/sessions/{first['session_id']}/messages", json={"text": good}, headers=kh).json()
-    assert end["finished"] is True and end["visit"]["visitor_name"] == "木村 誠" and end["pass_id"]
+    assert end["finished"] is True and end["visit"]["visitor_name"] == "木村 誠"
     assert "10004" not in json.dumps(end, ensure_ascii=False)
-    assert k.get(f"/api/kiosk/passes/{end['pass_id']}.html", headers=kh).status_code == 200
 
 
 def test_kiosk_session_of_other_device_is_hidden(client):
@@ -424,3 +426,47 @@ def test_helpdesk_cannot_continue_a_kiosk_session(client):
     sid = k.post("/api/kiosk/sessions", headers=kiosk_headers(device)).json()["session_id"]
     login(client, "10005")
     assert client.post(f"/api/chat/sessions/{sid}/messages", json={"text": "はい"}, headers=H).status_code == 404
+
+
+def test_kiosk_wait_does_not_block_other_apis(settings):
+    """受付の API が待っている（asyncio.sleep）あいだも、ほかの API はすぐ返る。
+
+    スレッドで待つ（time.sleep）と、受付が重なったときにスレッドの枠（既定40本）を使い切り、ほかの API が待たされる。
+    1つのイベントループの中から同時に呼び、ほかの API の返事は上限つきで待つ（詰まってもテストが止まらないように）。
+    """
+    import asyncio
+
+    import httpx
+
+    settings.kiosk_min_seconds = 1.5
+    app = create_app(settings, FakeLLM())
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                await c.post("/api/auth/dev-login", json={"employee_no": "10005"}, headers=H)
+                device = (await c.post("/api/admin/kiosk-devices", json={"name": "受付1"}, headers=H)).json()
+                kh = kiosk_headers(device)
+
+                started = time.monotonic()
+                kiosk_calls = [asyncio.create_task(c.post("/api/kiosk/check-in", json={"code": "ZZZZ-ZZZZ"}, headers=kh))
+                               for _ in range(60)]
+                await asyncio.sleep(0.3)          # 受付の API がそろって待ちに入るまで
+                t0 = time.monotonic()
+                try:
+                    health = await asyncio.wait_for(c.get("/health"), timeout=1.0)
+                    me = await asyncio.wait_for(c.get("/api/me"), timeout=1.0)
+                    elapsed = time.monotonic() - t0
+                    pending = sum(not t.done() for t in kiosk_calls)
+                except TimeoutError:
+                    pytest.fail("ほかの API が 1 秒以内に返らなかった（受付の API の待ちにふさがれている）")
+                finally:
+                    replies = await asyncio.wait_for(asyncio.gather(*kiosk_calls, return_exceptions=True), timeout=30)
+                return health.status_code, me.status_code, elapsed, pending, replies, time.monotonic() - started
+
+    health, me, elapsed, pending, replies, total = asyncio.run(run())
+    assert health == 200 and me == 200
+    assert elapsed < 0.7, f"ほかの API が {elapsed:.2f} 秒待たされた"
+    assert pending == 60, "受付の API が決まった時間より早く返った"
+    assert all(r.status_code == 200 and r.json()["ok"] is False for r in replies) and total >= 1.5

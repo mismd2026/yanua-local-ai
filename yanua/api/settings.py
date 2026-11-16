@@ -36,7 +36,6 @@ class Settings:
 
     # 受付端末（K-043）
     kiosk_min_seconds: float = 0.6       # 受付の API はこの時間より早く返さない（コードが正しいかを時間の違いから分からせない）
-    kiosk_pass_minutes: int = 60         # 入館票を開ける時間
     kiosk_max_failures: int = 10         # 1分にこの回数を超えてコードを間違えた端末は、しばらく照合しない
     visits_import_max_bytes: int = 2_000_000   # 来訪予定の取り込み（CSV）の大きさの上限
     today: date | None = None            # テスト用に「今日」を決める。None なら本当の今日

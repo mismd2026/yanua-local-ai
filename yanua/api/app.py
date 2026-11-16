@@ -25,21 +25,21 @@
     POST   /api/visits/import                                     来訪予定の取り込み（総務。CSV を本文で送る）
     GET    /api/reception/records, POST .../{id}/done             受付の記録（総務）
     GET    /api/tickets, GET/PATCH /api/tickets/{id}              問い合わせ票（情シス）
-    GET/POST /api/kiosk/devices, DELETE /api/kiosk/devices/{id}   受付端末の登録（管理者。社内のログインで使う）
+    GET/POST /api/admin/kiosk-devices, DELETE .../{id}            受付端末の登録（管理者。社内のログインで使う）
     POST   /api/kiosk/sessions, .../{id}/messages                 受付の会話（受付端末のトークンだけ）
     POST   /api/kiosk/check-in                                    コードの照合と受付（受付端末のトークンだけ）
-    GET    /api/kiosk/passes/{pass_id}.html                       入館票（発行した受付端末だけ）
 
 画面から呼ぶ前提の決まり：
 - 状態を変えるリクエスト（GET 以外）には、ヘッダー X-Yanua-Client を付ける。
   別のサイトのページからは、このヘッダーを付けて送れない（CSRF 対策）
 - 権限はすべてこの API の側で確かめる（画面で隠すだけにしない）
-- 受付端末は Authorization: Bearer <端末トークン> で呼ぶ。端末トークンは /api/kiosk/... の受付の API だけに使え、
-  ほかの API（端末の登録 /api/kiosk/devices を含む）は拒否する。受付の API は社内のログインのクッキーを見ない
+- 受付端末は Authorization: Bearer <端末トークン> で呼ぶ。/api/kiosk/... は端末トークン専用（例外なし）。
+  端末トークンでほかの API を呼ぶと拒否する。/api/kiosk/... は社内のログインのクッキーを見ない
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import queue
@@ -54,7 +54,7 @@ from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
@@ -229,9 +229,9 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
     @app.middleware("http")
     async def csrf(request: Request, call_next):
         path = request.url.path
-        # 端末トークン（Bearer）で使えるのは受付の API だけ。端末の登録（/api/kiosk/devices）にも使えない
+        # 端末トークン（Bearer）で使えるのは受付の API（/api/kiosk/...）だけ
         if path.startswith("/api/") and request.headers.get("authorization", "").lower().startswith("bearer ") \
-                and (not path.startswith("/api/kiosk/") or path.startswith("/api/kiosk/devices")):
+                and not path.startswith("/api/kiosk/"):
             return JSONResponse(errors.body("forbidden", "この操作をする権限がありません"), status_code=403)
         if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/") \
                 and not request.headers.get(CSRF_HEADER):
@@ -265,11 +265,12 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
             raise ApiError(401, "kiosk_not_registered", "この端末は受付端末として登録されていません。管理者に問い合わせてください")
         return device
 
-    def padded(started: float) -> None:
-        # 受付の API は、決まった時間より早くは返さない（コードが正しい・違う日・取り消し・間違いで、かかる時間をそろえる）
+    async def padded(started: float) -> None:
+        # 受付の API は、決まった時間より早くは返さない（コードが正しい・違う日・取り消し・間違いで、かかる時間をそろえる）。
+        # 待つ間はスレッドを使わない（asyncio.sleep）。time.sleep だとスレッドをふさぎ、受付が重なるとほかの API が待たされる
         rest = settings.kiosk_min_seconds - (time.monotonic() - started)
         if rest > 0:
-            time.sleep(rest)
+            await asyncio.sleep(rest)
 
     def set_cookie(response: Response, token: str) -> None:
         response.set_cookie(auth.COOKIE, token, httponly=True, secure=settings.cookie_secure, samesite="lax",
@@ -624,18 +625,18 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
 
     # ------------------------------------------------ 受付端末の登録（S-54。管理者が社内のログインで使う）
 
-    @app.get("/api/kiosk/devices")
+    @app.get("/api/admin/kiosk-devices")
     def device_list(user: User = Depends(require("kiosk.devices"))):
         with closing(connect()) as db:
             return {"devices": kiosk.devices(db)}
 
-    @app.post("/api/kiosk/devices", status_code=201)
+    @app.post("/api/admin/kiosk-devices", status_code=201)
     def device_register(req: DeviceCreate, user: User = Depends(require("kiosk.devices"))):
         with closing(connect()) as db:
             # 端末トークンはここで1回だけ返す（保存するのはハッシュだけ）
             return kiosk.register(db, req.name.strip(), user.employee_no)
 
-    @app.delete("/api/kiosk/devices/{device_id}")
+    @app.delete("/api/admin/kiosk-devices/{device_id}")
     def device_revoke(device_id: str, user: User = Depends(require("kiosk.devices"))):
         with closing(connect()) as db:
             if not kiosk.revoke(db, device_id):
@@ -643,77 +644,63 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
         return {"ok": True}
 
     # ------------------------------------------------ 受付端末（S-40・S-41。端末トークンだけ）
+    # 受付の API は async にし、重い処理（照合・会話）はスレッドで行い、待ち時間は asyncio.sleep で待つ
 
-    def kiosk_reply(device: dict, r: dict) -> dict:
-        # 返事の形はいつも同じ（予定・入館票の番号がないときは null）
-        out = {"session_id": r["session_id"], "finished": r["finished"], "reply": r["reply"], "visit": None, "pass_id": None}
+    def kiosk_reply(r: dict) -> dict:
+        # 返事の形はいつも同じ（予定がないときは null）。入館票は画面がこの予定から作る
+        out = {"session_id": r["session_id"], "finished": r["finished"], "reply": r["reply"], "visit": None}
         if r.get("visit"):
             with closing(connect()) as db:
-                host = hr.lookup(db, r["visit"]["host_employee_no"])
-                out["visit"] = kiosk.visit_for_kiosk(r["visit"], host)
-                out["pass_id"] = kiosk.issue_pass(db, r["visit"]["visit_id"], device["device_id"], settings.kiosk_pass_minutes)
+                out["visit"] = kiosk.visit_for_kiosk(r["visit"], hr.lookup(db, r["visit"]["host_employee_no"]))
         return out
 
     @app.post("/api/kiosk/sessions", status_code=201)
-    def kiosk_start(request: Request, device: dict = Depends(current_device)):
+    async def kiosk_start(request: Request, device: dict = Depends(current_device)):
         started = time.monotonic()
         try:
-            return kiosk_reply(device, request.app.state.reception.start(f"kiosk:{device['device_id']}"))
+            r = await run_in_threadpool(request.app.state.reception.start, f"kiosk:{device['device_id']}")
+            return await run_in_threadpool(kiosk_reply, r)
         finally:
-            padded(started)
+            await padded(started)
 
     @app.post("/api/kiosk/sessions/{session_id}/messages")
-    def kiosk_send(session_id: str, req: ChatMessage, request: Request, device: dict = Depends(current_device)):
+    async def kiosk_send(session_id: str, req: ChatMessage, request: Request, device: dict = Depends(current_device)):
         started = time.monotonic()
         try:
-            return kiosk_reply(device, request.app.state.reception.send(f"kiosk:{device['device_id']}", session_id, req.text))
+            r = await run_in_threadpool(request.app.state.reception.send, f"kiosk:{device['device_id']}", session_id, req.text)
+            return await run_in_threadpool(kiosk_reply, r)
         finally:
-            padded(started)
+            await padded(started)
+
+    def check_in(device: dict, code: str) -> dict:
+        failed = {"ok": False, "message": kiosk.FAILED_CODE, "visit": None}
+        # 失敗が続いている端末では照合しない。返事は間違えたときと同じ（止めているかどうかを分からせない）
+        if limiter.blocked(device["device_id"]):
+            return failed
+        with closing(connect()) as db:
+            visit = visits.find_by_code(db, code, today())
+            if not visit:
+                limiter.fail(device["device_id"])
+                return failed
+            visit = visits.check_in(db, visit)
+            host = hr.lookup(db, visit["host_employee_no"])
+            if visit["first_check_in"]:
+                desk.add_record(db, channel="来訪", category="来訪", purpose="インビテーションコードで受付",
+                                visitor={"company": visit["visitor_company"], "name": visit["visitor_name"]},
+                                host=host, route=host["dept"] if host else "総務部", priority="低",
+                                appointment={k: v for k, v in visit.items() if k != "first_check_in"})
+            shown = kiosk.visit_for_kiosk(visit, host)
+        return {"ok": True, "message": f"{shown['visitor_company']} {shown['visitor_name']}様、お待ちしておりました。"
+                                       "担当の者に到着をお知らせしました。入館票をお受け取りのうえ、会議室へお進みください。",
+                "visit": shown}
 
     @app.post("/api/kiosk/check-in")
-    def kiosk_check_in(req: CheckIn, device: dict = Depends(current_device)):
-        started = time.monotonic()
-        failed = {"ok": False, "message": kiosk.FAILED_CODE, "visit": None, "pass_id": None}
-        try:
-            if limiter.blocked(device["device_id"]):
-                return failed
-            with closing(connect()) as db:
-                visit = visits.find_by_code(db, req.code, today())
-                if not visit:
-                    limiter.fail(device["device_id"])
-                    return failed
-                visit = visits.check_in(db, visit)
-                host = hr.lookup(db, visit["host_employee_no"])
-                if visit["first_check_in"]:
-                    desk.add_record(db, channel="来訪", category="来訪", purpose="インビテーションコードで受付",
-                                    visitor={"company": visit["visitor_company"], "name": visit["visitor_name"]},
-                                    host=host, route=host["dept"] if host else "総務部", priority="低",
-                                    appointment={k: v for k, v in visit.items() if k != "first_check_in"})
-                shown = kiosk.visit_for_kiosk(visit, host)
-                pass_id = kiosk.issue_pass(db, visit["visit_id"], device["device_id"], settings.kiosk_pass_minutes)
-            return {"ok": True, "message": f"{shown['visitor_company']} {shown['visitor_name']}様、お待ちしておりました。"
-                                           "担当の者に到着をお知らせしました。入館票をお受け取りのうえ、会議室へお進みください。",
-                    "visit": shown, "pass_id": pass_id}
-        finally:
-            padded(started)
-
-    @app.get("/api/kiosk/passes/{pass_id}.html")
-    def kiosk_pass(pass_id: str, device: dict = Depends(current_device)):
+    async def kiosk_check_in(req: CheckIn, device: dict = Depends(current_device)):
         started = time.monotonic()
         try:
-            with closing(connect()) as db:
-                visit_id = kiosk.pass_visit_id(db, pass_id, device["device_id"])
-                visit = visits.find(db, visit_id) if visit_id else None
-                if not visit:
-                    raise not_found("入館票")
-                host = hr.lookup(db, visit["host_employee_no"])
-                body = visits.pass_html(visit, host["name"] if host else "担当の者")
-            return HTMLResponse(body, headers={
-                # 入館票の中のスクリプト（印刷ボタン）は動かさない。印刷は受付端末の画面が行う
-                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'",
-                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+            return await run_in_threadpool(check_in, device, req.code)
         finally:
-            padded(started)
+            await padded(started)
 
     # ------------------------------------------------ Web画面（最後に登録する）
 
