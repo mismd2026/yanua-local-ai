@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -15,6 +16,7 @@ class Settings:
     # 会話の途中の状態（LangGraph のチェックポイント）。社内文書の保存先とは別のファイルにする
     chat_db_path: Path = Path("data/chat.db")
     helpdesk_data: Path = Path("demo/company/flows/helpdesk")
+    reception_data: Path = Path("demo/company/flows/reception")   # 受付の引き継ぎ先（routes.csv）
     roles_path: Path = Path("config/roles.json")
     identity_path: Path = Path("config/identity.json")   # 本人確認の方針
     top_k: int = 5
@@ -31,6 +33,13 @@ class Settings:
     # 文書の取り込み（管理者のジョブ）で指定できるフォルダ。ここの下にあるフォルダだけを取り込む
     ingest_roots: list[Path] = field(default_factory=lambda: [Path("demo/company")])
     job_workers: int = 1                 # 重いジョブを同時に流す数（GPU がないので既定は1）
+
+    # 受付端末（K-043）
+    kiosk_min_seconds: float = 0.6       # 受付の API はこの時間より早く返さない（コードが正しいかを時間の違いから分からせない）
+    kiosk_pass_minutes: int = 60         # 入館票を開ける時間
+    kiosk_max_failures: int = 10         # 1分にこの回数を超えてコードを間違えた端末は、しばらく照合しない
+    visits_import_max_bytes: int = 2_000_000   # 来訪予定の取り込み（CSV）の大きさの上限
+    today: date | None = None            # テスト用に「今日」を決める。None なら本当の今日
     # 組み立てた Web画面（cd web && npm run build）。なければ API だけを動かす
     web_dist: Path | None = WEB_DIST
 

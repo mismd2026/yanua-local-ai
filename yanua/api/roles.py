@@ -23,7 +23,16 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "helpdesk": frozenset({EMPLOYEE}),
     "jobs.own": frozenset({EMPLOYEE}),
     "jobs.all": frozenset({"管理者"}),
+    # 段階2（K-045・K-018・K-043）
+    "notifications": frozenset({EMPLOYEE}),           # 自分あて・自分の部署あてのお知らせだけ
+    "visits.own": frozenset({EMPLOYEE}),              # 自分が担当の来訪予定だけ
+    "visits.all": frozenset({"総務"}),                # 全社の来訪予定・取り込み・ほかの人の予定の登録と取り消し
+    "reception.records": frozenset({"総務"}),         # 受付の記録（電話・Web・来訪）
+    "tickets": frozenset({"情シス"}),                 # ヘルプデスクの問い合わせ票
+    "kiosk.devices": frozenset({"管理者"}),           # 受付端末の登録・取り消し
 }
+# 受付端末は人の役割ではない。端末トークンで受付の API（/api/kiosk/...）だけを使える（yanua/api/kiosk.py）
+KIOSK = "受付端末"
 
 
 class RoleConfigError(ValueError):

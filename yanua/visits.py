@@ -224,6 +224,37 @@ def for_date(db, day: date) -> list[dict]:
     return [_row(r) for r in rows]
 
 
+def list_visits(db, host_employee_no: str | None = None, day: date | None = None,
+                from_day: date | None = None) -> list[dict]:
+    """来訪予定の一覧（取り消したものも含め、cancelled を付けて返す）。画面の一覧用。"""
+    ensure_schema(db)
+    where, args = ["1 = 1"], []
+    if host_employee_no is not None:
+        where.append("host_employee_no = ?")
+        args.append(host_employee_no)
+    if day is not None:
+        where.append("date = ?")
+        args.append(day.isoformat())
+    if from_day is not None:
+        where.append("date >= ?")
+        args.append(from_day.isoformat())
+    rows = db.execute(f"SELECT {', '.join(COLUMNS)}, cancelled FROM visits WHERE {' AND '.join(where)} "
+                      "ORDER BY date, time, visit_id", args)
+    return [{**_row(r[:-1]), "cancelled": bool(r[-1])} for r in rows]
+
+
+def find(db, visit_id: int) -> dict | None:
+    ensure_schema(db)
+    r = db.execute(f"SELECT {', '.join(COLUMNS)}, cancelled FROM visits WHERE visit_id = ?", (visit_id,)).fetchone()
+    return {**_row(r[:-1]), "cancelled": bool(r[-1])} if r else None
+
+
+def cancel(db, visit_id: int) -> None:
+    """予定を取り消す。取り消したコードは受付で使えなくなる（間違ったコードと同じ返事になる）。"""
+    with db:
+        db.execute("UPDATE visits SET cancelled = 1 WHERE visit_id = ?", (visit_id,))
+
+
 def check_in(db, visit: dict) -> dict:
     """受付が済んだことを記録し、担当者にお知らせを残す。2回目以降はお知らせを重ねない。"""
     host = hr.lookup(db, visit["host_employee_no"])
@@ -249,7 +280,8 @@ def notify(db, employee_no: str, dept: str, kind: str, message: str, ref: str = 
         db.execute(sql, args)
 
 
-def notifications(db, employee_no: str = "", dept: str = "", unread_only: bool = True) -> list[dict]:
+def notifications(db, employee_no: str = "", dept: str = "", unread_only: bool = True,
+                  limit: int | None = None) -> list[dict]:
     ensure_schema(db)
     where, args = ["1 = 1"], []
     if employee_no or dept:
@@ -257,10 +289,13 @@ def notifications(db, employee_no: str = "", dept: str = "", unread_only: bool =
         args += [employee_no, dept]
     if unread_only:
         where.append("read = 0")
-    rows = db.execute(
-        "SELECT notification_id, created_at, employee_no, dept, kind, message, ref FROM notifications "
-        f"WHERE {' AND '.join(where)} ORDER BY notification_id", args)
-    keys = ("notification_id", "created_at", "employee_no", "dept", "kind", "message", "ref")
+    sql = ("SELECT notification_id, created_at, employee_no, dept, kind, message, ref, read FROM notifications "
+           f"WHERE {' AND '.join(where)} ORDER BY notification_id")
+    if limit is not None:
+        # 新しいものから limit 件を、古い順に並べて返す
+        sql = f"SELECT * FROM ({sql} DESC LIMIT {int(limit)}) ORDER BY notification_id"
+    rows = db.execute(sql, args)
+    keys = ("notification_id", "created_at", "employee_no", "dept", "kind", "message", "ref", "read")
     return [dict(zip(keys, r)) for r in rows]
 
 

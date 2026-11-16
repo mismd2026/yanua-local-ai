@@ -85,6 +85,14 @@ curl -b c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
      -d '{"question": "在宅勤務は週に何日までできますか？"}' http://127.0.0.1:8000/api/ask
 ```
 
+段階2の API（画面は次の段階）：
+
+- **お知らせ**（`GET /api/notifications`・`POST /api/notifications/read`）：自分あてと、自分の部署あてだけ。ほかの人のお知らせの番号を送っても既読になりません
+- **来訪予定**（`POST・GET・DELETE /api/visits`、`POST /api/visits/import`）：社員は自分が担当の予定だけ。総務は全社の予定（`?date=`）・ほかの人の予定の登録と取り消し・CSV の取り込み（本文に CSV をそのまま送る。カレンダーの書き出しも同じ API）。インビテーションコードは登録したときに1回だけ返します
+- **受付の記録**（`GET /api/reception/records`、`POST .../{id}/done`）：総務だけ
+- **問い合わせ票**（`GET /api/tickets`・`GET/PATCH /api/tickets/{id}`）：情シスだけ。状態は 未対応・対応中・対応済み
+- **受付端末**：管理者が `POST /api/kiosk/devices` で端末を登録すると、端末トークンを1回だけ返します。受付端末は `Authorization: Bearer <端末トークン>` で `/api/kiosk/sessions`・`/api/kiosk/check-in`・`/api/kiosk/passes/{id}.html` だけを使えます。違う日・間違い・取り消しのコードには、同じ形・同じ時間で返事をします
+
 前の API（`POST /ask` だけ）は `python -m yanua serve-legacy` で起動できます。
 
 ### Web画面（web/）
