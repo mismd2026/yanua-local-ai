@@ -137,8 +137,10 @@ describe("S-22 全社の来訪予定", () => {
     expect(await screen.findByText("予定 1 件（受付済み 0 件）")).toBeInTheDocument();
     expect(screen.getByText("山田 太郎")).toBeInTheDocument();
 
+    // 「ファイルを選ぶ」の文字は画面に1つだけ（読み上げ用の名前は別）
+    expect(screen.getAllByText("ファイルを選ぶ")).toHaveLength(1);
     const file = new File(["date,time,company,visitor,host_employee_no,room\n"], "visits.csv", { type: "text/csv" });
-    await userEvent.upload(screen.getByLabelText(/ファイルを選ぶ/), file);
+    await userEvent.upload(screen.getByLabelText(/取り込むファイルを選ぶ/), file);
     expect(await screen.findByText("MRKT-7Q4A")).toBeInTheDocument();
     const post = calls.find((c) => c.method === "POST");
     expect(post?.headers["Content-Type"]).toBe("text/csv");

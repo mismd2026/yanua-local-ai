@@ -104,9 +104,11 @@ function ImportCard({ onImported }: { onImported: () => void }) {
         来訪予定の CSV（date・time・company・visitor・host_employee_no・room の列）か、Googleカレンダーのアドオンの書き出しを選んでください。
         カレンダーの書き出しは、日時・会議室の変更（リスケ）と取り消しも反映します。
       </p>
-      <label className="file">
+      {/* ブラウザの「ファイルを選択」のボタンは見えなくし、押せる場所はこのボタン1つにする（入力欄はキーボードでも選べる） */}
+      <label className={busy ? "file busy" : "file"}>
         <input type="file" accept=".csv,text/csv" onChange={(e) => void upload(e)} disabled={busy} />
-        <span>{busy ? "取り込んでいます…" : "ファイルを選ぶ"}</span>
+        <span aria-hidden="true">{busy ? "取り込んでいます…" : "ファイルを選ぶ"}</span>
+        <span className="sr-only">{busy ? "取り込んでいます" : "取り込むファイルを選ぶ"}</span>
       </label>
       {error && <p className="error" role="alert">{error}</p>}
       {result && <ImportReport r={result} />}

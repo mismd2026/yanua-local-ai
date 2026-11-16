@@ -3,7 +3,7 @@
 // - 一定時間触られなければ、最初の画面に戻る（前の方の内容を残さない）
 // - 返事の文はサーバーが決めたものをそのまま出す。コードが違う日・間違い・取り消しでも、画面は同じ
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { CheckInReply, formatCode, kiosk, KioskError, KioskReply, KioskVisit, loadToken, saveToken } from "./kioskApi";
+import { CheckInReply, dropInternalLogin, formatCode, kiosk, KioskError, KioskReply, KioskVisit, loadToken, saveToken } from "./kioskApi";
 
 export const IDLE_MS = 60_000;
 
@@ -41,6 +41,17 @@ export default function Kiosk({ idleMs = IDLE_MS }: { idleMs?: number }) {
     failures.current.push(Date.now());
     recount();
   }, [recount]);
+
+  // 正しいコードで受け付けたら、案内を消し、数えた回数も消す
+  const succeeded = useCallback(() => {
+    failures.current = [];
+    setCallStaff(false);
+  }, []);
+
+  // 画面を開くたびに、社内のログインを消す（受付端末では社内にログインしない）
+  useEffect(() => {
+    void dropInternalLogin();
+  }, []);
 
   // 1分たったら案内を消せるよう、案内を出しているあいだは数え直す
   useEffect(() => {
@@ -94,14 +105,14 @@ export default function Kiosk({ idleMs = IDLE_MS }: { idleMs?: number }) {
       )}
       <main className="k-main" key={round}>
         {screen.kind === "setup" && (
-          <Setup notice={screen.notice} onSaved={(t) => { saveToken(t); setToken(t); home(); }} />
+          <Setup notice={screen.notice} onSaved={(t) => { void dropInternalLogin(); saveToken(t); setToken(t); home(); }} />
         )}
         {screen.kind === "welcome" && <Welcome onCode={() => setScreen({ kind: "code" })} onNoCode={() => setScreen({ kind: "chat" })} />}
         {screen.kind === "code" && (
           <CodeEntry
             token={token}
             onError={onError}
-            onOk={(r) => setScreen({ kind: "visit", visit: r.visit!, message: r.message })}
+            onOk={(r) => { succeeded(); setScreen({ kind: "visit", visit: r.visit!, message: r.message }); }}
             onFailed={failed}
             onNoCode={() => setScreen({ kind: "chat" })}
           />
@@ -110,7 +121,7 @@ export default function Kiosk({ idleMs = IDLE_MS }: { idleMs?: number }) {
           <Conversation
             token={token}
             onError={onError}
-            onVisit={(visit, message) => setScreen({ kind: "visit", visit, message })}
+            onVisit={(visit, message) => { succeeded(); setScreen({ kind: "visit", visit, message }); }}
             onDone={(message) => setScreen({ kind: "done", message })}
           />
         )}
@@ -134,6 +145,7 @@ function Setup({ notice, onSaved }: { notice?: string; onSaved: (token: string) 
     <section className="k-panel k-setup">
       <h1>受付端末の設定</h1>
       <p>管理者が発行した端末トークンを入れてください。この画面は、設定のときに管理者だけが使います。</p>
+      <p className="k-small">受付端末では社内にログインしません。設定すると、このブラウザの社内のログインは消えます。</p>
       {notice && <p className="k-notice" role="alert">{notice}</p>}
       <form onSubmit={(e) => { e.preventDefault(); if (value.trim()) onSaved(value.trim()); }}>
         <label htmlFor="k-token">端末トークン</label>

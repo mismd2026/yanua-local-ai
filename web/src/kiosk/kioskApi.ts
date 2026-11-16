@@ -48,6 +48,20 @@ export interface CheckInReply {
   visit: KioskVisit | null;
 }
 
+// 受付端末では社内にログインしない。社内のログインのクッキー（HttpOnly）は画面からは消せないので、
+// サーバーのログアウトを呼んで、クッキーとサーバーのセッションの両方を消す。失敗しても受付は続ける
+export async function dropInternalLogin(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "X-Yanua-Client": "kiosk", Accept: "application/json" },
+      credentials: "same-origin",
+    });
+  } catch {
+    // 受付の API は端末トークンだけで動く（クッキーは送らない）ので、ここが失敗しても受付には影響しない
+  }
+}
+
 export async function kiosk<T>(token: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {

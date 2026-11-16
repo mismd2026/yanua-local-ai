@@ -510,6 +510,12 @@ def test_kiosk_gets_only_the_kiosk_page(settings, tmp_path):
         assert c.get("/kiosk/missing.js").status_code == 404
 
 
+def test_default_ingest_roots_are_docs_and_public():
+    from yanua.api import Settings
+
+    assert Settings().ingest_roots == [Path("demo/company/docs"), Path("demo/company/public")]
+
+
 def test_no_web_without_build(client):
     assert client.get("/").status_code == 404
 

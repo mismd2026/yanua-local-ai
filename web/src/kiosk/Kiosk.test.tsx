@@ -50,8 +50,9 @@ describe("受付端末", () => {
     await userEvent.click(screen.getByRole("button", { name: "入館票を印刷する" }));
     expect(print).toHaveBeenCalled();
 
-    expect(calls.every((c) => c.headers.Authorization === "Bearer yk_test" && c.headers["X-Yanua-Client"])).toBe(true);
-    expect(calls.map((c) => c.body.code)).toEqual(["ZZZZ-ZZZZ", "HJ6P-W9XE"]);
+    const kioskCalls = calls.filter((c) => c.path.startsWith("/api/kiosk/"));
+    expect(kioskCalls.every((c) => c.headers.Authorization === "Bearer yk_test" && c.headers["X-Yanua-Client"])).toBe(true);
+    expect(kioskCalls.map((c) => c.body.code)).toEqual(["ZZZZ-ZZZZ", "HJ6P-W9XE"]);
   });
 
   it("コードを持っていない方は会話で受け付ける", async () => {
@@ -108,7 +109,7 @@ describe("受付端末", () => {
     expect(await screen.findByText("お手数ですが、受付の者をお呼びください。")).toBeInTheDocument();
     // サーバーの返事の文言は、そのまま出している
     expect(screen.getByText("恐れ入りますが、コードを確認できませんでした。")).toBeInTheDocument();
-    expect(calls).toHaveLength(3);
+    expect(calls.filter((c) => c.path === "/api/kiosk/check-in")).toHaveLength(3);
 
     await userEvent.click(screen.getByRole("button", { name: "最初に戻る" }));
     expect(screen.getByText("お手数ですが、受付の者をお呼びください。")).toBeInTheDocument();
@@ -116,6 +117,52 @@ describe("受付端末", () => {
       await vi.advanceTimersByTimeAsync(66_000);
     });
     expect(screen.queryByText(/受付の者をお呼びください/)).not.toBeInTheDocument();
+  });
+
+  it("正しいコードで受け付けたら、受付の者を呼ぶ案内を消す", async () => {
+    let n = 0;
+    fakeApi({
+      "POST /api/kiosk/check-in": () => {
+        n += 1;
+        return { json: n <= 3 ? FAILED : { ok: true, message: "ABC商事 木村 誠様、お待ちしておりました。", visit: VISIT } };
+      },
+    });
+    render(<Kiosk />);
+    await userEvent.click(screen.getByRole("button", { name: /お持ちの方/ }));
+    const input = screen.getByLabelText("インビテーションコード");
+    for (let i = 0; i < 3; i++) {
+      await userEvent.type(input, "ZZZZZZZZ");
+      await userEvent.click(screen.getByRole("button", { name: "確認する" }));
+      await screen.findByText("恐れ入りますが、コードを確認できませんでした。");
+    }
+    expect(await screen.findByText("お手数ですが、受付の者をお呼びください。")).toBeInTheDocument();
+    await userEvent.type(input, "HJ6PW9XE");
+    await userEvent.click(screen.getByRole("button", { name: "確認する" }));
+    expect(await screen.findByText("ABC商事 木村 誠様、お待ちしておりました。")).toBeInTheDocument();
+    expect(screen.queryByText(/受付の者をお呼びください/)).not.toBeInTheDocument();
+    // 最初の画面に戻っても、もう出ない（数えた回数も消している）
+    await userEvent.click(screen.getByRole("button", { name: "終わる" }));
+    expect(screen.queryByText(/受付の者をお呼びください/)).not.toBeInTheDocument();
+  });
+
+  it("画面を開くたびと端末トークンを設定するときに、社内のログインを消す（ログアウトを呼ぶ）", async () => {
+    const { calls } = fakeApi({ "POST /api/auth/logout": { ok: true } });
+    const { unmount } = render(<Kiosk />);
+    await vi.waitFor(() => expect(calls.filter((c) => c.path === "/api/auth/logout")).toHaveLength(1));
+    const logout = calls.find((c) => c.path === "/api/auth/logout")!;
+    expect(logout.method).toBe("POST");
+    expect(logout.headers["X-Yanua-Client"]).toBeTruthy();
+    expect(logout.headers.Authorization).toBeUndefined();
+    unmount();
+
+    window.localStorage.clear();
+    render(<Kiosk />);
+    await vi.waitFor(() => expect(calls.filter((c) => c.path === "/api/auth/logout")).toHaveLength(2));
+    expect(screen.getByText(/受付端末では社内にログインしません/)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("端末トークン"), "yk_new");
+    await userEvent.click(screen.getByRole("button", { name: "設定する" }));
+    await vi.waitFor(() => expect(calls.filter((c) => c.path === "/api/auth/logout")).toHaveLength(3));
+    expect(window.localStorage.getItem("yanua-kiosk-token")).toBe("yk_new");
   });
 
   it("コードの入力のゆれをそろえる", () => {
