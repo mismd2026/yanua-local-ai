@@ -15,6 +15,7 @@ class Settings:
     chat_db_path: Path = Path("data/chat.db")
     helpdesk_data: Path = Path("demo/company/flows/helpdesk")
     roles_path: Path = Path("config/roles.json")
+    identity_path: Path = Path("config/identity.json")   # 本人確認の方針
     top_k: int = 5
 
     # 待ち受けるアドレス。開発用ログインは、このマシンの中（127.0.0.1）で待ち受けるときだけ使える

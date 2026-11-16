@@ -43,6 +43,7 @@ from .auth import User
 from .chat import HelpdeskSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
 from .jobs import FINISHED, JobContext, JobQueue
+from ..identity import load_policy
 from .roles import allowed, load_roles, permissions_of
 from .settings import Settings
 
@@ -81,6 +82,7 @@ class ChatMessage(BaseModel):
 def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
     settings.check()
     roles = load_roles(settings.roles_path)
+    policy = load_policy(settings.identity_path)
     jobs = JobQueue(settings.db_path, settings.job_workers)
     local = threading.local()
 
@@ -114,7 +116,7 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
     async def lifespan(app: FastAPI):
         jobs.start()
         app.state.helpdesk = HelpdeskSessions(settings.db_path, settings.chat_db_path, settings.helpdesk_data, llm,
-                                              settings.top_k, settings.chat_idle_minutes)
+                                              settings.top_k, settings.chat_idle_minutes, policy)
         yield
         jobs.stop()
         app.state.helpdesk.close()

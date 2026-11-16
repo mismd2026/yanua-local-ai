@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import re
 import unicodedata
@@ -62,6 +63,10 @@ CREATE TABLE IF NOT EXISTS employees (
     dept_code   TEXT NOT NULL DEFAULT '',
     active      INTEGER NOT NULL,
     email       TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS hr_departments (
+    dept      TEXT PRIMARY KEY,
+    dept_code TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS hr_imports (
     imported_at TEXT NOT NULL,
@@ -182,11 +187,61 @@ def suggest_mapping(headers: list[str], llm: ChatModel | None = None) -> dict:
 
 # ---------------------------------------------------------------- 取り込みと照合
 
+# 照合用の列（正規化した氏名・姓・部署）と索引。在籍が100万人でも、名前や部署から索引で引けるようにする
+KEY_COLUMNS = ("name_key", "surname_key", "dept_key")
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_employees_name ON employees(name_key, active);
+CREATE INDEX IF NOT EXISTS idx_employees_surname ON employees(surname_key, active);
+CREATE INDEX IF NOT EXISTS idx_employees_dept ON employees(dept_key, active);
+"""
+# 部署名の末尾。「営業部」は「営業」とも呼ばれるので、末尾を除いた形でも探せるようにする
+DEPT_SUFFIXES = ("事業本部", "事業部", "本部", "部", "課", "室", "グループ", "チーム", "センター", "支店", "支社", "店")
+
+
+def name_key(text: str) -> str:
+    """氏名の照合用の形：全角・半角をそろえ、空白を除き、英字は小文字にする。"""
+    return norm(text).lower()
+
+
+def surname_of(name: str) -> str:
+    """氏名の姓（空白で区切られているときだけ）。1文字の姓は手がかりにならないので空にする。"""
+    parts = re.split(r"\s+", unicodedata.normalize("NFKC", str(name or "")).strip())
+    return parts[0] if len(parts) > 1 and len(parts[0]) >= 2 else ""
+
+
+def _keys(name: str, dept: str) -> tuple[str, str, str]:
+    return name_key(name), name_key(surname_of(name)), name_key(dept)
+
+
 def ensure_schema(db) -> None:
     db.executescript(HR_SCHEMA)
-    # メールアドレスの列がない古い保存先には、列を足す
-    if "email" not in {r[1] for r in db.execute("PRAGMA table_info(employees)")}:
+    cols = {r[1] for r in db.execute("PRAGMA table_info(employees)")}
+    # 古い保存先には列を足す
+    if "email" not in cols:
         db.execute("ALTER TABLE employees ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+    added = [c for c in KEY_COLUMNS if c not in cols]
+    for c in added:
+        db.execute(f"ALTER TABLE employees ADD COLUMN {c} TEXT NOT NULL DEFAULT ''")
+    db.executescript(INDEXES)
+    if "dept_code" not in {r[1] for r in db.execute("PRAGMA table_info(hr_departments)")}:
+        db.execute("ALTER TABLE hr_departments ADD COLUMN dept_code TEXT NOT NULL DEFAULT ''")
+        db.execute("DELETE FROM hr_departments")
+    if (not db.execute("SELECT 1 FROM hr_departments LIMIT 1").fetchone()
+            and db.execute("SELECT 1 FROM employees LIMIT 1").fetchone()):
+        refresh_departments(db)
+    if added:
+        rows = db.execute("SELECT employee_no, name, dept FROM employees").fetchall()
+        with db:
+            db.executemany("UPDATE employees SET name_key = ?, surname_key = ?, dept_key = ? WHERE employee_no = ?",
+                           [(*_keys(n, d), no) for no, n, d in rows])
+
+
+def refresh_departments(db) -> None:
+    """部署の一覧（在籍者のいる部署）を作り直す。照合のたびに在籍者全員を読まないために、取り込みのときに作っておく。"""
+    with db:
+        db.execute("DELETE FROM hr_departments")
+        db.execute("INSERT OR IGNORE INTO hr_departments SELECT dept, MAX(dept_code) FROM employees "
+                   "WHERE active = 1 GROUP BY dept")
 
 
 def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
@@ -226,8 +281,15 @@ def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
 
     with db:
         db.execute("DELETE FROM employees")
-        db.executemany("INSERT INTO employees (employee_no, name, dept, dept_code, active, email) VALUES (?, ?, ?, ?, ?, ?)",
-                       list(records.values()))
+        db.executemany("INSERT INTO employees (employee_no, name, dept, dept_code, active, email, "
+                       "name_key, surname_key, dept_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       [(*r, *_keys(r[1], r[2])) for r in records.values()])
+        db.execute("DELETE FROM hr_departments")
+        depts: dict[str, str] = {}
+        for r in records.values():
+            if r[4]:
+                depts[r[2]] = depts.get(r[2]) or r[3]
+        db.executemany("INSERT INTO hr_departments VALUES (?, ?)", list(depts.items()))
         report.active = sum(1 for r in records.values() if r[4])
         report.inactive = len(records) - report.active
         db.execute(
@@ -280,22 +342,94 @@ def last_import(db) -> dict | None:
     return {"imported_at": row[0], "source": row[1], "active": row[2], "inactive": row[3], "age_days": age}
 
 
+def _substrings(text: str, max_len: int = 16) -> list[str]:
+    """文に含まれる2文字以上の部分文字列（照合用の形）。名前や部署の索引をこれで引く。"""
+    t = name_key(text)[:300]
+    return list({t[i:j] for i in range(len(t)) for j in range(i + 2, min(len(t), i + max_len) + 1)})
+
+
+def _by_keys(db, column: str, keys: list[str], dept: str = "", limit: int = 0) -> list[dict]:
+    out: dict[str, dict] = {}
+    for i in range(0, len(keys), 500):   # SQLite に一度に渡せる値の数に収める
+        part = keys[i:i + 500]
+        sql = (f"SELECT employee_no, name, dept, dept_code FROM employees "
+               f"WHERE {column} IN ({','.join('?' * len(part))}) AND active = 1")
+        args = list(part)
+        if dept:
+            sql += " AND dept_key = ?"
+            args.append(name_key(dept))
+        if limit:
+            sql += f" LIMIT {int(limit) - len(out)}"
+        for r in db.execute(sql, args):
+            out[r[0]] = {"employee_no": r[0], "name": r[1], "dept": r[2], "dept_code": r[3]}
+        if limit and len(out) >= limit:
+            break
+    return list(out.values())
+
+
+SURNAME_LIMIT = 50   # 姓だけで探すときに返す人数の上限（これより多ければ、どのみち姓だけでは決まらない）
+
+
+def names_in_text(db, text: str, dept: str = "") -> tuple[list[dict], list[dict]]:
+    """文の中にフルネームが出てくる在籍中の社員と、姓だけが出てくる社員を、索引で探す。
+
+    フルネームが一致した人がいれば、姓では探さない。姓で探すときは、部署が分かっていれば部署で絞り、
+    SURNAME_LIMIT 人までにする（「佐藤」で何万人も読み込まないため）。
+    """
+    ensure_schema(db)
+    keys = _substrings(text)
+    full = _by_keys(db, "name_key", keys)
+    if full:
+        return full, []
+    return [], _by_keys(db, "surname_key", keys, dept=dept, limit=SURNAME_LIMIT)
+
+
+def departments(db) -> dict[str, str | None]:
+    """部署の呼び方（照合用の形）→ 部署名。「営業部」なら「営業部」「営業」。
+    2つの部署が同じ呼び方になるとき（営業部と営業課など）は、どちらとも決めない（None）。"""
+    ensure_schema(db)
+    return _dept_aliases(tuple(sorted(d for (d,) in db.execute("SELECT dept FROM hr_departments"))))
+
+
+@functools.lru_cache(maxsize=8)
+def _dept_aliases(depts: tuple[str, ...]) -> dict[str, str | None]:
+    out: dict[str, str | None] = {}
+    for dept in depts:
+        names = {name_key(dept)}
+        for suf in DEPT_SUFFIXES:
+            if dept.endswith(suf) and len(dept) - len(suf) >= 2:
+                names.add(name_key(dept[: -len(suf)]))
+                break
+        for n in names:
+            out[n] = dept if out.get(n, dept) == dept else None
+    return out
+
+
+def dept_by_code(db, code: str) -> str:
+    """部署コードから部署名。なければ空。"""
+    ensure_schema(db)
+    c = norm(code)
+    if not c:
+        return ""
+    row = db.execute("SELECT dept FROM hr_departments WHERE dept_code = ?", (c,)).fetchone()
+    return row[0] if row else ""
+
+
+def dept_in_text(db, text: str) -> tuple[str, str]:
+    """文に出てくる部署（部署名, 文の中の言い方）。いちばん長く一致した呼び方を使う。なければ空。"""
+    t = name_key(text)
+    best = ("", "")
+    for alias, dept in departments(db).items():
+        if alias in t and len(alias) > len(best[1]):
+            best = (dept or "", alias)
+    return best
+
+
 def find_in_text(db, text: str) -> list[dict]:
     """文の中に名前が出てくる在籍中の社員を探す（受付で、訪ね先の社員を見つけるとき用）。
 
     フルネームが含まれていればその人だけ。なければ姓で探し、同じ姓が複数いればすべて返す（呼び出し側で聞き直す）。
-    結果は社内の取次に使うだけで、社外の人に見せない。
+    結果は社内の取次に使うだけで、社外の人に見せない。在籍者を全部読まず、索引で引く。
     """
-    ensure_schema(db)
-    t = _key(text)
-    rows = [
-        {"employee_no": r[0], "name": r[1], "dept": r[2], "dept_code": r[3]}
-        for r in db.execute("SELECT employee_no, name, dept, dept_code FROM employees WHERE active = 1")
-    ]
-    full = [r for r in rows if _key(r["name"]) and _key(r["name"]) in t]
-    if full:
-        return full
-    def surname(name: str) -> str:
-        parts = re.split(r"\s+", unicodedata.normalize("NFKC", name).strip())
-        return parts[0] if len(parts) > 1 else ""
-    return [r for r in rows if len(surname(r["name"])) >= 2 and _key(surname(r["name"])) in t]
+    full, surname = names_in_text(db, text)
+    return full or surname

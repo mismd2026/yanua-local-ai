@@ -116,6 +116,7 @@
 | `helpdesk-kb` | kb.csv | 情シス・管理者 | 列がそろっているか、手順が空でないか |
 | `helpdesk-outages` | outages.csv | 情シス・管理者 | 日時が読めるか |
 | `hr-mapping` | 人事の対応表（JSON） | 人事・管理者 | `hr.py` の load_mapping |
+| `identity` | 本人確認の方針（config/identity.json）：型・聞き方・使う手がかり・確定する組み合わせ・姓を数えるか・聞き返しの回数 | 情シス・管理者 | `identity.py` の build_policy。見本の返事で照合を試せるようにする |
 | `meeting-tools` | 会議ツールごとの名前の位置・枠の色 | 総務・管理者 | 値の範囲。デモ動画で読み取りを試せるようにする |
 | `meeting-glossary` | 用語集 | 総務・管理者 | 1行に1語 |
 | `network` | config/network.json | 管理者だけ | `netpolicy.py` の load_policy。宛先の書き方 |

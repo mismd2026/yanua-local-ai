@@ -44,7 +44,9 @@ def test_import_keeps_only_needed_columns(db):
     # 本人確認に使わない列は、読み込んだ時点で捨てる
     assert set(report.dropped_columns) == {"氏名カナ", "生年月日", "入社日"}
     cols = [r[1] for r in db.execute("PRAGMA table_info(employees)")]
-    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email"]
+    # 保存するのは本人確認に使う列と、その照合用の形（正規化した氏名・姓・部署）だけ
+    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email",
+                    "name_key", "surname_key", "dept_key"]
 
 
 def test_verify_needs_both_number_and_name(db):

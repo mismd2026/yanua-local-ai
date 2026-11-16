@@ -3,12 +3,11 @@
 - 会話の状態は LangGraph のチェックポイントとして SQLite（chat.db）に残す。サーバーを再起動しても続けられる
 - 会話はそれを始めた人しか続けられない。ほかの人の会話の番号を送っても「見つかりません」と返す
 - 返事のないまま chat_idle_minutes が過ぎた会話は消す
-- 本人確認はログインした人の個人アカウントから始める（accounts.csv で社員番号を引く）
+- ログインした人は、ログインの時点で本人が分かっているので、本人確認を省いてお困りごとから始める
 """
 
 from __future__ import annotations
 
-import csv
 import sqlite3
 import threading
 import uuid
@@ -18,6 +17,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from .. import hr
 from ..flows.internal.helpdesk import build_app
 from ..llm import ChatModel
 from ..store import Store
@@ -40,18 +40,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def account_for(helpdesk_data: Path, employee_no: str) -> str:
-    """その社員の個人アカウント。なければ空（ヘルプデスクが従業員番号から聞く）。"""
-    with (helpdesk_data / "accounts.csv").open(encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            if r["type"] == "personal" and r["employee_no"] == employee_no:
-                return r["account"]
-    return ""
-
-
 class HelpdeskSessions:
     def __init__(self, db_path: Path, chat_db_path: Path, helpdesk_data: Path, llm: ChatModel, top_k: int,
-                 idle_minutes: int):
+                 idle_minutes: int, policy=None):
+        self.policy = policy
         self.db_path = db_path
         self.helpdesk_data = helpdesk_data
         self.llm = llm
@@ -60,7 +52,8 @@ class HelpdeskSessions:
         Path(chat_db_path).parent.mkdir(parents=True, exist_ok=True)
         # チェックポイント用と、会話の一覧（chat_sessions）用で接続を分ける（書き込みのまとまりが混ざらないように）
         self._saver_conn = sqlite3.connect(str(chat_db_path), check_same_thread=False, timeout=10)
-        self._conn = sqlite3.connect(str(chat_db_path), check_same_thread=False, timeout=10)
+        # 会話の一覧用の接続は自動で確定する（書き込みを開いたままにして、もう片方を待たせないため）
+        self._conn = sqlite3.connect(str(chat_db_path), check_same_thread=False, timeout=10, isolation_level=None)
         self._conn.executescript(SCHEMA)
         self.saver = SqliteSaver(self._saver_conn)
         self.saver.setup()
@@ -77,8 +70,12 @@ class HelpdeskSessions:
         if not hasattr(self._local, "app"):
             self._local.store = Store(self.db_path)
             self._local.app = build_app(self._local.store, self.llm, self.helpdesk_data, self.top_k,
-                                        checkpointer=self.saver)
+                                        checkpointer=self.saver, policy=self.policy)
         return self._local.app
+
+    def _app_store(self) -> Store:
+        self._app()
+        return self._local.store
 
     def _session_lock(self, session_id: str) -> threading.Lock:
         with self._lock:
@@ -90,11 +87,13 @@ class HelpdeskSessions:
             old = [r[0] for r in self._conn.execute(
                 "SELECT session_id FROM chat_sessions WHERE last_used < ? OR finished = 1 AND last_used < ?",
                 (limit, limit))]
+            # 会話の一覧の行は、1つ消すたびに確定する。確定しないまま次のチェックポイントを消そうとすると、
+            # もう片方の接続（チェックポイント用）が書き込みを待たされて「database is locked」になる
             for sid in old:
                 self.saver.delete_thread(sid)
                 self._conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (sid,))
+                self._conn.commit()
                 self._session_locks.pop(sid, None)
-            self._conn.commit()
 
     def _reply(self, session_id: str, state: dict) -> dict:
         finished = "__interrupt__" not in state
@@ -118,10 +117,15 @@ class HelpdeskSessions:
                                (session_id, user.employee_no, now, now))
             self._conn.commit()
         if account is None:
-            account = account_for(self.helpdesk_data, user.employee_no)
+            p = hr.lookup(self._app_store().db, user.employee_no) or {}
+            start = {"account": "", "requester": {
+                "employee_no": user.employee_no, "name": user.name, "dept": user.dept,
+                "dept_code": p.get("dept_code", ""), "account": "", "account_type": "ログイン", "verified": "ログイン"}}
+        else:
+            start = {"account": account}   # 開発用：代表アカウントなどからの問い合わせを試す
         config = {"configurable": {"thread_id": session_id}}
         with self._session_lock(session_id):
-            state = self._app().invoke({"account": account}, config)
+            state = self._app().invoke(start, config)
         return self._reply(session_id, state)
 
     def send(self, user: User, session_id: str, text: str) -> dict:

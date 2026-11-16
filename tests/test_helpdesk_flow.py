@@ -79,6 +79,7 @@ def test_shared_account_printer_not_resolved_creates_ticket(store):
     state, llm, lines = run_demo(store, "1")
     t = state["ticket"]
     assert t["requester"]["verified"] == "人事データと一致"
+    assert t["requester"]["matched"] == ["従業員番号", "名前", "部署"]
     assert t["requester"]["dept"] == "営業部" and t["requester"]["account_type"] == "shared"
     # 社内文書（A06）から出典つきで案内した
     assert [s["doc_id"] for s in t["sources"]] == ["A06"]
@@ -107,13 +108,16 @@ def test_suspicious_mail_notice_comes_first_and_always_escalates(store):
     t = state["ticket"]
     assert t["priority"] == "高" and t["category"] == "メール"
     assert t["requester"]["verified"] == "照合できず"
+    assert "未登録" in t["requester"]["note"] and t["requester"]["declared"]["dept"] == "総務部"
     # 連絡先と状況は別々に聞くので、票の「連絡先」に状況が混ざらない
     assert t["contact"] == "内線2201、終日" and "9時" in t["details"]
     assert llm.answer_prompts == [] and llm.json_prompts == []   # 緊急時はLLMを待たない
 
 
 def test_personal_account_used_by_someone_else_password(store):
+    """番号がわからなくても、名前と部署（「総務」→総務部）で本人と確定する。"""
     state, llm, lines = run_demo(store, "4")
+    assert any("佐藤 花子さん、ありがとうございます" in line for line in lines)
     assert "解決してよかった" in state["result"]
     # 社内文書の答えに加えて、決まった手順（セルフサービスの案内）も出す
     assert any("出典" in line and "セルフサービス" in line for line in lines)
@@ -125,7 +129,7 @@ def test_unverified_person_sees_only_company_wide_documents(store):
     """照合できない人が「人事部」と名乗っても、人事部だけの文書（H01など）は検索の候補に入らない。"""
     llm = FakeLLM()
     app = build_app(store, llm, HELPDESK_DATA)
-    answers = {"従業員番号": "88888", "お名前": "架空 太郎", "所属部署": "人事部",
+    answers = {"本人確認を行う都合上": "人事部の架空太郎です。番号は88888です。",
                "お困り": "人事評価の面談シートの書き方を教えて", "状況": "自分だけです。業務は一部できません。本社3階のPCです。",
                "あと少し": "本社3階のPC、自分だけ、一部できない", "連絡先": "内線1000"}
     run(app, "soumu-common", lambda q: next(v for k, v in answers.items() if k in q), out=lambda *_: None)
@@ -137,10 +141,13 @@ def test_unverified_person_sees_only_company_wide_documents(store):
 def test_retired_employee_is_not_verified(store):
     llm = FakeLLM()
     app = build_app(store, llm, HELPDESK_DATA)
-    answers = {"従業員番号": "10007", "お名前": "渡辺 剛", "所属部署": "営業部",
+    answers = {"本人確認を行う都合上": "営業部の渡辺剛です。10007です。",
                "お困り": "パスワードを忘れました", "解決しましたか": "いいえ", "連絡先": "携帯 090-0000-0000"}
     state = run(app, "eigyo-common", lambda q: next(v for k, v in answers.items() if k in q), out=lambda *_: None)
-    assert state["ticket"]["requester"]["verified"] == "照合できず"
+    r = state["ticket"]["requester"]
+    assert r["verified"] == "照合できず"
+    # 言われた内容は、照合できなくても票に残す
+    assert r["declared"]["employee_no"] == "10007" and r["declared"]["name"] == "渡辺剛"
 
 
 class SaysNoImpact:
@@ -157,3 +164,83 @@ def test_business_impact_is_corrected_by_rule():
     assert out["business"] == "止まっている"
     out = extract_slots(SaysNoImpact(), "印刷できない", "自分だけです。業務は止まっていません。")
     assert out["business"] == "支障なし"
+
+
+class Says:
+    """範囲と業務への影響を決まった値で返す偽のモデル。"""
+
+    name = "fake"
+
+    def __init__(self, scope, business="不明"):
+        self.scope, self.business = scope, business
+
+    def chat(self, messages):
+        return json.dumps({"device": "複合機", "location": "本社2階", "scope": self.scope, "business": self.business},
+                          ensure_ascii=False)
+
+
+@pytest.mark.parametrize("model_scope, answer, expected", [
+    # モデルが取りこぼした「全員」は、ルールで「部署・複数人」に補う（実機の3bで起きた）
+    ("不明", "部署の全員", "部署・複数人"),
+    ("不明", "本社2階の営業部の複合機です。部署の全員が印刷できず、業務が止まっています。", "部署・複数人"),
+    ("自分だけ", "周りの人も印刷できません", "部署・複数人"),
+    ("不明", "他の店でも同じです", "全社"),
+    ("不明", "自分だけです", "自分だけ"),
+    ("不明", "ほかの人は使えています", "自分だけ"),
+    # 言葉がなければ、モデルの答えのまま
+    ("不明", "複合機です", "不明"),
+    ("自分だけ", "複合機です", "自分だけ"),
+    ("不明", "部署の複合機です", "不明"),
+    ("不明", "部署の複合機ですが、使えないのは自分だけです", "自分だけ"),
+    # 「全員」だけで「全社」にはしない（今までのルール）
+    ("全社", "部署の全員が使えません", "部署・複数人"),
+])
+def test_scope_is_completed_by_rule(model_scope, answer, expected):
+    assert extract_slots(Says(model_scope), "印刷できない", answer)["scope"] == expected
+
+
+def test_priority_high_when_department_stops():
+    """「部署の全員が止まっている」は、モデルが範囲を取りこぼしても優先度「高」になる。"""
+    from yanua.flows.internal.helpdesk.graph import calc_priority
+
+    slots = extract_slots(Says("不明", "止まっている"), "印刷できない", "部署の全員が印刷できず、業務が止まっています。")
+    assert calc_priority(slots, urgent=False) == "高"
+
+
+def test_identity_follow_ups_in_conversation(store):
+    """部署だけ → 「お名前か従業員番号」→ 名前がヒットしない → 「従業員番号」→ 番号と部署で確定。"""
+    app = build_app(store, FakeLLM(), HELPDESK_DATA)
+    asked = []
+    answers = iter(["営業部です", "石母田です", "10004", "パスワードを忘れました", "はい"])
+
+    def ask(q):
+        asked.append(q)
+        return next(answers)
+
+    state = run(app, "eigyo-common", ask, out=lambda *_: None)
+    assert "本人確認を行う都合上" in asked[0]
+    assert "お名前か従業員番号" in asked[1]
+    assert "従業員番号を教えて" in asked[2] and "お名前" not in asked[2]
+    assert asked[3].startswith("高橋 美咲さん、ありがとうございます")
+    r = state["requester"]
+    assert r["verified"] == "人事データと一致" and r["matched"] == ["従業員番号", "部署"]
+    assert r["declared"]["name"] == "石母田"
+
+
+def test_identity_gives_up_but_takes_request(store):
+    """聞き返しても確定しなければ、申告内容を控えて依頼は受ける（聞き返しは方針の回数まで）。"""
+    app = build_app(store, FakeLLM(), HELPDESK_DATA)
+    asked = []
+    answers = iter(["私ですが", "わからない", "パスワードを忘れました", "いいえ", "内線1234"])
+
+    def ask(q):
+        asked.append(q)
+        return next(answers)
+
+    state = run(app, "eigyo-common", ask, out=lambda *_: None)
+    # 何も聞き取れなければ3つとも聞き直し、「わからない」と言われたらそれ以上は聞かない
+    assert "所属部署とお名前と従業員番号" in asked[1]
+    assert sum("恐れ入りますが" in q for q in asked) == 1
+    assert asked[2].startswith("ありがとうございます。どのようなことでお困りですか")
+    assert state["ticket"]["requester"]["verified"] == "照合できず"
+    assert state["ticket"]["requester"]["declared"]["said"] == "私ですが / わからない"
