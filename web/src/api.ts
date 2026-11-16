@@ -152,7 +152,12 @@ export interface Job {
 }
 
 // ジョブの種類の表示名（yanua/api/app.py で register したもの）
-export const JOB_NAMES: Record<string, string> = { ingest: "文書の取り込み" };
+export const JOB_NAMES: Record<string, string> = {
+  ingest: "文書の取り込み",
+  "paper-plan": "PDF の仕分けの予定",
+  "paper-convert": "PDF の変換",
+  meeting: "議事録",
+};
 export const jobName = (kind: string) => JOB_NAMES[kind] ?? kind;
 
 export const RUNNING_STATUSES = ["待ち", "実行中"];
@@ -224,3 +229,148 @@ export interface Ticket {
 }
 
 export const TICKET_STATUSES = ["未対応", "対応中", "対応済み"];
+
+// ------------------------------------------------------------ 段階3：ファイルの受け渡し・PDF・議事録
+
+export interface WorkFile {
+  file_id: string;
+  kind: string;
+  name: string;
+  size: number;
+  created_at: string;
+  expires_at: string;
+}
+
+// ファイルのアップロード。本文にファイルをそのまま送る（multipart は使わない。docs/screens.md）。
+// 録画は大きいので、送った量を onProgress（0〜100）で知らせる。そのため fetch ではなく XMLHttpRequest を使う
+export function uploadFile(kind: "pdf" | "recording" | "segments", file: File, onProgress?: (pct: number) => void): Promise<WorkFile> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/uploads?kind=${kind}&name=${encodeURIComponent(file.name)}`);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader(CLIENT_HEADER, "web");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("Accept", "application/json");
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) onProgress(Math.floor((100 * e.loaded) / e.total));
+      };
+    }
+    xhr.onerror = () => reject(new ApiError(0, "network", "サーバーに接続できません。しばらくしてからやり直してください"));
+    xhr.onload = () => {
+      let data: any = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // 本文が JSON でないとき（途中で切れたなど）は、下で共通の文にする
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && data) {
+        onProgress?.(100);
+        resolve(data as WorkFile);
+        return;
+      }
+      const err = data?.error;
+      const e = new ApiError(xhr.status, err?.code ?? "error", err?.message ?? "アップロードできませんでした。しばらくしてからやり直してください");
+      if (xhr.status === 401 && e.code === "not_logged_in") onLoggedOut();
+      reject(e);
+    };
+    xhr.send(file);
+  });
+}
+
+export const fileUrl = (fileId: string) => `/api/files/${encodeURIComponent(fileId)}`;
+
+export interface InboxFile {
+  name: string;
+  size: number;
+  modified: string;
+}
+
+export interface PaperRule {
+  name: string;
+  templates: string[]; // この様式がある変換先（docx・xlsx）
+}
+
+export interface PlanItem {
+  index: number;
+  file: string;
+  rule: string;
+  by: string; // 決め方（rule：ルールで / forced：選び直した / llm：LLM が選んだ / none：当たらない）
+  fields: Record<string, string>;
+  dest: string;
+  ocr: boolean;
+  error: string | null;
+}
+
+export interface PlanResult {
+  placed: string[];
+  skipped: { file: string; reason: string }[];
+  moved: boolean;
+}
+
+export interface Plan {
+  plan_id: string;
+  created_at: string;
+  items: PlanItem[];
+  executed_at: string | null;
+  result: PlanResult | null;
+}
+
+export interface SortRecord {
+  time: string;
+  source: string;
+  dest: string;
+  rule: string;
+  by: string;
+  ocr: string;
+  date: string;
+  company: string;
+  amount: string;
+}
+
+export interface MeetingSegment {
+  start: number;
+  end: number;
+  text: string;
+  speaker: string;
+}
+
+export interface Todo {
+  who: string;
+  what: string;
+  due: string;
+}
+
+export interface MeetingSummary {
+  summary: string;
+  points: string[];
+  decisions: string[];
+  todos: Todo[];
+  next_meeting: string;
+}
+
+export interface MeetingListItem {
+  meeting_id: string;
+  job_id: string | null;
+  title: string;
+  date: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Meeting extends MeetingListItem {
+  place: string;
+  tool: string;
+  participants: string[];
+  error: string | null;
+  segments: MeetingSegment[];
+  summary: MeetingSummary | null;
+  media_name: string;
+  unknown_speakers: number;
+  attendees: string[];
+}
+
+export const MEETING_TOOLS: [string, string][] = [
+  ["zoom", "Zoom"], ["teams", "Teams"], ["meet", "Google Meet"], ["none", "録画の画面から読まない（録音など）"],
+];

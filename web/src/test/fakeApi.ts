@@ -64,6 +64,50 @@ export function fakeApi(routes: Record<string, Handler | unknown>) {
     return new Response(JSON.stringify(json), { status, headers: { "Content-Type": "application/json" } });
   });
   vi.stubGlobal("fetch", fetchMock);
+
+  // アップロード（XMLHttpRequest）も同じ表で返す。本文のファイルは、名前と大きさだけを記録する
+  class FakeXHR {
+    status = 0;
+    responseText = "";
+    withCredentials = false;
+    upload: { onprogress: ((e: { lengthComputable: boolean; loaded: number; total: number }) => void) | null } = { onprogress: null };
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    private method = "GET";
+    private path = "";
+    private headers: Record<string, string> = {};
+    open(method: string, path: string) {
+      this.method = method;
+      this.path = path;
+    }
+    setRequestHeader(k: string, v: string) {
+      this.headers[k] = v;
+    }
+    send(body: Blob) {
+      const file = body as File;
+      calls.push({ method: this.method, path: this.path, body: { name: file.name, size: file.size }, headers: this.headers });
+      const route = routes[`${this.method} ${this.path}`];
+      let status = 200;
+      let json: unknown;
+      if (route === undefined) {
+        status = 404;
+        json = { error: { code: "not_found", message: "見つかりません" } };
+      } else if (typeof route === "function") {
+        const r = (route as Handler)({ name: file.name, size: file.size }, this.headers) as { status?: number; json: unknown };
+        status = r.status ?? 200;
+        json = r.json;
+      } else {
+        json = route;
+      }
+      setTimeout(() => {
+        this.upload.onprogress?.({ lengthComputable: true, loaded: file.size, total: file.size || 1 });
+        this.status = status;
+        this.responseText = JSON.stringify(json);
+        this.onload?.();
+      }, 0);
+    }
+  }
+  vi.stubGlobal("XMLHttpRequest", FakeXHR);
   return { calls };
 }
 
