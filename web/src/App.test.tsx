@@ -141,7 +141,7 @@ describe("S-02 ホーム", () => {
       "GET /api/notifications?unread=1": { notifications: [{}, {}, {}] },
     });
     render(<App />);
-    expect(await screen.findByText("未読のお知らせが 3 件あります。")).toBeInTheDocument();
+    expect(await screen.findByText((_, el) => el?.tagName === "P" && el.textContent === "未読のお知らせが 3 件あります。")).toBeInTheDocument();
     expect(screen.getByText("実行中のジョブはありません。")).toBeInTheDocument();
   });
 

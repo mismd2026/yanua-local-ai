@@ -735,18 +735,25 @@ def install_web(app: FastAPI, dist: Path | None) -> None:
 
     - /assets/... などのファイルはそのまま返す。dist の外のファイルは返さない
     - それ以外の画面の URL（/、/chat など）は index.html を返し、画面の側で切り替える
-    - /api/... と /kiosk は社内の画面を返さない（受付端末は別の画面。段階2）
+    - /kiosk と /kiosk/... は受付端末の画面（kiosk.html）だけを返す。社内の画面（index.html）は返さない。
+      受付端末の画面は別に組み立てるので、社内の画面のコードを含まない
+    - /api/... は画面を返さない
     """
     if not dist or not (Path(dist) / "index.html").is_file():
         return
     root = Path(dist).resolve()
     index = root / "index.html"
+    kiosk_page = root / "kiosk.html"
 
     @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def web(path: str):
         first = path.split("/", 1)[0]
-        if first in ("api", "kiosk", "health"):
+        if first in ("api", "health"):
             raise not_found()
+        if first == "kiosk":
+            if "." in path.rsplit("/", 1)[-1] or not kiosk_page.is_file():
+                raise not_found()
+            return FileResponse(kiosk_page, headers={**WEB_HEADERS, "Cache-Control": "no-cache"})
         if path:
             f = (root / path).resolve()
             if f != root and f.is_relative_to(root) and f.is_file():

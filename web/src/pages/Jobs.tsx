@@ -2,6 +2,7 @@
 // 管理者は、ここから文書の取り込みを始められる（実機で試すため）
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, Job, jobName, Me, RUNNING_STATUSES } from "../api";
+import { Status, time } from "../ui";
 
 const POLL_MS = 3000;
 
@@ -255,13 +256,3 @@ function IngestForm({ onStarted }: { onStarted: (jobId: string) => void }) {
   );
 }
 
-function Status({ s }: { s: string }) {
-  const cls = s === "完了" ? "ok" : s === "失敗" ? "ng" : s === "取り消し" ? "off" : "run";
-  return <span className={`status ${cls}`}>{s}</span>;
-}
-
-function time(iso?: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("ja-JP");
-}

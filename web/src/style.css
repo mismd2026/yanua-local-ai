@@ -132,3 +132,25 @@ main { padding: 1.2rem 1rem; max-width: 1200px; width: 100%; margin: 0 auto; fle
 .result-list { margin: 0; padding-left: 1.2rem; }
 .ingest-row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
 .ingest-row select { font: inherit; padding: 0.4em; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: inherit; max-width: 100%; }
+
+/* 段階2の画面 */
+.spaced { margin-top: 1rem; }
+.grid.wide { grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); }
+.toolbar { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.toolbar select, .toolbar input[type="date"], .form select { font: inherit; padding: 0.35em 0.5em; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: inherit; width: auto; }
+.check { display: inline-flex; gap: 0.3rem; align-items: center; }
+.check input { width: auto; }
+.nowrap { white-space: nowrap; }
+.notes, .records { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.notes li, .records li { border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.9rem; }
+.notes li.unread { border-left: 4px solid var(--accent); }
+.notes li.read .text { color: var(--muted); }
+.note-head, .record-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.form { display: flex; flex-direction: column; gap: 0.6rem; }
+.form-row { display: flex; flex-direction: column; gap: 0.2rem; }
+.form-row label { font-weight: 600; font-size: 0.9rem; }
+.code-once .code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 2rem; letter-spacing: 0.12em; margin: 0; }
+.invitation { white-space: pre-wrap; background: var(--info); padding: 0.8rem; border-radius: 6px; font-family: inherit; overflow-wrap: anywhere; }
+.confirm { display: inline-flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.file input { font: inherit; }
+.count { font-size: 1.3rem; }

@@ -483,7 +483,7 @@ def test_web_serves_index_for_screens(web_client):
 def test_web_does_not_cover_api_kiosk_or_missing_files(web_client):
     r = web_client.get("/api/nothing")
     assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
-    assert web_client.get("/kiosk").status_code == 404
+    assert web_client.get("/kiosk").status_code == 404     # 受付端末の画面を組み立てていなければ、何も返さない
     assert web_client.get("/assets/missing.js").status_code == 404
     assert web_client.get("/health").json()["status"] == "ok"
     assert web_client.get("/api/me").status_code == 401
@@ -493,6 +493,21 @@ def test_web_does_not_serve_outside_dist(web_client):
     for path in ("/../secret.txt", "/%2e%2e/secret.txt", "/assets/..%2f..%2fsecret.txt"):
         r = web_client.get(path)
         assert "外のファイル" not in r.text, path
+
+
+def test_kiosk_gets_only_the_kiosk_page(settings, tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<title>社内</title>", encoding="utf-8")
+    (dist / "kiosk.html").write_text("<title>受付</title>", encoding="utf-8")
+    settings.web_dist = dist
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        for path in ("/kiosk", "/kiosk/", "/kiosk/code"):
+            r = c.get(path)
+            assert r.status_code == 200 and "受付" in r.text and "社内" not in r.text, path
+            assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+        assert "社内" in c.get("/").text
+        assert c.get("/kiosk/missing.js").status_code == 404
 
 
 def test_no_web_without_build(client):

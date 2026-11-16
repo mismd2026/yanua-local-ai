@@ -40,7 +40,12 @@ export function fakeApi(routes: Record<string, Handler | unknown>) {
     const method = init?.method ?? "GET";
     const path = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
-    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    let body: any;
+    try {
+      body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    } catch {
+      body = String(init?.body); // CSV など、JSON でない本文
+    }
     calls.push({ method, path, body, headers });
     const route = routes[`${method} ${path}`];
     let status = 200;
@@ -67,7 +72,7 @@ export const ME_EMPLOYEE = {
   name: "高橋 美咲",
   dept: "営業部",
   roles: ["社員"],
-  permissions: ["ask", "documents.list", "helpdesk", "jobs.own", "search"],
+  permissions: ["ask", "documents.list", "helpdesk", "jobs.own", "notifications", "search", "visits.own"],
 };
 
 export const NOT_LOGGED_IN = { status: 401, json: { error: { code: "not_logged_in", message: "ログインしてください" } } };
