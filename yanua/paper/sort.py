@@ -43,17 +43,23 @@ def plan(pdfs: list[Path], rs: RuleSet, llm: ChatModel | None = None, forced: st
         except Exception as e:  # noqa: BLE001  壊れたPDFなどは、その1件だけ飛ばす
             plans.append(Plan(pdf, "", "none", {}, None, False, f"読めませんでした: {e}"))
             continue
-        m = choose(rs, doc.text, llm, forced)
-        values = find_fields(doc.text, m.rule, rs.self_names)
-        values.update(rule=m.rule.name if m.rule else "未分類", original=pdf.stem)
-        folder = render(m.rule.folder if m.rule else rs.unmatched_folder, values)
-        # ファイル名にフォルダの区切りが入らないようにする（保存先の外へ出ないように）
-        name = render(m.rule.filename if m.rule else rs.unmatched_filename, values).replace("/", "_").replace("\\", "_")
-        if not name.lower().endswith(".pdf"):
-            name += ".pdf"
-        dest = Path(*[p for p in Path(folder).parts if p not in ("..", ".", "/", "\\")]) / name
-        plans.append(Plan(pdf, m.rule.name if m.rule else "", m.by, values, dest, doc.used_ocr, text=doc.text))
+        plans.append(plan_from_text(pdf, doc.text, doc.used_ocr, rs, llm, forced))
     return plans
+
+
+def plan_from_text(pdf: Path, text: str, used_ocr: bool, rs: RuleSet, llm: ChatModel | None = None,
+                   forced: str | None = None) -> Plan:
+    """取り出した文字から、1件の予定を作る。画面でルールを選び直すときは、PDFを読み直さずにこれを使う。"""
+    m = choose(rs, text, llm, forced)
+    values = find_fields(text, m.rule, rs.self_names)
+    values.update(rule=m.rule.name if m.rule else "未分類", original=pdf.stem)
+    folder = render(m.rule.folder if m.rule else rs.unmatched_folder, values)
+    # ファイル名にフォルダの区切りが入らないようにする（保存先の外へ出ないように）
+    name = render(m.rule.filename if m.rule else rs.unmatched_filename, values).replace("/", "_").replace("\\", "_")
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    dest = Path(*[p for p in Path(folder).parts if p not in ("..", ".", "/", "\\")]) / name
+    return Plan(pdf, m.rule.name if m.rule else "", m.by, values, dest, used_ocr, text=text)
 
 
 def _free_path(path: Path) -> Path:

@@ -19,6 +19,17 @@
     GET    /api/jobs, GET/DELETE /api/jobs/{id}
     GET    /, /chat など           Web画面（web/ を組み立てた web/dist。組み立てていなければ配らない）
 
+段階3（K-046・K-047）：
+    POST   /api/uploads?kind=pdf|recording|segments&name=...      アップロード（本文にファイルをそのまま。大きさの上限つき）
+    GET    /api/files/{file_id}                                   ダウンロード（作った本人で、その種類の権限がある人だけ）
+    GET    /api/paper/inbox, GET /api/paper/rules                 受信箱の PDF、仕分けルール（総務）
+    POST   /api/paper/plans（ジョブ）, GET /api/paper/plans/{id}   仕分けの予定
+    PUT    /api/paper/plans/{id}/items/{index}                    ルールを選び直す（PDF は読み直さない）
+    POST   /api/paper/plans/{id}/execute, GET /api/paper/history  実行、仕分けの記録
+    POST   /api/paper/convert（ジョブ）                            PDF を Word・Excel・会社の様式に変換
+    POST   /api/meetings（ジョブ）, GET /api/meetings, GET/PUT /api/meetings/{id}   議事録（作った人だけ）
+    GET    /api/meetings/{id}/minutes.docx                        議事録の Word
+
 段階2（K-045・K-018・K-043）：
     GET    /api/notifications, POST /api/notifications/read      自分あて・自分の部署あてのお知らせ
     POST   /api/visits, GET /api/visits, DELETE /api/visits/{id}  来訪予定（社員は自分の。総務は全社）
@@ -54,16 +65,16 @@ from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response as RawResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from .. import hr, visits
+from .. import hr, models, visits
 from ..answer import answer_question
 from ..llm import ChatModel, LLMError
 from ..search import search
 from ..store import Store
-from . import auth, desk, errors, kiosk
+from . import auth, desk, errors, files, kiosk, meetings, paperjobs
 from .auth import User
 from .chat import ChatDB, HelpdeskSessions, ReceptionSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
@@ -140,6 +151,46 @@ class DeviceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
 
+class PaperPlanCreate(BaseModel):
+    files: list[str] = Field(default_factory=list, max_length=500)   # 空なら受信箱のすべて
+    use_llm: bool = False                                           # どのルールにも当たらないとき、LLM（社内）に選ばせる
+
+
+class PaperRechoose(BaseModel):
+    rule: str | None = Field(default=None, max_length=100)          # 空ならルールで自動に決め直す
+
+
+class PaperExecute(BaseModel):
+    move: bool = False                                              # 既定は受信箱に残す（コピー）
+
+
+class PaperConvert(BaseModel):
+    file_id: str | None = Field(default=None, max_length=64)        # アップロードした PDF
+    inbox: str | None = Field(default=None, max_length=255)         # 受信箱の PDF
+    to: str = Field(pattern="^(docx|xlsx)$")
+    form: bool = False                                              # 会社の様式に差し込む（仕分けルールの様式）
+    rule: str | None = Field(default=None, max_length=100)          # 様式を使うルールを指定する
+
+
+class MeetingCreate(BaseModel):
+    upload_id: str = Field(min_length=1, max_length=64)             # 録画・録音
+    segments_upload_id: str | None = Field(default=None, max_length=64)   # 文字起こし済みの発言（JSON。任意）
+    title: str = Field(min_length=1, max_length=200)
+    date: str | None = Field(default=None, max_length=10)
+    place: str = Field(default="", max_length=200)
+    tool: str = Field(default="zoom", pattern="^(zoom|teams|meet|none)$")
+    participants: list[str] = Field(default_factory=list, max_length=100)
+    summary: bool = True
+
+
+UPLOAD_KINDS = {
+    # 種類 → (要る操作, 上限の設定の名前, 受け付ける拡張子)
+    "pdf": ("paper", "pdf_max_bytes", (".pdf",)),
+    "recording": ("meetings", "recording_max_bytes", (".mp4", ".m4a", ".mp3", ".wav", ".webm", ".mov", ".mkv", ".aac")),
+    "segments": ("meetings", "segments_max_bytes", (".json",)),
+}
+
+
 class CheckIn(BaseModel):
     code: str = Field(min_length=1, max_length=64)
 
@@ -150,7 +201,8 @@ VISIT_CSV_COLUMNS = ("date", "time", "company", "visitor", "host_employee_no", "
 # ------------------------------------------------------------ 本体
 
 
-def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
+def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> FastAPI:
+    """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。"""
     settings.check()
     roles = load_roles(settings.roles_path)
     policy = load_policy(settings.identity_path)
@@ -171,6 +223,10 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
         kiosk.ensure_schema(db)
         desk.ensure_schema(db)
         visits.ensure_schema(db)
+        files.ensure_schema(db)
+        paperjobs.ensure_schema(db)
+        meetings.ensure_schema(db)
+        files.cleanup(db, settings.work_dir)
     limiter = kiosk.FailureLimiter(settings.kiosk_max_failures)
 
     def today() -> date:
@@ -190,6 +246,66 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
 
     jobs.register("ingest", ingest_job)
 
+    def whisper():
+        from ..meeting.transcribe import WhisperTranscriber
+
+        try:
+            return WhisperTranscriber(models.verify(settings.whisper_model, settings.models_dir))
+        except models.ModelError as e:
+            raise RuntimeError(f"文字起こしのモデルが使えません（管理者が models pull {settings.whisper_model} で入手してください）：{e}") from e
+
+    def paper_plan_job(ctx: JobContext, params: dict) -> dict:
+        with closing(connect()) as db:
+            return paperjobs.make_plan(db, plan_id=ctx.job_id, owner=params["owner"], inbox=settings.paper_inbox,
+                                       names=params["files"], rs=paper_rules(), llm=llm if params["use_llm"] else None,
+                                       progress=ctx.progress)
+
+    def job_file(owner: str, file_id: str, kind: str) -> dict:
+        # ジョブの params にはファイルの番号だけを入れる（置き場所のパスは、ジョブの一覧で本人にも見せない）
+        with closing(connect()) as db:
+            f = files.get(db, file_id, owner, kind)
+        if not f:
+            raise RuntimeError("アップロードしたファイルが見つかりません（期限が過ぎて消えた可能性があります）。もう一度アップロードしてください")
+        return f
+
+    def paper_convert_job(ctx: JobContext, params: dict) -> dict:
+        if params.get("file_id"):
+            src = Path(job_file(params["owner"], params["file_id"], "pdf")["path"])
+        else:
+            src = paperjobs.inbox_path(settings.paper_inbox, params["inbox"])
+            if not src:
+                raise RuntimeError("受信箱のファイルが見つかりません（ほかの人が仕分けて移した可能性があります）")
+        out_dir = settings.work_dir / "results" / ctx.job_id
+        out, note = paperjobs.convert_pdf(src, out_dir, params["to"], paper_rules() if params["form"] else None,
+                                          params.get("rule"), progress=ctx.progress)
+        name = f"{Path(params['source_name']).stem}{''.join(out.suffixes[-1:])}"
+        with closing(connect()) as db:
+            f = files.add(db, file_id=files.new_id(), owner=params["owner"], kind="result", perm="paper", name=name,
+                          path=out, keep_hours=settings.file_keep_hours, job_id=ctx.job_id)
+        ctx.progress(100, "完了")
+        return {"files": [f], "message": note}
+
+    def meeting_job(ctx: JobContext, params: dict) -> dict:
+        media = Path(job_file(params["owner"], params["upload_id"], "recording")["path"])
+        seg = params.get("segments_upload_id")
+        seg_path = Path(job_file(params["owner"], seg, "segments")["path"]) if seg else None
+        with closing(connect()) as db:
+            return meetings.process(db, params["meeting_id"], media=media, segments_file=seg_path,
+                                    transcriber_factory=transcriber_factory or whisper, llm=llm,
+                                    use_summary=params["summary"], progress=ctx.progress)
+
+    jobs.register("paper-plan", paper_plan_job)
+    jobs.register("paper-convert", paper_convert_job)
+    jobs.register("meeting", meeting_job)
+
+    def paper_rules():
+        from ..paper import rules as paper_rule_file
+
+        try:
+            return paper_rule_file.load_rules(settings.paper_rules)
+        except (OSError, ValueError) as e:
+            raise ApiError(500, "paper_rules", f"仕分けルールを読めません：{e}") from e
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         jobs.start()
@@ -197,7 +313,23 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
         app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy)
         app.state.reception = ReceptionSessions(chats, settings.db_path, settings.reception_data, llm, settings.top_k,
                                                 settings.today)
+
+        async def sweep():
+            # 期限の来たファイルを10分ごとに消す
+            while True:
+                await asyncio.sleep(600)
+                try:
+                    def run():
+                        with closing(connect()) as db:
+                            files.cleanup(db, settings.work_dir)
+
+                    await run_in_threadpool(run)
+                except Exception:  # noqa: BLE001  消せなかったものは次の回に
+                    log.exception("期限切れのファイルを消せませんでした")
+
+        sweeper = asyncio.create_task(sweep())
         yield
+        sweeper.cancel()
         jobs.stop()
         chats.close()
 
@@ -701,6 +833,221 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
             return await run_in_threadpool(check_in, device, req.code)
         finally:
             await padded(started)
+
+    # ------------------------------------------------ ファイルの受け渡し（段階3）
+
+    @app.post("/api/uploads", status_code=201)
+    async def upload(request: Request, kind: str, name: str = "", user: User = Depends(current_user)):
+        if kind not in UPLOAD_KINDS:
+            raise ApiError(400, "invalid_kind", "アップロードの種類が正しくありません")
+        perm, limit_key, exts = UPLOAD_KINDS[kind]
+        if not allowed(user.roles, perm):
+            raise forbidden()
+        limit = getattr(settings, limit_key)
+        shown = files.safe_name(name, f"upload{exts[0]}")
+        if not shown.lower().endswith(exts):
+            raise ApiError(400, "invalid_type", f"このファイルは受け付けられません（{'・'.join(exts)}）")
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > limit:
+            raise ApiError(413, "too_large", f"ファイルが大きすぎます（上限 {limit // 1_000_000}MB）")
+        file_id = files.new_id()
+        folder = settings.work_dir / "uploads"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{file_id}{Path(shown).suffix.lower()}"
+        size, head = 0, b""
+        try:
+            with path.open("wb") as out:
+                # 受け取りながら大きさを数え、上限を超えたらその場で止める（全部を受け取ってから断らない）
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:
+                        raise ApiError(413, "too_large", f"ファイルが大きすぎます（上限 {limit // 1_000_000}MB）")
+                    if len(head) < 8:
+                        head += chunk[:8]
+                    out.write(chunk)
+            if size == 0:
+                raise ApiError(400, "empty", "ファイルが空です")
+            if kind == "pdf" and not head.startswith(b"%PDF-"):
+                raise ApiError(400, "invalid_type", "PDF ではないファイルです")
+            if kind == "segments":
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    assert isinstance(data, list) and all(isinstance(x, dict) and "text" in x and "start" in x for x in data)
+                except (ValueError, AssertionError, UnicodeDecodeError) as e:
+                    raise ApiError(400, "invalid_type", "文字起こし済みの発言（JSON）の形が正しくありません") from e
+
+            def register():
+                with closing(connect()) as db:
+                    files.cleanup(db, settings.work_dir)
+                    return files.add(db, file_id=file_id, owner=user.employee_no, kind=kind, perm=perm, name=shown,
+                                     path=path, keep_hours=settings.file_keep_hours)
+
+            return await run_in_threadpool(register)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    def my_file(file_id: str, user: User, kind: str | None = None) -> dict:
+        with closing(connect()) as db:
+            f = files.get(db, file_id, user.employee_no, kind)
+        # 権限がなくなった人・ほかの人・期限切れ・ないものは、どれも同じ「見つかりません」
+        if not f or not allowed(user.roles, f["perm"]):
+            raise not_found("ファイル")
+        return f
+
+    @app.get("/api/files/{file_id}")
+    def download(file_id: str, user: User = Depends(current_user)):
+        f = my_file(file_id, user)
+        return FileResponse(f["path"], filename=f["name"], headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    # ------------------------------------------------ PDF の仕分け（S-20）・変換（S-21）
+
+    @app.get("/api/paper/inbox")
+    def paper_inbox(user: User = Depends(require("paper"))):
+        return {"files": paperjobs.inbox_list(settings.paper_inbox)}
+
+    @app.get("/api/paper/rules")
+    def paper_rule_list(user: User = Depends(require("paper"))):
+        rs = paper_rules()
+        return {"rules": [{"name": r.name, "templates": sorted(r.templates)} for r in rs.rules]}
+
+    @app.post("/api/paper/plans", status_code=202)
+    def paper_plan(req: PaperPlanCreate, user: User = Depends(require("paper"))):
+        for n in req.files:
+            if not paperjobs.inbox_path(settings.paper_inbox, n):
+                raise ApiError(400, "not_in_inbox", f"受信箱にないファイルです：{files.safe_name(n)}")
+        if not req.files and not paperjobs.inbox_files(settings.paper_inbox):
+            raise ApiError(400, "empty_inbox", "受信箱に PDF がありません")
+        paper_rules()   # ルールが読めないときは、ジョブにする前に知らせる
+        return jobs.submit("paper-plan", user.employee_no, {"owner": user.employee_no, "files": req.files, "use_llm": req.use_llm})
+
+    def my_plan(db, plan_id: str, user: User) -> dict:
+        plan = paperjobs.get_plan(db, plan_id, user.employee_no)
+        if not plan:
+            raise not_found("仕分けの予定")
+        return plan
+
+    @app.get("/api/paper/plans/{plan_id}")
+    def paper_plan_get(plan_id: str, user: User = Depends(require("paper"))):
+        with closing(connect()) as db:
+            return my_plan(db, plan_id, user)
+
+    @app.put("/api/paper/plans/{plan_id}/items/{index}")
+    def paper_rechoose(plan_id: str, index: int, req: PaperRechoose, user: User = Depends(require("paper"))):
+        rs = paper_rules()
+        with closing(connect()) as db:
+            plan = my_plan(db, plan_id, user)
+            if plan["executed_at"]:
+                raise ApiError(409, "executed", "この予定は実行済みです。新しく予定を作ってください")
+            if not 0 <= index < len(plan["items"]):
+                raise not_found("予定の項目")
+            if plan["items"][index]["error"]:
+                raise ApiError(409, "unreadable", "読めなかったファイルは、ルールを選び直せません")
+            if req.rule and req.rule not in rs.names():
+                raise ApiError(400, "unknown_rule", "そのルールはありません")
+            return paperjobs.rechoose(db, plan_id, index, req.rule, settings.paper_inbox, rs)
+
+    @app.post("/api/paper/plans/{plan_id}/execute")
+    def paper_execute(plan_id: str, req: PaperExecute, user: User = Depends(require("paper"))):
+        with closing(connect()) as db:
+            plan = my_plan(db, plan_id, user)
+            if plan["executed_at"]:
+                raise ApiError(409, "executed", "この予定は実行済みです")
+            return paperjobs.execute(db, plan_id, settings.paper_inbox, settings.paper_out, move=req.move)
+
+    @app.get("/api/paper/history")
+    def paper_history(limit: int = 200, user: User = Depends(require("paper"))):
+        return {"records": paperjobs.history(settings.paper_out, max(1, min(limit, 1000)))}
+
+    @app.post("/api/paper/convert", status_code=202)
+    def paper_convert(req: PaperConvert, user: User = Depends(require("paper"))):
+        if bool(req.file_id) == bool(req.inbox):
+            raise ApiError(400, "invalid_source", "アップロードした PDF か、受信箱の PDF のどちらか1つを選んでください")
+        if req.file_id:
+            name = my_file(req.file_id, user, "pdf")["name"]
+        else:
+            p = paperjobs.inbox_path(settings.paper_inbox, req.inbox or "")
+            if not p:
+                raise ApiError(400, "not_in_inbox", "受信箱にないファイルです")
+            name = p.name
+        if req.rule:
+            if req.rule not in paper_rules().names():
+                raise ApiError(400, "unknown_rule", "そのルールはありません")
+        return jobs.submit("paper-convert", user.employee_no, {
+            "owner": user.employee_no, "file_id": req.file_id, "inbox": req.inbox, "source_name": name, "to": req.to,
+            "form": req.form, "rule": req.rule})
+
+    # ------------------------------------------------ 議事録（S-13）
+
+    def my_meeting(db, meeting_id: str, user: User) -> dict:
+        m = meetings.get(db, meeting_id, user.employee_no)
+        if not m:
+            raise not_found("議事録")
+        return m
+
+    @app.post("/api/meetings", status_code=202)
+    def meeting_create(req: MeetingCreate, user: User = Depends(require("meetings"))):
+        media = my_file(req.upload_id, user, "recording")
+        seg = my_file(req.segments_upload_id, user, "segments") if req.segments_upload_id else None
+        try:
+            day = date.fromisoformat(req.date).isoformat() if req.date else today().isoformat()
+        except ValueError as e:
+            raise ApiError(400, "invalid_date", "開催日は YYYY-MM-DD で指定してください") from e
+        meeting_id = files.new_id()
+        with closing(connect()) as db:
+            meetings.create(db, meeting_id=meeting_id, owner=user.employee_no, title=req.title.strip(), day=day,
+                            place=req.place.strip(), tool=req.tool,
+                            participants=[p.strip()[:60] for p in req.participants if p.strip()], media_name=media["name"])
+            job = jobs.submit("meeting", user.employee_no, {
+                "owner": user.employee_no, "meeting_id": meeting_id, "upload_id": req.upload_id,
+                "segments_upload_id": req.segments_upload_id if seg else None, "summary": req.summary})
+            meetings.set_job(db, meeting_id, job["job_id"])
+        return {**job, "meeting_id": meeting_id}
+
+    @app.get("/api/meetings")
+    def meeting_list(user: User = Depends(require("meetings"))):
+        with closing(connect()) as db:
+            return {"meetings": meetings.list_for(db, user.employee_no)}
+
+    @app.get("/api/meetings/{meeting_id}")
+    def meeting_get(meeting_id: str, user: User = Depends(require("meetings"))):
+        with closing(connect()) as db:
+            return my_meeting(db, meeting_id, user)
+
+    @app.put("/api/meetings/{meeting_id}")
+    async def meeting_update(meeting_id: str, request: Request, user: User = Depends(require("meetings"))):
+        try:
+            changes = await request.json()
+        except ValueError as e:
+            raise ApiError(400, "invalid_request", "リクエストの形が正しくありません") from e
+        if not isinstance(changes, dict):
+            raise ApiError(400, "invalid_request", "リクエストの形が正しくありません")
+
+        def run():
+            with closing(connect()) as db:
+                my_meeting(db, meeting_id, user)
+                try:
+                    meetings.update(db, meeting_id, changes)
+                except meetings.MeetingError as e:
+                    raise ApiError(400, "invalid_meeting", str(e)) from e
+                return my_meeting(db, meeting_id, user)
+
+        return await run_in_threadpool(run)
+
+    @app.get("/api/meetings/{meeting_id}/minutes.docx")
+    def meeting_docx(meeting_id: str, user: User = Depends(require("meetings"))):
+        with closing(connect()) as db:
+            m = my_meeting(db, meeting_id, user)
+        if m["status"] != meetings.REVIEW:
+            raise ApiError(409, "not_ready", "まだ議事録を作れません（処理中か、失敗しています）")
+        if not settings.meeting_template.is_file():
+            raise ApiError(500, "no_template", "議事録の様式（Word）が見つかりません。管理者に問い合わせてください")
+        body, name = meetings.minutes_docx(m, settings.meeting_template)
+        from urllib.parse import quote
+
+        return RawResponse(body, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                           headers={"Content-Disposition": f"attachment; filename=\"minutes.docx\"; filename*=UTF-8''{quote(name)}",
+                                    "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
     # ------------------------------------------------ Web画面（最後に登録する）
 
