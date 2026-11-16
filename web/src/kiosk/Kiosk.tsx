@@ -7,6 +7,13 @@ import { CheckInReply, formatCode, kiosk, KioskError, KioskReply, KioskVisit, lo
 
 export const IDLE_MS = 60_000;
 
+// コードが確認できなかった回数を、この画面で数える。直近1分に CALL_STAFF_AFTER 回から「受付の者をお呼びください」を出す。
+// サーバーは、1分に10回を超えて間違えた端末では照合を止めるが、返事は間違えたときと同じにしている（止めているかどうかを
+// 返事から分からせないため）。画面は返事の違いではなく自分で数えた回数で案内を出し、サーバーより少ない回数から出すので、
+// サーバーが止めているあいだは必ず案内が出る。数えた回数は、最初の画面に戻っても1分のあいだは残す（次の方にも出す）
+export const CALL_STAFF_AFTER = 3;
+const FAIL_WINDOW_MS = 60_000;
+
 type Screen =
   | { kind: "setup"; notice?: string }
   | { kind: "welcome" }
@@ -21,6 +28,26 @@ export default function Kiosk({ idleMs = IDLE_MS }: { idleMs?: number }) {
   const [token, setToken] = useState(loadToken);
   const [screen, setScreen] = useState<Screen>(() => (loadToken() ? { kind: "welcome" } : { kind: "setup" }));
   const [round, setRound] = useState(0); // 最初の画面に戻るたびに増やし、前の方の入力を消す
+  const failures = useRef<number[]>([]);
+  const [callStaff, setCallStaff] = useState(false);
+
+  const recount = useCallback(() => {
+    const now = Date.now();
+    failures.current = failures.current.filter((t) => now - t < FAIL_WINDOW_MS);
+    setCallStaff(failures.current.length >= CALL_STAFF_AFTER);
+  }, []);
+
+  const failed = useCallback(() => {
+    failures.current.push(Date.now());
+    recount();
+  }, [recount]);
+
+  // 1分たったら案内を消せるよう、案内を出しているあいだは数え直す
+  useEffect(() => {
+    if (!callStaff) return;
+    const t = window.setInterval(recount, 5_000);
+    return () => window.clearInterval(t);
+  }, [callStaff, recount]);
 
   const home = useCallback(() => {
     setScreen({ kind: "welcome" });
@@ -62,6 +89,9 @@ export default function Kiosk({ idleMs = IDLE_MS }: { idleMs?: number }) {
           <button className="k-back" onClick={home}>最初に戻る</button>
         )}
       </header>
+      {callStaff && screen.kind !== "setup" && (
+        <p className="k-staff" role="alert">お手数ですが、受付の者をお呼びください。</p>
+      )}
       <main className="k-main" key={round}>
         {screen.kind === "setup" && (
           <Setup notice={screen.notice} onSaved={(t) => { saveToken(t); setToken(t); home(); }} />
@@ -72,6 +102,7 @@ export default function Kiosk({ idleMs = IDLE_MS }: { idleMs?: number }) {
             token={token}
             onError={onError}
             onOk={(r) => setScreen({ kind: "visit", visit: r.visit!, message: r.message })}
+            onFailed={failed}
             onNoCode={() => setScreen({ kind: "chat" })}
           />
         )}
@@ -137,10 +168,11 @@ function Welcome({ onCode, onNoCode }: { onCode: () => void; onNoCode: () => voi
 
 // ------------------------------------------------------------ S-40 受付：コードの入力
 
-function CodeEntry({ token, onError, onOk, onNoCode }: {
+function CodeEntry({ token, onError, onOk, onFailed, onNoCode }: {
   token: string;
   onError: (e: unknown) => string;
   onOk: (r: CheckInReply) => void;
+  onFailed: () => void;
   onNoCode: () => void;
 }) {
   const [code, setCode] = useState("");
@@ -159,7 +191,9 @@ function CodeEntry({ token, onError, onOk, onNoCode }: {
         onOk(r);
         return;
       }
+      // 文言はサーバーの返事のまま（止めているときも同じ文言）
       setMessage(r.message);
+      onFailed();
       setCode("");
       input.current?.focus();
     } catch (err) {

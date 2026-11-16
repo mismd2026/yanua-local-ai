@@ -7,7 +7,7 @@ import { fakeApi } from "../test/fakeApi";
 
 const VISIT = { date: "2026-11-16", time: "15:00", room: "5階 第2会議室", host_name: "高橋 美咲", host_contact: "受付にお声がけください",
   visitor_company: "ABC商事", visitor_name: "木村 誠" };
-const FAILED = { ok: false, message: "恐れ入りますが、コードを確認できませんでした。", visit: null, pass_id: null };
+const FAILED = { ok: false, message: "恐れ入りますが、コードを確認できませんでした。", visit: null };
 
 beforeEach(() => window.localStorage.setItem("yanua-kiosk-token", "yk_test"));
 afterEach(() => {
@@ -28,7 +28,7 @@ describe("受付端末", () => {
   it("コードで受け付け、予定と入館票の印刷を出す。端末トークンだけで呼び、クッキーは送らない", async () => {
     const { calls } = fakeApi({
       "POST /api/kiosk/check-in": (body: { code: string }) => ({
-        json: body.code === "HJ6P-W9XE" ? { ok: true, message: "ABC商事 木村 誠様、お待ちしておりました。", visit: VISIT, pass_id: "p1" } : FAILED,
+        json: body.code === "HJ6P-W9XE" ? { ok: true, message: "ABC商事 木村 誠様、お待ちしておりました。", visit: VISIT } : FAILED,
       }),
     });
     const print = vi.fn();
@@ -41,6 +41,7 @@ describe("受付端末", () => {
     await userEvent.click(screen.getByRole("button", { name: "確認する" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("コードを確認できませんでした");
     expect(input).toHaveValue("");
+    expect(screen.queryByText(/受付の者をお呼びください/)).not.toBeInTheDocument();
 
     await userEvent.type(input, "hj6p w9xe");
     await userEvent.click(screen.getByRole("button", { name: "確認する" }));
@@ -55,8 +56,8 @@ describe("受付端末", () => {
 
   it("コードを持っていない方は会話で受け付ける", async () => {
     fakeApi({
-      "POST /api/kiosk/sessions": () => ({ status: 201, json: { session_id: "s1", finished: false, reply: "いらっしゃいませ。ご用件をお聞かせください。", visit: null, pass_id: null } }),
-      "POST /api/kiosk/sessions/s1/messages": () => ({ json: { session_id: "s1", finished: true, reply: "担当の者に確認いたしますので、少々お待ちください。", visit: null, pass_id: null } }),
+      "POST /api/kiosk/sessions": () => ({ status: 201, json: { session_id: "s1", finished: false, reply: "いらっしゃいませ。ご用件をお聞かせください。", visit: null } }),
+      "POST /api/kiosk/sessions/s1/messages": () => ({ json: { session_id: "s1", finished: true, reply: "担当の者に確認いたしますので、少々お待ちください。", visit: null } }),
     });
     render(<Kiosk />);
     await userEvent.click(screen.getByRole("button", { name: /お持ちでない方/ }));
@@ -90,6 +91,31 @@ describe("受付端末", () => {
     await userEvent.click(screen.getByRole("button", { name: "確認する" }));
     expect(await screen.findByRole("heading", { name: "受付端末の設定" })).toBeInTheDocument();
     expect(window.localStorage.getItem("yanua-kiosk-token")).toBeNull();
+  });
+
+  it("コードの確認ができないことが続いたら、受付の者を呼ぶ案内を出す（返事の文言は同じまま）。最初の画面に戻っても残す", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { calls } = fakeApi({ "POST /api/kiosk/check-in": () => ({ json: FAILED }) });
+    render(<Kiosk />);
+    await userEvent.click(screen.getByRole("button", { name: /お持ちの方/ }));
+    const input = screen.getByLabelText("インビテーションコード");
+    for (let i = 1; i <= 3; i++) {
+      await userEvent.type(input, "ZZZZZZZZ");
+      await userEvent.click(screen.getByRole("button", { name: "確認する" }));
+      await screen.findByText("恐れ入りますが、コードを確認できませんでした。");
+      if (i < 3) expect(screen.queryByText(/受付の者をお呼びください/)).not.toBeInTheDocument();
+    }
+    expect(await screen.findByText("お手数ですが、受付の者をお呼びください。")).toBeInTheDocument();
+    // サーバーの返事の文言は、そのまま出している
+    expect(screen.getByText("恐れ入りますが、コードを確認できませんでした。")).toBeInTheDocument();
+    expect(calls).toHaveLength(3);
+
+    await userEvent.click(screen.getByRole("button", { name: "最初に戻る" }));
+    expect(screen.getByText("お手数ですが、受付の者をお呼びください。")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(66_000);
+    });
+    expect(screen.queryByText(/受付の者をお呼びください/)).not.toBeInTheDocument();
   });
 
   it("コードの入力のゆれをそろえる", () => {

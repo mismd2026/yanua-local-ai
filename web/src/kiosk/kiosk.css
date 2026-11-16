@@ -48,6 +48,7 @@ button { cursor: pointer; touch-action: manipulation; }
 .k-panel h1 { margin: 0; font-size: 1.8rem; line-height: 1.4; }
 .k-lead, .k-say { margin: 0; font-size: 1.2rem; white-space: pre-wrap; }
 .k-notice { margin: 0; background: var(--notice); border-radius: 12px; padding: 0.8rem 1.1rem; }
+.k-staff { margin: 1rem auto 0; width: min(calc(100% - 3rem), 60rem); background: var(--notice); border: 2px solid currentColor; border-radius: 14px; padding: 1rem 1.4rem; font-size: 1.4rem; font-weight: 700; text-align: center; }
 
 .k-primary, .k-secondary { min-height: 4rem; border-radius: 14px; padding: 0.6rem 2rem; font-size: 1.15rem; font-weight: 600; }
 .k-primary { background: var(--accent); color: var(--accent-text); border: 2px solid var(--accent); }
@@ -83,7 +84,7 @@ button { cursor: pointer; touch-action: manipulation; }
 /* 入館票：画面には出さず、印刷するときだけ出す */
 .k-pass { display: none; }
 @media print {
-  .k-head, .k-panel > :not(.k-pass) { display: none !important; }
+  .k-head, .k-staff, .k-panel > :not(.k-pass) { display: none !important; }
   .k-main, .k-panel { padding: 0; border: none; background: #fff; color: #000; }
   .k-pass { display: block; color: #000; font-size: 16pt; }
   .k-pass h1 { font-size: 20pt; }

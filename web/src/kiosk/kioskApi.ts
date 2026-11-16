@@ -39,14 +39,13 @@ export interface KioskReply {
   finished: boolean;
   reply: string;
   visit: KioskVisit | null;
-  pass_id: string | null;
 }
 
+// 入館票は、この返事の visit から画面で作って印刷する（サーバーには入館票を残さない）
 export interface CheckInReply {
   ok: boolean;
   message: string;
   visit: KioskVisit | null;
-  pass_id: string | null;
 }
 
 export async function kiosk<T>(token: string, path: string, body?: unknown): Promise<T> {
