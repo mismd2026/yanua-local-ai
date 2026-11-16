@@ -156,3 +156,71 @@ export const JOB_NAMES: Record<string, string> = { ingest: "文書の取り込�
 export const jobName = (kind: string) => JOB_NAMES[kind] ?? kind;
 
 export const RUNNING_STATUSES = ["待ち", "実行中"];
+
+export interface Notification {
+  notification_id: number;
+  created_at: string;
+  kind: string;
+  message: string;
+  ref: string;
+  read: boolean;
+  to: string;
+}
+
+export interface Visit {
+  visit_id: number;
+  date: string;
+  time: string;
+  room: string;
+  host_employee_no: string;
+  host_name: string;
+  host_dept: string;
+  host_contact: string;
+  visitor_company: string;
+  visitor_name: string;
+  purpose: string;
+  checked_in_at: string | null;
+  cancelled: boolean;
+}
+
+export interface CreatedVisit {
+  visit: Visit;
+  code: string;
+  invitation: string;
+}
+
+export interface ReceptionRecord {
+  record_id: string;
+  created_at: string;
+  channel: string;
+  category: string;
+  route: string;
+  priority: string;
+  purpose: string;
+  visitor: { company: string; name: string };
+  contact: string;
+  details: string;
+  host: { employee_no: string; name: string } | null;
+  candidates: string[];
+  resolved: boolean;
+  status: string;
+  note: string;
+  status_updated_at: string | null;
+  status_updated_by: string | null;
+}
+
+export interface Ticket {
+  ticket_id: string;
+  created_at: string;
+  category: string;
+  priority: string;
+  problem: string;
+  requester: { employee_no: string; name: string; dept: string };
+  status: string;
+  note: string;
+  status_updated_at: string | null;
+  status_updated_by: string | null;
+  detail?: Record<string, unknown>;
+}
+
+export const TICKET_STATUSES = ["未対応", "対応中", "対応済み"];

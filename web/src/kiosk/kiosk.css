@@ -1,0 +1,95 @@
+/* 受付端末：タブレットの横向き（1024〜1366px 程度）で、指で押しやすい大きさにする */
+:root {
+  --bg: #f4f6f9;
+  --card: #ffffff;
+  --text: #1b2230;
+  --muted: #566070;
+  --line: #d5dae2;
+  --accent: #1f56c3;
+  --accent-text: #ffffff;
+  --notice: #fff3d6;
+  --visitor: #e3ecfb;
+  color-scheme: light;
+  font-family: system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", "IPAGothic", sans-serif;
+  font-size: 20px;
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --card: #1d2128;
+    --text: #e8eaee;
+    --muted: #a7aebb;
+    --line: #383e48;
+    --accent: #7aa2ff;
+    --accent-text: #0c1222;
+    --notice: #3a3218;
+    --visitor: #263450;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); }
+body { -webkit-user-select: none; user-select: none; overscroll-behavior: none; }
+input { -webkit-user-select: text; user-select: text; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; touch-action: manipulation; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.kiosk { min-height: 100vh; display: flex; flex-direction: column; }
+.k-head { display: flex; align-items: center; justify-content: space-between; padding: 0.8rem 1.5rem; padding-top: calc(0.8rem + env(safe-area-inset-top, 0px)); background: var(--card); border-bottom: 1px solid var(--line); }
+.k-brand { font-weight: 700; font-size: 1.2rem; }
+.k-back { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 0.5rem 1.4rem; min-height: 3rem; }
+.k-main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1.5rem; }
+.k-panel { width: min(100%, 60rem); background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 2rem 2.5rem; display: flex; flex-direction: column; gap: 1.2rem; }
+.k-panel h1 { margin: 0; font-size: 1.8rem; line-height: 1.4; }
+.k-lead, .k-say { margin: 0; font-size: 1.2rem; white-space: pre-wrap; }
+.k-notice { margin: 0; background: var(--notice); border-radius: 12px; padding: 0.8rem 1.1rem; }
+.k-staff { margin: 1rem auto 0; width: min(calc(100% - 3rem), 60rem); background: var(--notice); border: 2px solid currentColor; border-radius: 14px; padding: 1rem 1.4rem; font-size: 1.4rem; font-weight: 700; text-align: center; }
+
+.k-primary, .k-secondary { min-height: 4rem; border-radius: 14px; padding: 0.6rem 2rem; font-size: 1.15rem; font-weight: 600; }
+.k-primary { background: var(--accent); color: var(--accent-text); border: 2px solid var(--accent); }
+.k-secondary { background: var(--card); border: 2px solid var(--line); }
+.k-primary:disabled { opacity: 0.45; cursor: default; }
+
+.k-welcome h1 { font-size: 2.4rem; }
+.k-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: 1.2rem; }
+.k-choice { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.2rem; min-height: 12rem; border-radius: 20px; border: 2px solid var(--accent); background: var(--card); font-size: 1.4rem; padding: 1.5rem; }
+.k-choice:active { background: var(--visitor); }
+.k-choice span { font-size: 1rem; color: var(--muted); }
+
+.k-code { display: flex; gap: 1rem; flex-wrap: wrap; }
+.k-code input { flex: 1 1 18rem; min-width: 0; font-size: 2.4rem; letter-spacing: 0.15em; text-align: center; padding: 0.6rem 1rem; border: 2px solid var(--line); border-radius: 14px; background: var(--card); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+.k-chat { min-height: 70vh; }
+.k-log { flex: 1; display: flex; flex-direction: column; gap: 0.8rem; overflow-y: auto; max-height: 55vh; }
+.k-line { margin: 0; padding: 0.8rem 1.1rem; border-radius: 14px; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.k-line.kiosk { align-self: flex-start; border: 1px solid var(--line); }
+.k-line.visitor { align-self: flex-end; background: var(--visitor); }
+.k-line.waiting { color: var(--muted); }
+.k-input { display: flex; gap: 1rem; }
+.k-input input { flex: 1; min-width: 0; font-size: 1.2rem; padding: 0.7rem 1rem; border: 2px solid var(--line); border-radius: 14px; background: var(--card); }
+
+.k-small { margin: 0; font-size: 0.9rem; color: var(--muted); }
+.k-setup form { display: flex; flex-direction: column; gap: 0.8rem; }
+.k-setup input { font-size: 1rem; padding: 0.7rem 1rem; border: 2px solid var(--line); border-radius: 12px; background: var(--card); }
+
+.k-table { border-collapse: collapse; width: 100%; font-size: 1.25rem; }
+.k-table th, .k-table td { text-align: left; padding: 0.7rem 1rem; border-bottom: 1px solid var(--line); }
+.k-table th { width: 8rem; color: var(--muted); font-weight: 600; }
+.k-actions { display: flex; gap: 1rem; flex-wrap: wrap; }
+
+/* 入館票：画面には出さず、印刷するときだけ出す */
+.k-pass { display: none; }
+@media print {
+  .k-head, .k-staff, .k-panel > :not(.k-pass) { display: none !important; }
+  .k-main, .k-panel { padding: 0; border: none; background: #fff; color: #000; }
+  .k-pass { display: block; color: #000; font-size: 16pt; }
+  .k-pass h1 { font-size: 20pt; }
+  .k-pass table { border-collapse: collapse; }
+  .k-pass th, .k-pass td { border: 1px solid #333; padding: 6pt 12pt; text-align: left; }
+  .k-pass th { background: #eee; }
+}

@@ -11,7 +11,12 @@ export default defineConfig({
     port: 5173,
     proxy: { "/api": "http://127.0.0.1:8000" },
   },
-  build: { outDir: "dist", sourcemap: false },
+  // 社内の画面（index.html）と受付端末（kiosk.html）は別々に組み立てる。受付端末に社内の画面のコードを含めないため
+  build: {
+    outDir: "dist",
+    sourcemap: false,
+    rollupOptions: { input: { index: "index.html", kiosk: "kiosk.html" } },
+  },
   test: {
     environment: "jsdom",
     globals: true,

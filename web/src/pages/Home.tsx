@@ -29,7 +29,7 @@ export default function Home({ me }: { me: Me }) {
             </ul>
           )}
         </section>
-        <Notifications />
+        {me.permissions.includes("notifications") && <Notifications />}
         {me.permissions.includes("jobs.own") && <RunningJobs />}
       </div>
     </>
@@ -37,7 +37,7 @@ export default function Home({ me }: { me: Me }) {
 }
 
 function Notifications() {
-  // お知らせ（S-11）は段階2。API がまだないとき（404）は、この欄を出さない
+  // お知らせ（S-11）。読めなかったとき（API がないなど）は、この欄を出さない
   const [count, setCount] = useState<number | null | "none">(null);
   useEffect(() => {
     api<{ notifications?: unknown[]; unread?: number }>("GET", "/api/notifications?unread=1")
@@ -48,7 +48,10 @@ function Notifications() {
   return (
     <section className="card">
       <h2>お知らせ</h2>
-      {count === null ? <p className="muted">読み込んでいます…</p> : <p>未読のお知らせが {count} 件あります。</p>}
+      {count === null ? <p className="muted">読み込んでいます…</p> : <p>未読のお知らせが <strong className="count">{count}</strong> 件あります。</p>}
+      <p className="small">
+        <a href="/notifications" onClick={(e) => { e.preventDefault(); navigate("/notifications"); }}>お知らせを見る</a>
+      </p>
     </section>
   );
 }

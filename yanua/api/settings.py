@@ -31,7 +31,8 @@ class Settings:
     chat_idle_minutes: int = 30          # 返事がないままこの時間が過ぎた会話は消す
 
     # 文書の取り込み（管理者のジョブ）で指定できるフォルダ。ここの下にあるフォルダだけを取り込む
-    ingest_roots: list[Path] = field(default_factory=lambda: [Path("demo/company")])
+    # 既定はデモの社内文書と社外公開の文書だけ（人事データ・会話のデータ・紙の書類のフォルダは文書として取り込まない）
+    ingest_roots: list[Path] = field(default_factory=lambda: [Path("demo/company/docs"), Path("demo/company/public")])
     job_workers: int = 1                 # 重いジョブを同時に流す数（GPU がないので既定は1）
 
     # 受付端末（K-043）
