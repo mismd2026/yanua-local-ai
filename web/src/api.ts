@@ -48,6 +48,56 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   return data as T;
 }
 
+// Server-Sent Events で受け取る。届いた順に onEvent を呼ぶ。
+// 送り始める前のエラー（ログイン・権限・形）は api() と同じく ApiError にする
+export async function apiStream(path: string, body: unknown, onEvent: (event: string, data: any) => void): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { Accept: "text/event-stream", "Content-Type": "application/json", [CLIENT_HEADER]: "web" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(0, "network", "サーバーに接続できません。しばらくしてからやり直してください");
+  }
+  if (!res.ok || !res.body) {
+    const err = (await res.json().catch(() => null))?.error;
+    const e = new ApiError(res.status, err?.code ?? "error", err?.message ?? "処理できませんでした。しばらくしてからやり直してください");
+    if (res.status === 401 && e.code === "not_logged_in") onLoggedOut();
+    throw e;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const flush = (block: string) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+      // ":" で始まる行は接続を保つための空の行なので読み飛ばす
+    }
+    if (data.length) onEvent(event, JSON.parse(data.join("\n")));
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let i: number;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        flush(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+      }
+    }
+  } catch {
+    throw new ApiError(0, "network", "途中で接続が切れました。もう一度送ってください");
+  }
+  if (buf.trim()) flush(buf);
+}
+
 // ------------------------------------------------------------ API の形
 
 export interface Me {

@@ -76,7 +76,7 @@ describe("S-01 ログイン", () => {
     fakeApi({
       "GET /api/me": ME_EMPLOYEE,
       "GET /api/auth/login": { method: "dev" },
-      "POST /api/ask": () => NOT_LOGGED_IN,
+      "POST /api/ask/stream": () => NOT_LOGGED_IN,
     });
     render(<App />);
     await userEvent.type(await screen.findByLabelText("メッセージ"), "在宅勤務は？");

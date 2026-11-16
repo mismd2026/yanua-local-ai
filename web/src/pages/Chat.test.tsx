@@ -2,9 +2,15 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Chat from "./Chat";
-import { fakeApi, ME_EMPLOYEE } from "../test/fakeApi";
+import { fakeApi, ME_EMPLOYEE, sse } from "../test/fakeApi";
 
 afterEach(() => vi.unstubAllGlobals());
+
+const PROGRESS: [string, unknown][] = [
+  ["progress", { stage: "search", message: "社内の文書を探しています" }],
+  ["progress", { stage: "answer", message: "回答を作っています" }],
+  ["progress", { stage: "check", message: "回答を確かめています" }],
+];
 
 const ANSWER = {
   answer: "在宅勤務は週3日までです[1]。",
@@ -16,7 +22,7 @@ const ANSWER = {
 describe("S-10 チャット：社内文書に質問", () => {
   it("質問すると、出典つきの回答を出し、出典を開ける", async () => {
     const { calls } = fakeApi({
-      "POST /api/ask": ANSWER,
+      "POST /api/ask/stream": sse([...PROGRESS, ["result", ANSWER]]),
       "GET /api/documents/A01": {
         doc_id: "A01",
         title: "就業規則",
@@ -30,7 +36,7 @@ describe("S-10 チャット：社内文書に質問", () => {
     render(<Chat me={ME_EMPLOYEE} />);
     await userEvent.type(screen.getByLabelText("メッセージ"), "在宅勤務は週に何日？{Enter}");
     expect(await screen.findByText("在宅勤務は週3日までです[1]。")).toBeInTheDocument();
-    expect(calls.find((c) => c.path === "/api/ask")?.body).toEqual({ question: "在宅勤務は週に何日？" });
+    expect(calls.find((c) => c.path === "/api/ask/stream")?.body).toEqual({ question: "在宅勤務は週に何日？" });
 
     await userEvent.click(screen.getByRole("button", { name: "就業規則（在宅勤務）" }));
     const panel = await screen.findByRole("complementary", { name: "出典" });
@@ -43,7 +49,7 @@ describe("S-10 チャット：社内文書に質問", () => {
 
   it("答えられないときは出典を出さない", async () => {
     fakeApi({
-      "POST /api/ask": { answer: "社内の資料からは見つかりませんでした。", sources: [{ doc_id: "A01", title: "就業規則", section: "" }], refused: true, elapsed_sec: 0.5 },
+      "POST /api/ask/stream": sse([...PROGRESS, ["result", { answer: "社内の資料からは見つかりませんでした。", sources: [{ doc_id: "A01", title: "就業規則", section: "" }], refused: true, elapsed_sec: 0.5 }]]),
     });
     render(<Chat me={ME_EMPLOYEE} />);
     await userEvent.type(screen.getByLabelText("メッセージ"), "社食のメニューは？{Enter}");
@@ -51,13 +57,36 @@ describe("S-10 チャット：社内文書に質問", () => {
     expect(screen.queryByText("出典：")).not.toBeInTheDocument();
   });
 
-  it("エラーのときは、サーバーの文言をそのまま出す", async () => {
+  it("途中は進み具合だけを出し、回答の文は確かめ終わって届いてから出す", async () => {
+    let release!: () => void;
+    const wait = new Promise<void>((r) => (release = r));
+    fakeApi({ "POST /api/ask/stream": sse([...PROGRESS, ["result", ANSWER]], { at: 3, wait }) });
+    render(<Chat me={ME_EMPLOYEE} />);
+    await userEvent.type(screen.getByLabelText("メッセージ"), "在宅勤務は週に何日？{Enter}");
+    expect(await screen.findByText(/回答を確かめています/)).toBeInTheDocument();
+    expect(screen.queryByText(/週3日/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "送る" })).toBeDisabled();
+    release();
+    expect(await screen.findByText("在宅勤務は週3日までです[1]。")).toBeInTheDocument();
+    expect(screen.queryByText(/回答を確かめています/)).not.toBeInTheDocument();
+  });
+
+  it("送っている途中のエラーは、サーバーの文言をそのまま出す", async () => {
     fakeApi({
-      "POST /api/ask": () => ({ status: 502, json: { error: { code: "llm_unavailable", message: "回答を作るAIに接続できません。しばらくしてからやり直してください" } } }),
+      "POST /api/ask/stream": sse([PROGRESS[0], ["error", { code: "llm_unavailable", message: "回答を作るAIに接続できません。しばらくしてからやり直してください" }]]),
     });
     render(<Chat me={ME_EMPLOYEE} />);
     await userEvent.type(screen.getByLabelText("メッセージ"), "在宅勤務は？{Enter}");
     expect(await screen.findByText("回答を作るAIに接続できません。しばらくしてからやり直してください")).toBeInTheDocument();
+  });
+
+  it("送り始める前のエラー（権限など）も、サーバーの文言をそのまま出す", async () => {
+    fakeApi({
+      "POST /api/ask/stream": () => ({ status: 403, json: { error: { code: "forbidden", message: "この操作をする権限がありません" } } }),
+    });
+    render(<Chat me={ME_EMPLOYEE} />);
+    await userEvent.type(screen.getByLabelText("メッセージ"), "在宅勤務は？{Enter}");
+    expect(await screen.findByText("この操作をする権限がありません")).toBeInTheDocument();
   });
 
   it("ヘルプデスクの権限しかない人には、質問のタブを出さない", async () => {

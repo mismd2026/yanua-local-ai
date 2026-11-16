@@ -1,6 +1,6 @@
 // S-10 チャット。社内文書への質問（出典つきの回答）と、ヘルプデスクの会話（お困りごと〜問い合わせ票）を同じ画面で
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError, AskResult, ChatReply, DocumentBody, Me, Source } from "../api";
+import { api, ApiError, apiStream, AskResult, ChatReply, DocumentBody, Me, Source } from "../api";
 
 type Mode = "ask" | "helpdesk";
 
@@ -56,20 +56,32 @@ export default function Chat({ me }: { me: Me }) {
 function AskChat({ onOpen }: { onOpen: (s: Source) => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState("");
 
   const send = async (text: string) => {
     setMessages((m) => [...m, msg({ from: "me", text })]);
     setBusy(true);
+    setStage("");
+    let done = false;
+    const add = (m: Message) => {
+      done = true;
+      setMessages((ms) => [...ms, m]);
+    };
     try {
-      const r = await api<AskResult>("POST", "/api/ask", { question: text });
-      setMessages((m) => [
-        ...m,
-        msg({ from: "ai", text: r.answer, sources: r.sources, refused: r.refused, note: `${r.elapsed_sec}秒` }),
-      ]);
+      // 途中は進み具合（段階の文言）だけが届く。回答の文は、サーバーで確かめ終わってから result で届く
+      await apiStream("/api/ask/stream", { question: text }, (event, data) => {
+        if (event === "progress") setStage(String(data.message ?? ""));
+        else if (event === "result") {
+          const r = data as AskResult;
+          add(msg({ from: "ai", text: r.answer, sources: r.sources, refused: r.refused, note: `${r.elapsed_sec}秒` }));
+        } else if (event === "error") add(msg({ from: "info", text: String(data.message ?? "処理できませんでした") }));
+      });
+      if (!done) add(msg({ from: "info", text: "回答を受け取れませんでした。もう一度送ってください" }));
     } catch (e) {
-      setMessages((m) => [...m, msg({ from: "info", text: errorText(e) })]);
+      add(msg({ from: "info", text: errorText(e) }));
     } finally {
       setBusy(false);
+      setStage("");
     }
   };
 
@@ -79,6 +91,7 @@ function AskChat({ onOpen }: { onOpen: (s: Source) => void }) {
         messages={messages}
         empty="社内の規程や手順について質問してください。答えには、もとになった文書（出典）を付けます。"
         busy={busy}
+        stage={stage}
         onOpen={onOpen}
       />
       <Composer disabled={busy} placeholder="例：在宅勤務は週に何日までできますか？" onSend={send} />
@@ -178,12 +191,18 @@ function HelpdeskChat({ onOpen }: { onOpen: (s: Source) => void }) {
 
 // ------------------------------------------------------------ 共通の部品
 
-function Log({ messages, empty, busy, onOpen }: { messages: Message[]; empty: string; busy: boolean; onOpen: (s: Source) => void }) {
+function Log({ messages, empty, busy, stage, onOpen }: {
+  messages: Message[];
+  empty: string;
+  busy: boolean;
+  stage?: string;
+  onOpen: (s: Source) => void;
+}) {
   const end = useRef<HTMLDivElement>(null);
   const seconds = useElapsed(busy);
   useEffect(() => {
     end.current?.scrollIntoView?.({ block: "end" });
-  }, [messages.length, busy]);
+  }, [messages.length, busy, stage]);
 
   return (
     <div className="log" aria-live="polite">
@@ -207,7 +226,7 @@ function Log({ messages, empty, busy, onOpen }: { messages: Message[]; empty: st
       ))}
       {busy && (
         <div className="bubble ai waiting" role="status">
-          <p className="text">考えています…{seconds >= 3 ? `（${seconds}秒）` : ""}</p>
+          <p className="text">{stage || "考えています"}…{seconds >= 3 ? `（${seconds}秒）` : ""}</p>
         </div>
       )}
       <div ref={end} />

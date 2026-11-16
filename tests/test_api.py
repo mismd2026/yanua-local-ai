@@ -497,3 +497,64 @@ def test_web_does_not_serve_outside_dist(web_client):
 
 def test_no_web_without_build(client):
     assert client.get("/").status_code == 404
+
+
+# ---------------------------------------------------------------- 回答の逐次表示（SSE）
+
+
+def read_sse(text: str) -> list[tuple[str, dict]]:
+    out = []
+    for block in text.strip().split("\n\n"):
+        lines = [l for l in block.splitlines() if not l.startswith(":")]
+        if not lines:
+            continue
+        event = next(l[7:] for l in lines if l.startswith("event: "))
+        data = json.loads(next(l[6:] for l in lines if l.startswith("data: ")))
+        out.append((event, data))
+    return out
+
+
+def test_ask_stream_sends_only_progress_until_checked(client):
+    login(client, "10004")
+    r = client.post("/api/ask/stream", json={"question": "在宅勤務は週に何日までできますか？"}, headers=H)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    events = read_sse(r.text)
+    assert [e for e, _ in events] == ["progress", "progress", "progress", "result"]
+    assert [d["stage"] for _, d in events[:3]] == ["search", "answer", "check"]
+    # 途中のイベントには段階と文言だけ。LLM の文は入らない
+    assert all(set(d) == {"stage", "message"} for _, d in events[:3])
+    assert "週3日" not in "".join(json.dumps(d, ensure_ascii=False) for _, d in events[:3])
+    result = events[-1][1]
+    assert result["answer"] == "在宅勤務は週3日までです[1]。" and result["sources"] and "elapsed_sec" in result
+
+
+def test_ask_stream_refusal_never_shows_model_text(client):
+    login(client, "10004")
+    events = read_sse(client.post("/api/ask/stream", json={"question": "社員食堂の今日のメニューは？"}, headers=H).text)
+    result = events[-1]
+    assert result[0] == "result" and result[1]["refused"] is True and result[1]["sources"] == []
+    assert all(d.get("answer") != "わかりません" for _, d in events)
+
+
+def test_ask_stream_checks_before_streaming(client):
+    assert client.post("/api/ask/stream", json={"question": "在宅勤務は？"}, headers=H).status_code == 401
+    login(client, "10004")
+    r = client.post("/api/ask/stream", json={"question": "在宅勤務は？"})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "csrf"
+    r = client.post("/api/ask/stream", json={"question": ""}, headers=H)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_request"
+
+
+def test_ask_stream_llm_error_is_an_error_event(settings):
+    from yanua.llm import LLMError
+
+    class DownLLM(FakeLLM):
+        def chat(self, messages):
+            raise LLMError("接続できません")
+
+    with TestClient(create_app(settings, DownLLM())) as c:
+        login(c, "10004")
+        events = read_sse(c.post("/api/ask/stream", json={"question": "在宅勤務は週に何日？"}, headers=H).text)
+    assert events[-1] == ("error", {"code": "llm_unavailable",
+                                    "message": "回答を作るAIに接続できません。しばらくしてからやり直してください"})
+    assert [e for e, _ in events].count("result") == 0

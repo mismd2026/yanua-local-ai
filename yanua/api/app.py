@@ -7,6 +7,7 @@
     POST   /api/auth/logout
     GET    /api/me                 ログイン中の人・役割・できる操作
     POST   /api/ask                出典つきの回答（部署はログインした人のもの）
+    POST   /api/ask/stream         同じ回答を Server-Sent Events で。途中は進み具合だけを送り、文は確かめてから送る
     GET    /api/search             部署の権限つきの検索
     GET    /api/documents          見られる文書の一覧
     GET    /api/documents/{doc_id} 文書の中身（出典を開く。見られる文書だけ）
@@ -25,6 +26,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import queue
 import sqlite3
 import threading
 import time
@@ -32,12 +36,12 @@ from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import hr
 from ..answer import answer_question
-from ..llm import ChatModel
+from ..llm import ChatModel, LLMError
 from ..search import search
 from ..store import Store
 from . import auth, errors
@@ -51,6 +55,20 @@ from .settings import Settings
 
 CSRF_HEADER = "X-Yanua-Client"
 MAX_QUESTION = 2000
+STREAM_PING_SEC = 10     # 回答を作っている間も、途中の機器に接続を切られないよう空の行を送る
+
+log = logging.getLogger("yanua.api")
+
+# 逐次表示で画面に出す進み具合（answer_question の段階 → 画面の文言）
+ASK_STAGES = {
+    "search": "社内の文書を探しています",
+    "answer": "回答を作っています",
+    "check": "回答を確かめています",
+}
+
+
+def sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 # ------------------------------------------------------------ リクエストの形
@@ -223,6 +241,47 @@ def create_app(settings: Settings, llm: ChatModel) -> FastAPI:
         except ValueError as e:
             raise ApiError(400, "invalid_question", str(e)) from e
         return {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}
+
+    @app.post("/api/ask/stream")
+    def ask_stream(req: Ask, user: User = Depends(require("ask"))):
+        # ログイン・権限・質問の形は、送り始める前に確かめる（ふつうのエラーの形で返す）
+        events: queue.Queue[tuple[str, dict] | None] = queue.Queue()
+
+        def work():
+            started = time.monotonic()
+            s = Store(settings.db_path)
+            try:
+                result = answer_question(s, llm, req.question, user.dept, settings.top_k,
+                                         progress=lambda st: events.put(("progress", {"stage": st, "message": ASK_STAGES[st]})))
+                events.put(("result", {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}))
+            except ValueError as e:
+                events.put(("error", errors.body("invalid_question", str(e))["error"]))
+            except LLMError as e:
+                log.error("LLM: %s", e)
+                events.put(("error", errors.body("llm_unavailable",
+                                                 "回答を作るAIに接続できません。しばらくしてからやり直してください")["error"]))
+            except Exception:
+                log.exception("想定していないエラー")
+                events.put(("error", errors.body("internal", "サーバーでエラーが起きました")["error"]))
+            finally:
+                s.close()
+                events.put(None)
+
+        threading.Thread(target=work, name="yanua-ask", daemon=True).start()
+
+        def stream():
+            while True:
+                try:
+                    item = events.get(timeout=STREAM_PING_SEC)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
+                if item is None:
+                    return
+                yield sse(*item)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/search")
     def search_docs(q: str, top_k: int = 5, user: User = Depends(require("search"))):
