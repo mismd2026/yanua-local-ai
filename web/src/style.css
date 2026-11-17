@@ -9,6 +9,7 @@
   --me: #e4ecfb;
   --info: #f0f1f3;
   --error: #b3261e;
+  --warn: #8a5a00;
   --hit: #fff6d6;
   color-scheme: light;
   font-family: system-ui, "Hiragino Sans", "Yu Gothic UI", "Meiryo", "IPAGothic", sans-serif;
@@ -29,6 +30,7 @@
     --me: #263450;
     --info: #262a31;
     --error: #ff8a80;
+    --warn: #ffcc80;
     --hit: #3b351c;
     color-scheme: dark;
   }
@@ -176,3 +178,4 @@ main { padding: 1.2rem 1rem; max-width: 1200px; width: 100%; margin: 0 auto; fle
 .sticky-actions { position: sticky; bottom: 0; background: var(--card); padding: 0.6rem 0; border-top: 1px solid var(--line); display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 .button-link { display: inline-block; border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; padding: 0.4em 1em; text-decoration: none; }
 .button-link[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
+.warn { color: var(--warn); font-size: 0.9rem; margin: 0.3rem 0 0; }

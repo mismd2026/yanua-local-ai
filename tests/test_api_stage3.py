@@ -361,10 +361,25 @@ def test_meeting_transcribes_without_segments(client):
     assert "工事は土曜日に行う" in "".join(m["summary"]["decisions"])
 
 
+def test_meeting_without_model_shows_only_a_plain_message(settings, tmp_path, caplog):
+    # 文字起こしのモデルがないとき：社員の画面には連絡のお願いだけ。入手のコマンドはサーバーのログに残す
+    settings.models_dir = tmp_path / "no-models"
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        login(c, "10004")
+        media = upload(c, "recording", "m.mp4", b"0000").json()
+        r = c.post("/api/meetings", json={"upload_id": media["file_id"], "title": "t", "tool": "none"}, headers=H).json()
+        job = wait_job(c, r["job_id"])
+        m = c.get(f"/api/meetings/{r['meeting_id']}").json()
+    shown = "文字起こしのモデルが準備されていません。管理者に連絡してください"
+    assert job["status"] == "失敗" and job["error"] == shown
+    assert m["status"] == "失敗" and m["error"] == shown
+    assert "models pull whisper-small" in caplog.text
+
+
 def test_meeting_failure_is_recorded(settings):
     class Broken:
         def transcribe(self, media, prompt):
-            raise RuntimeError("文字起こしのモデルが使えません")
+            raise RuntimeError("/srv/secret/whisper の読み込みに失敗")
 
     with TestClient(create_app(settings, FakeLLM(), transcriber_factory=Broken)) as c:
         login(c, "10004")
@@ -372,5 +387,29 @@ def test_meeting_failure_is_recorded(settings):
         r = c.post("/api/meetings", json={"upload_id": media["file_id"], "title": "t", "tool": "none"}, headers=H).json()
         assert wait_job(c, r["job_id"])["status"] == "失敗"
         m = c.get(f"/api/meetings/{r['meeting_id']}").json()
-        assert m["status"] == "失敗" and "モデル" in m["error"]
+        # 思わぬ失敗の中身（置き場所など）は画面に出さず、ジョブ番号つきの決まった文にする
+        assert m["status"] == "失敗" and "secret" not in m["error"] and r["job_id"] in m["error"]
         assert c.get(f"/api/meetings/{r['meeting_id']}/minutes.docx").status_code == 409
+
+
+def test_paper_unknown_fields_are_flagged_and_same_names_do_not_overwrite(client, settings):
+    # 読み取れる項目のない同じような PDF を2つ「見積書」にすると、置き先の名前に「不明」が入り、同じ名前になる
+    for name in TEXT_PDFS:
+        (settings.paper_inbox / name).unlink()
+    for name in ("a.pdf", "b.pdf"):
+        shutil.copy2(PAPER / "inbox" / "scan_0005.pdf", settings.paper_inbox / name)
+    login(client, "10002")
+    done = wait_job(client, client.post("/api/paper/plans", json={}, headers=H).json()["job_id"])
+    plan_id = done["result"]["plan_id"]
+    items = [client.put(f"/api/paper/plans/{plan_id}/items/{i}", json={"rule": "見積書"}, headers=H).json() for i in (0, 1)]
+    assert items[0]["dest"] == items[1]["dest"] and "不明" in items[0]["dest"]
+    assert items[0]["missing"], items[0]            # 「不明」にした項目を返す（画面が注意を出す）
+    # すでに同じ名前のファイルがあっても上書きしない
+    dest = settings.paper_out / items[0]["dest"]
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"before")
+    result = client.post(f"/api/paper/plans/{plan_id}/execute", json={}, headers=H).json()
+    assert dest.read_bytes() == b"before"
+    assert len(result["placed"]) == 2 and len(set(result["placed"])) == 2
+    assert [r["placed"].rsplit(".", 1)[0][-2:] for r in result["renamed"]] == ["_2", "_3"]
+    assert all((settings.paper_out / p).read_bytes()[:5] == b"%PDF-" for p in result["placed"])

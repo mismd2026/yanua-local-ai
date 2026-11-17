@@ -219,7 +219,12 @@ function MeetingDetail({ id, onBack, onChanged }: { id: string; onBack: () => vo
           <p className="small muted">長い会議は時間がかかります。この画面を閉じても、処理は続きます。</p>
         </>
       )}
-      {m?.status === "失敗" && <p className="error" role="alert">議事録を作れませんでした：{m.error}</p>}
+      {m?.status === "失敗" && (
+        <>
+          <p className="error" role="alert">{m.error || "議事録を作れませんでした"}</p>
+          <p className="small muted">議事録を作れませんでした。直ったら、もう一度録画を送ってください。</p>
+        </>
+      )}
       {m?.status === "確認待ち" && <Review key={m.updated_at} m={m} saved={saved} onEdit={() => setSaved(false)} onSaved={(r) => { setM(r); setSaved(true); onChanged(); }} />}
     </section>
   );
@@ -362,6 +367,9 @@ function Review({ m, saved, onEdit, onSaved }: { m: Meeting; saved: boolean; onE
       </div>
 
       <h3>発言と話し手</h3>
+      {segs.length === 0 && (
+        <p className="warn" role="note">⚠ 録画から発言を聞き取れませんでした。声が入っているか（音声が消えていないか）を確かめてください。</p>
+      )}
       <datalist id="speaker-names">{names.map((n) => <option key={n} value={n} />)}</datalist>
       <div className="toolbar">
         <span>話し手が「不明」の発言：<strong>{unknownIdx.length}</strong>件</span>

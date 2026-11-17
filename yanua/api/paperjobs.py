@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import json
 import sqlite3
 from datetime import datetime
@@ -17,6 +18,8 @@ from pathlib import Path
 
 from ..paper import convert, rules, sort
 from ..paper.extract import read_pdf
+
+log = logging.getLogger("yanua.paper")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_plans (
@@ -62,12 +65,21 @@ def inbox_path(inbox: Path, name: str) -> Path | None:
     return p if p in inbox_files(inbox) else None
 
 
+# 読めなかった PDF の、画面に出す文（コマンドやライブラリーの例外の文は出さない。ログに残す）
+SHOWN_ERRORS = {
+    "ocr": "スキャンした PDF を読む仕組み（OCR）が準備されていません。管理者に連絡してください",
+    "read": "PDF を読めませんでした（壊れているか、パスワードがかかっている可能性があります）",
+}
+OCR_MISSING = SHOWN_ERRORS["ocr"]
+
+
 def _item(index: int, pl: sort.Plan, stat) -> dict:
     # 画面に出す項目（日付・相手先・金額・宛先と、ルールに書いた独自の項目）。年月日の分けたものなどは出さない
     hidden = ("rule", "original", "yyyy", "mm", "dd")
     return {"index": index, "file": pl.source.name, "rule": pl.rule or "", "by": pl.by,
             "fields": {k: v for k, v in pl.fields.items() if k not in hidden},
-            "dest": str(pl.dest) if pl.dest else "", "ocr": pl.ocr, "error": pl.error,
+            "dest": str(pl.dest) if pl.dest else "", "ocr": pl.ocr, "missing": [] if pl.error else pl.missing,
+            "error": (SHOWN_ERRORS.get(pl.error_kind, SHOWN_ERRORS["read"]) if pl.error else None),
             "size": stat.st_size if stat else None, "mtime": stat.st_mtime if stat else None}
 
 
@@ -79,6 +91,8 @@ def make_plan(db: sqlite3.Connection, *, plan_id: str, owner: str, inbox: Path, 
         progress(5 + int(90 * i / max(1, len(pdfs))), f"{pdf.name} を読んでいます（{i + 1}/{len(pdfs)}）")
         stat = pdf.stat()
         pl = sort.plan([pdf], rs, llm)[0]
+        if pl.error:
+            log.warning("仕分けの予定：%s を読めませんでした：%s", pdf.name, pl.error)
         items.append(_item(i, pl, stat))
         texts.append(pl.text)
     ensure_schema(db)
@@ -124,9 +138,19 @@ def execute(db: sqlite3.Connection, plan_id: str, inbox: Path, out_dir: Path, mo
             skipped.append({"file": x["file"], "reason": "予定を作ったあとに、受信箱のファイルがなくなったか変わりました"})
             continue
         plans.append(sort.Plan(src, x["rule"], x["by"], x["fields"], Path(x["dest"]), x["ocr"]))
-    placed = sort.execute(plans, out_dir, move=move)
+    # 1件ずつ置いて、予定の置き先と実際の置き先を比べる（同じ名前があれば上書きせず _2, _3 … を付けるので）
     out_root = out_dir.resolve()
-    result = {"placed": [str(p.relative_to(out_root)) for p in placed], "skipped": skipped, "moved": move}
+    placed, renamed = [], []
+    for pl in plans:
+        done = sort.execute([pl], out_dir, move=move)
+        if not done:
+            skipped.append({"file": pl.source.name, "reason": "保存先の外を指していたので置きませんでした"})
+            continue
+        rel = str(done[0].relative_to(out_root))
+        placed.append(rel)
+        if rel != str(pl.dest):
+            renamed.append({"file": pl.source.name, "planned": str(pl.dest), "placed": rel})
+    result = {"placed": placed, "renamed": renamed, "skipped": skipped, "moved": move}
     with db:
         db.execute("UPDATE paper_plans SET executed_at = ?, result = ? WHERE plan_id = ?",
                    (_now(), json.dumps(result, ensure_ascii=False), plan_id))

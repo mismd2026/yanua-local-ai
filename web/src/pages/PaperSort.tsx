@@ -7,7 +7,8 @@ import { useJob } from "../useJob";
 import { bytes, errorText, JobProgress, queryParam, setQuery, Status, time } from "../ui";
 
 const BY: Record<string, string> = { rule: "ルール", forced: "選び直し", llm: "LLM", none: "当たらない" };
-const FIELD_LABELS: Record<string, string> = { date: "日付", company: "相手先", amount: "金額", to: "宛先" };
+const FIELD_LABELS: Record<string, string> = { date: "日付", company: "相手先", amount: "金額", to: "宛先", yyyy: "年", mm: "月", dd: "日" };
+const label = (k: string) => FIELD_LABELS[k] ?? k;
 
 export default function PaperSort() {
   const [planId, setPlanId] = useState<string | null>(() => queryParam("plan"));
@@ -181,6 +182,10 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
   };
 
   const placeable = plan?.items.filter((x) => !x.error && x.dest).length ?? 0;
+  // 同じ置き先の行（実行すると、2つ目からは番号を付けて分ける）
+  const destCount = new Map<string, number>();
+  for (const x of plan?.items ?? []) if (!x.error && x.dest) destCount.set(x.dest, (destCount.get(x.dest) ?? 0) + 1);
+  const warned = plan?.items.filter((x) => !x.error && ((x.missing?.length ?? 0) > 0 || (destCount.get(x.dest) ?? 0) > 1)).length ?? 0;
   const done = !!plan?.executed_at;
 
   return (
@@ -194,6 +199,7 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
       {plan && (
         <>
           {!done && <p className="small muted">置く先を確かめてください。ルールが違うものは、選び直せます（PDF は読み直しません）。</p>}
+          {!done && warned > 0 && <p className="warn" role="status">⚠ 注意がある行が{warned}件あります（表の「置く先」を見てください）。</p>}
           <div className="table-wrap">
             <table className="table">
               <thead><tr><th>ファイル</th><th>ルール</th><th>読み取った内容</th><th>置く先</th></tr></thead>
@@ -224,7 +230,17 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
                       {Object.entries(x.fields).length === 0 && "—"}
                       {Object.entries(x.fields).map(([k, v]) => <div key={k}>{FIELD_LABELS[k] ?? k}：{v}</div>)}
                     </td>
-                    <td className="dest small">{x.error ? <span className="error">{x.error}</span> : x.dest}</td>
+                    <td className="dest small">
+                      {x.error ? <span className="error">{x.error}</span> : x.dest}
+                      {!x.error && (x.missing?.length ?? 0) > 0 && (
+                        <div className="warn" role="note">
+                          ⚠ 読み取れなかった項目（{x.missing!.map(label).join("・")}）は「不明」になります。中身を確かめ、合うルールを選んでください。
+                        </div>
+                      )}
+                      {!x.error && (destCount.get(x.dest) ?? 0) > 1 && (
+                        <div className="warn" role="note">⚠ 同じ置き先がほかにもあります。実行すると、上書きせずに番号（_2 など）を付けて分けます。</div>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -251,6 +267,12 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
             <div className="spaced" role="status">
               <p><strong>{plan.result.placed.length}件を{plan.result.moved ? "移しました" : "コピーしました"}。</strong></p>
               {plan.result.placed.length > 0 && <ul className="result-list small">{plan.result.placed.map((p) => <li key={p}>{p}</li>)}</ul>}
+              {(plan.result.renamed?.length ?? 0) > 0 && (
+                <>
+                  <p>同じ名前のファイルがあったので、番号を付けて置いたもの（{plan.result.renamed!.length}件）：</p>
+                  <ul className="result-list small">{plan.result.renamed!.map((r) => <li key={r.placed}>{r.file} → {r.placed}</li>)}</ul>
+                </>
+              )}
               {plan.result.skipped.length > 0 && (
                 <>
                   <p>置かなかったもの（{plan.result.skipped.length}件）：</p>

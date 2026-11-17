@@ -300,10 +300,12 @@ export interface PlanItem {
   dest: string;
   ocr: boolean;
   error: string | null;
+  missing?: string[]; // 名前に使う項目のうち、読み取れずに「不明」にしたもの
 }
 
 export interface PlanResult {
   placed: string[];
+  renamed?: { file: string; planned: string; placed: string }[]; // 同じ名前があったので、番号を付けて置いたもの
   skipped: { file: string; reason: string }[];
   moved: boolean;
 }

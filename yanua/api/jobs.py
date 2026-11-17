@@ -20,6 +20,23 @@ from typing import Callable
 
 log = logging.getLogger("yanua.jobs")
 
+
+class JobFailed(Exception):
+    """利用者に見せてよい理由でジョブを失敗にする。
+
+    message は画面に出す文（コマンドやサーバーの置き場所を入れない）。detail は管理者向けにログにだけ残す文。
+    JobFailed 以外の例外で止まったジョブは、画面には決まった文だけを出し、中身はログに残す。
+    """
+
+    def __init__(self, message: str, detail: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.detail = detail
+
+
+def failure_text(job_id: str) -> str:
+    return f"処理の途中で問題が起きました。続くときは、管理者に連絡してください（ジョブ番号 {job_id}）"
+
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "待ち", "実行中", "完了", "失敗", "取り消し"
 FINISHED = (DONE, FAILED, CANCELLED)
 
@@ -174,10 +191,16 @@ class JobQueue:
             result = self._kinds[kind](JobContext(self, job_id), params)
         except JobCancelled:
             return
-        except Exception as e:  # ジョブの失敗はジョブの結果として残し、ワーカーは止めない
+        except JobFailed as e:
+            # 理由の分かっている失敗。画面には message、ログには detail（管理者が直すための文）
+            log.warning("ジョブ %s（%s）が失敗しました：%s", job_id, kind, e.detail or e.message, exc_info=e.__cause__ is not None)
+            if self.status_of(job_id) != CANCELLED:
+                self._update(job_id, status=FAILED, error=e.message, finished_at=_now())
+            return
+        except Exception:  # ジョブの失敗はジョブの結果として残し、ワーカーは止めない。中身はログにだけ残す
             log.exception("ジョブ %s（%s）が失敗しました", job_id, kind)
             if self.status_of(job_id) != CANCELLED:
-                self._update(job_id, status=FAILED, error=str(e) or e.__class__.__name__, finished_at=_now())
+                self._update(job_id, status=FAILED, error=failure_text(job_id), finished_at=_now())
             return
         if self.status_of(job_id) != CANCELLED:
             self._update(job_id, status=DONE, progress=100, result=json.dumps(result, ensure_ascii=False),

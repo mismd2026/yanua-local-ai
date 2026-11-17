@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from yanua import hr  # noqa: E402
 from yanua.api import Settings, create_app  # noqa: E402
-from yanua.api.jobs import CANCELLED, DONE, FAILED, QUEUED, JobQueue  # noqa: E402
+from yanua.api.jobs import CANCELLED, DONE, FAILED, QUEUED, JobFailed, JobQueue  # noqa: E402
 from yanua.api.roles import RoleConfigError, load_roles  # noqa: E402
 from yanua.store import Store  # noqa: E402
 
@@ -258,14 +258,17 @@ def test_job_queue_success_failure_cancel(tmp_path):
         return {"n": params["n"] * 2}
 
     def ng(ctx, params):
-        raise RuntimeError("読み込めません")
+        raise JobFailed("読み込めません", "管理者向け：python -m yanua ingest をやり直す")
+
+    def broken(ctx, params):
+        raise RuntimeError("/srv/data/secret.db が開けません")
 
     def slow(ctx, params):
         gate.wait(5)
         ctx.progress(10, "続き")   # 取り消されていればここで止まる
         return {}
 
-    for k, f in (("ok", ok), ("ng", ng), ("slow", slow)):
+    for k, f in (("ok", ok), ("ng", ng), ("broken", broken), ("slow", slow)):
         q.register(k, f)
 
     a = q.submit("ok", "u1", {"n": 21})["job_id"]
@@ -274,7 +277,12 @@ def test_job_queue_success_failure_cancel(tmp_path):
 
     b = q.submit("ng", "u1", {})["job_id"]
     q.run_one(b)
-    assert q.get(b)["status"] == FAILED and "読み込めません" in q.get(b)["error"]
+    assert q.get(b)["status"] == FAILED and q.get(b)["error"] == "読み込めません"
+    # 利用者に見せる文とログに残す文を分ける：コマンドや例外の中身（置き場所など）は画面に出さない
+    assert "python" not in q.get(b)["error"]
+    e = q.submit("broken", "u1", {})["job_id"]
+    q.run_one(e)
+    assert q.get(e)["status"] == FAILED and "secret" not in q.get(e)["error"] and e in q.get(e)["error"]
 
     c = q.submit("ok", "u1", {"n": 1})["job_id"]
     q.cancel(c)

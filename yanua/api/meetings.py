@@ -20,6 +20,7 @@ from ..meeting.run import company_words, load_segments
 from ..meeting.speakers import PRESETS, label_segments
 from ..meeting.summarize import Summary, summarize
 from ..meeting.transcribe import Segment, build_prompt
+from .jobs import JobFailed, failure_text
 
 TOOLS = ("zoom", "teams", "meet", "none")
 PROCESSING, REVIEW, FAILED = "処理中", "確認待ち", "失敗"
@@ -103,7 +104,7 @@ def list_for(db: sqlite3.Connection, owner: str) -> list[dict]:
 
 
 def process(db: sqlite3.Connection, meeting_id: str, *, media: Path, segments_file: Path | None, transcriber_factory,
-            llm, use_summary: bool, progress=lambda pct, stage: None) -> dict:
+            llm, use_summary: bool, progress=lambda pct, stage: None, job_id: str | None = None) -> dict:
     """ジョブの本体：文字起こし → 話し手 → 要約。結果は meetings の行に残す。"""
     r = db.execute(f"SELECT {', '.join(KEYS)} FROM meetings WHERE meeting_id = ?", (meeting_id,)).fetchone()
     m = _row(r)
@@ -134,9 +135,11 @@ def process(db: sqlite3.Connection, meeting_id: str, *, media: Path, segments_fi
         return {"meeting_id": meeting_id, "segments": len(segs), "speakers_found": found,
                 "unknown_speakers": sum(1 for s in segs if s.speaker == "不明")}
     except Exception as e:
+        # 画面に出すのは、利用者に見せてよい文だけ（JobFailed の message）。ほかの失敗の中身はジョブのログに残る
+        shown = e.message if isinstance(e, JobFailed) else failure_text(job_id or "")
         with db:
             db.execute("UPDATE meetings SET status = ?, error = ?, updated_at = ? WHERE meeting_id = ?",
-                       (FAILED, str(e)[:500], _now(), meeting_id))
+                       (FAILED, shown[:500], _now(), meeting_id))
         raise
 
 

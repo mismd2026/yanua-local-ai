@@ -116,6 +116,29 @@ describe("S-20 PDF の仕分け", () => {
   });
 });
 
+describe("S-20 読み取れなかった項目と、同じ置き先", () => {
+  it("「不明」が入る行と、同じ置き先の行に注意を出し、番号を付けて置いたものを出す", async () => {
+    const dest = "総務/見積書/不明/不明_見積書_不明_不明円.pdf";
+    const items = [0, 1].map((i) => item({ index: i, file: `scan_${i}.pdf`, rule: "見積書", by: "forced", fields: {}, dest, missing: ["date", "company", "amount"] }));
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    fakeApi({
+      "GET /api/paper/rules": RULES, "GET /api/paper/history?limit=100": { records: [] },
+      "GET /api/paper/plans/p1": { plan_id: "p1", created_at: "2026-11-16T10:00:00+09:00", items, executed_at: null, result: null },
+      "POST /api/paper/plans/p1/execute": { placed: [dest, dest.replace(".pdf", "_2.pdf")], skipped: [], moved: false,
+        renamed: [{ file: "scan_1.pdf", planned: dest, placed: dest.replace(".pdf", "_2.pdf") }] },
+    });
+    const user = userEvent.setup();
+    render(<PaperSort />);
+    expect(await screen.findByText("⚠ 注意がある行が2件あります（表の「置く先」を見てください）。")).toBeInTheDocument();
+    expect(screen.getAllByText(/読み取れなかった項目（日付・相手先・金額）は「不明」になります/)).toHaveLength(2);
+    expect(screen.getAllByText(/同じ置き先がほかにもあります。実行すると、上書きせずに番号/)).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "実行する" }));
+    await user.click(screen.getByRole("button", { name: "はい、実行する" }));
+    expect(await screen.findByText(/番号を付けて置いたもの（1件）/)).toBeInTheDocument();
+    expect(screen.getByText(`scan_1.pdf → ${dest.replace(".pdf", "_2.pdf")}`)).toBeInTheDocument();
+  });
+});
+
 describe("S-21 PDF の変換", () => {
   it("PDF を送って会社の様式に変換し、結果をダウンロードできる", async () => {
     const { calls } = fakeApi({
@@ -225,6 +248,15 @@ describe("S-13 議事録", () => {
     expect(put.segments.map((s: { speaker: string }) => s.speaker)).toEqual(["佐藤 一郎", "高橋 美咲", "高橋 美咲"]);
     expect(put.summary).toMatchObject({ decisions: ["工事は土曜日"], todos: [{ who: "佐藤 一郎", what: "業者に連絡", due: "11/20" }] });
     await waitFor(() => expect(screen.getByRole("link", { name: "議事録を Word で出す" })).toHaveAttribute("aria-disabled", "false"));
+  });
+
+  it("失敗したときは、サーバーの文だけを1回出す", async () => {
+    window.history.replaceState(null, "", "/meetings?id=m1");
+    const shown = "文字起こしのモデルが準備されていません。管理者に連絡してください";
+    fakeApi({ "GET /api/meetings": { meetings: [] }, "GET /api/meetings/m1": meeting({ status: "失敗", error: shown, segments: [], summary: null }) });
+    render(<Meetings />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(new RegExp(`^${shown}$`));
+    expect(screen.queryByText(/models pull/)).not.toBeInTheDocument();
   });
 
   it("ほかの人の議事録の URL は、ないものと同じに出す", async () => {
