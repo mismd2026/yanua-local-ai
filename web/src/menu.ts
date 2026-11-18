@@ -81,6 +81,13 @@ export const MENU: MenuItem[] = [
     needs: ["paper"],
   },
   {
+    id: "S-52",
+    path: "/admin/settings",
+    label: "設定",
+    description: "本人確認の方針・監査ログ・使うモデル・作業用フォルダの設定を確かめて変えられます。前の版にも戻せます。",
+    needs: ["settings.view"],
+  },
+  {
     id: "S-55",
     path: "/admin/audit",
     label: "監査ログ",

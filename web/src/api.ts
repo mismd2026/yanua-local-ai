@@ -437,3 +437,36 @@ export interface AuditPage {
   keep_days: number;
   keep_body: boolean;
 }
+
+// 設定の画面（S-52。K-042）
+export type SettingKey = "identity" | "audit" | "models" | "files";
+
+export interface SettingSection {
+  key: SettingKey;
+  label: string;
+  status: SettingStatus;
+  pinned: Record<string, string>;           // 起動の指定が勝つ項目 → 起動の指定の名前
+  values: Record<string, unknown> | null;   // 保存したもの（写しか既定）。読めないときは null
+  running: Record<string, unknown>;         // 今動いている値
+  applied: boolean;                         // false なら、再起動すると使われる
+  problems: { where: string; message: string }[];
+}
+
+export interface SettingDetail extends SettingSection {
+  meta: {
+    presets?: Record<string, { description: string; question: string; clues: string[]; confirm: string[][] }>;
+    clues?: Record<string, string>;
+    // 目録（config/network.json）にある Ollama のモデル。state が ok のものだけ選べる。message は使えない理由
+    catalog?: { name: string; use: string[]; state: "ok" | "not_installed" | "not_registered" | "changed"; message: string }[];
+    error?: string;
+    limits?: Record<string, { min: number; max: number; unit: string }>;
+  };
+  versions: RuleVersion[];
+  current: number | null;
+}
+
+export interface SettingsOverview {
+  sections: SettingSection[];
+  pending_restart: SettingKey[];
+  links: { label: string; path: string; note: string }[];
+}

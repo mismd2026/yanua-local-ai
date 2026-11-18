@@ -95,11 +95,54 @@ class Policy:
         return build_policy({})
 
 
-def build_policy(data: dict) -> Policy:
-    """方針の設定（型の名前と上書きする項目）から Policy を作る。書き間違いはエラーにする。"""
+POLICY_KEYS = ("preset", "question", "clues", "confirm", "surname_counts", "max_follow_ups")
+
+
+def policy_problems(data) -> list[tuple[str, str]]:
+    """方針の設定の誤りを、項目ごとに全部集める（画面で欄の下に出すため）。空なら正しい。"""
+    if not isinstance(data, dict):
+        return [("", "本人確認の方針は {\"preset\": …} の形にしてください")]
+    out: list[tuple[str, str]] = []
+    for k in data:
+        if not k.startswith("_") and k not in POLICY_KEYS:
+            out.append((k, f"{k} という項目はありません（使える項目：{'・'.join(POLICY_KEYS)}）"))
     preset = data.get("preset", DEFAULTS["preset"])
     if preset not in PRESETS:
-        raise PolicyError(f"知らない型です: {preset}（使える型: {'・'.join(PRESETS)}）")
+        return out + [("preset", f"知らない型です: {preset}（使える型: {'・'.join(PRESETS)}）")]
+    merged = {**DEFAULTS, **{k: v for k, v in PRESETS[preset].items() if not k.startswith("_")},
+              **{k: v for k, v in data.items() if not k.startswith("_")}}
+    clues, confirm = merged["clues"], merged["confirm"]
+    if not isinstance(clues, list) or not clues or any(c not in CLUES for c in clues) or len(set(clues)) != len(clues):
+        out.append(("clues", "使う手がかりを、従業員番号・名前・部署の中から1つ以上選んでください"))
+        clues = [c for c in clues if c in CLUES] if isinstance(clues, list) else []
+    if not isinstance(confirm, list) or not confirm:
+        out.append(("confirm", "確定する組み合わせを1つ以上選んでください"))
+    else:
+        for combo in confirm:
+            if not isinstance(combo, list) or len(combo) < 2 or len(set(combo)) != len(combo) or any(c not in CLUES for c in combo):
+                out.append(("confirm", f"確定する組み合わせは、違う手がかりを2つ以上にしてください: {combo}"))
+            elif any(c not in clues for c in combo):
+                labels = "・".join(MATCH_LABELS[c] for c in combo)
+                out.append(("confirm", f"組み合わせ「{labels}」に、使う手がかりにないものがあります"))
+    if not isinstance(merged["question"], str) or not merged["question"].strip():
+        out.append(("question", "最初の聞き方が空です"))
+    elif len(merged["question"]) > 300:
+        out.append(("question", "最初の聞き方は300文字までにしてください"))
+    if not isinstance(merged["surname_counts"], bool):
+        out.append(("surname_counts", "姓だけを数えるかは、はい（true）かいいえ（false）にしてください"))
+    n = merged["max_follow_ups"]
+    if isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= 3:
+        out.append(("max_follow_ups", "聞き返しの上限は 0〜3 回にしてください"))
+    return out
+
+
+def build_policy(data: dict) -> Policy:
+    """方針の設定（型の名前と上書きする項目）から Policy を作る。書き間違いはエラーにする。"""
+    problems = policy_problems(data)
+    if problems:
+        where, why = problems[0]
+        raise PolicyError(f"{where}: {why}" if where else why)
+    preset = data.get("preset", DEFAULTS["preset"])
     merged = {**DEFAULTS, **{k: v for k, v in PRESETS[preset].items() if not k.startswith("_")},
               **{k: v for k, v in data.items() if not k.startswith("_")}}
     clues, confirm = merged["clues"], merged["confirm"]

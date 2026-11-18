@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("name", nargs="?", default="whisper-small")
     s.add_argument("--update", action="store_true", help="記録した版ではなく、いまの版を入手する")
     s.add_argument("--models-dir", type=Path, default=Path("data/models"))
+    s.add_argument("--ollama", default=DEFAULT_OLLAMA_URL, help="手元の Ollama の URL（Ollama のモデルの digest を見る）")
 
     s = sub.add_parser("meeting", help="会議の録画・録音から議事録を作る（文字起こし・話し手・要約）")
     s.add_argument("media", type=Path, help="録画（mp4 など）か録音（wav / m4a / mp3 など）")
@@ -209,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         return _models(args)
 
     if args.command == "serve":
+        args.given = list(argv if argv is not None else sys.argv[1:])   # 起動の指定で付けたもの（画面より勝つ）
         return _serve(args)
 
     if args.command == "serve-legacy":
@@ -508,12 +510,23 @@ def _models(args) -> int:
             lock = models.read_lock(args.models_dir)
             for name, spec in policy.models.items():
                 got = lock.get(name)
+                if models.kind_of(spec) == models.OLLAMA:
+                    use = "・".join(spec.get("use", []))
+                    print(f"{name}：Ollama（用途 {use}）　" + (f"登録済み（digest {got['digest'][:12]}、{got['registered_at']}）" if got else "未登録"))
+                    continue
                 print(f"{name}：{spec['repo']}　" + (f"入手済み（版 {got['revision'][:12]}、{got['pulled_at']}）" if got else "未入手"))
             print(f"通信してよい宛先：{'、'.join(policy.allowed_hosts)}（config/network.json）")
             return 0
         if args.action == "pull":
-            entry = models.pull(args.name, policy, args.models_dir, update=args.update)
-            print(f"{args.name} を入手しました（版 {entry['revision'][:12]}、ファイル {len(entry['files'])} 件を記録）。")
+            entry = models.pull(args.name, policy, args.models_dir, update=args.update, ollama_url=args.ollama)
+            if entry.get("kind") == models.OLLAMA:
+                print(f"{args.name} を登録しました（手元の Ollama の digest {entry['digest'][:12]}）。社外には通信していません。")
+            else:
+                print(f"{args.name} を入手しました（版 {entry['revision'][:12]}、ファイル {len(entry['files'])} 件を記録）。")
+            return 0
+        if models.kind_of(policy.models.get(args.name, {})) == models.OLLAMA:
+            digest = models.verify_ollama(args.name, args.models_dir, ollama_url=args.ollama)
+            print(f"{args.name}：登録した digest と一致しました（{digest[:12]}）。")
             return 0
         path = models.verify(args.name, args.models_dir)
         print(f"{args.name}：記録と一致しました（{path}）。")
@@ -571,17 +584,29 @@ def _serve(args) -> int:
     if not Store(args.db).documents():
         print(f"{args.db} に文書がありません。先に ingest を実行してください。")
         return 1
+    from .api import adminsettings
     from .identity import load_policy
 
+    # 起動の指定で付けた項目は、設定の画面（S-52）の値より勝つ（画面では変えられない）
+    given = getattr(args, "given", [])
+    flag = lambda name: any(a == name or a.startswith(name + "=") for a in given)   # noqa: E731
+    pinned = {key for key, name in adminsettings.PIN_FLAGS.items()
+              if flag(name) or (name == "--audit-body" and flag("--audit-keep-body"))}
     settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
                         roles_path=args.roles, identity_path=args.identity, top_k=args.top_k, host=args.host,
                         dev_login=args.dev_login, summary_model=args.summary_model, paper_rules=args.paper_rules,
                         settings_dir=args.settings_dir, audit_db_path=args.audit_db, audit_keep_days=args.audit_keep_days,
-                        audit_keep_body=args.audit_keep_body)
+                        audit_keep_body=args.audit_keep_body, chat_model=args.model, pinned=pinned)
+    _, bad_settings = adminsettings.startup(settings)
+    for key, found in bad_settings.items():
+        # 監査ログ・モデル・ファイルの写しに誤りがあれば、その設定だけ既定で動く（起動は続ける）
+        print(f"注意：画面で保存した設定「{adminsettings.LABELS[key]}」が読み込めないので、既定で動きます。直すところ：")
+        for where, why in found:
+            print(f"  - {where}：{why}" if where else f"  - {why}")
     try:
         settings.check()
         load_roles(settings.roles_path)
-        load_policy(settings.identity_path)
+        load_policy(adminsettings.identity_path(settings))     # 画面で保存した写しがあれば写し。誤りがあれば起動しない
     except (ValueError, RoleConfigError) as e:
         print(e)
         return 1
@@ -593,7 +618,7 @@ def _serve(args) -> int:
         print(f"注意：仕分けルール {rules_path} が読み込めません。PDF の仕分け・変換は、直すまで使えません。直すところ：")
         for where, why in problems:
             print(f"  - {where}：{why}" if where else f"  - {why}")
-    llm = OllamaChat(args.model, args.ollama)
+    llm = OllamaChat(settings.chat_model, args.ollama)     # 画面で保存したモデル（--model を付けたときは、そちら）
     try:
         llm.check()
     except LLMError as e:
@@ -608,7 +633,7 @@ def _serve(args) -> int:
     import uvicorn
 
     app = create_app(settings, llm, summary_llm=summary_llm)
-    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {args.model}、議事録の要約: {settings.summary_model}）。止めるには Ctrl+C")
+    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {settings.chat_model}、議事録の要約: {settings.summary_model}）。止めるには Ctrl+C")
     if settings.web_dist and (settings.web_dist / "index.html").is_file():
         print(f"Web画面: http://{args.host}:{args.port}/")
     else:

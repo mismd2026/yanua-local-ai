@@ -1,0 +1,5 @@
+{
+  "_説明": "作業用フォルダ（アップロードと結果のファイル）の設定。work_max_gb は合計の上限（GB）、file_keep_hours はファイルを消すまでの時間",
+  "work_max_gb": 20,
+  "file_keep_hours": 24
+}
