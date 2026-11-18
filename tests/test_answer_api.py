@@ -316,6 +316,47 @@ def test_strip_leading_citations():
     assert strip("[1]") == "[1]"
 
 
+def test_strip_leading_heading():
+    """文頭の「A / B」形の資料の見出しを外す（実際のモデルが「休暇制度 / 年次有給休暇では…」と書き始めた）。
+    外すのは、検索結果の題名から始まるときだけ。"""
+    from yanua.answer import strip_leading_citations as strip
+    from yanua.search import Hit
+
+    hits = [Hit("A02", "休暇制度", "年次有給休暇", "", 1.0), Hit("A01", "就業規則（抜粋）", "在宅勤務", "", 0.5)]
+    assert strip("休暇制度 / 年次有給休暇では、入社6か月後に10日付与されます[1]。", hits) == "年次有給休暇では、入社6か月後に10日付与されます[1]。"
+    assert strip("[1] 休暇制度 / 年次有給休暇では、10日です。", hits) == "年次有給休暇では、10日です。"
+    assert strip("就業規則（抜粋）／在宅勤務は週3日までです[2]。", hits) == "在宅勤務は週3日までです[2]。"
+    # 見出しだけの行のあとに本文が続くときは、その行も外す
+    assert strip("休暇制度 / 年次有給休暇\n入社6か月後に10日です[1]。", hits) == "入社6か月後に10日です[1]。"
+    # 検索結果の題名でないもの・ふつうの文の「 / 」・空白のない「/」は外さない
+    assert strip("在宅勤務は週3日まで / 申請は前日までです。", hits) == "在宅勤務は週3日まで / 申請は前日までです。"
+    assert strip("経費精算 / 交通費は月末までです。", hits) == "経費精算 / 交通費は月末までです。"
+    assert strip("TCP/IP の設定を確かめてください。", hits) == "TCP/IP の設定を確かめてください。"
+    assert strip("休暇制度 / 年次有給休暇では10日です。") == "休暇制度 / 年次有給休暇では10日です。"   # 検索結果がなければ外さない
+    assert strip("休暇制度 / ", hits) == "休暇制度 / "        # 外すと何も残らないときは元のまま
+
+
+def test_answer_drops_leading_heading_of_the_material(store):
+    q = "年次有給休暇は何日もらえますか？"
+    ans = answer_question(store, FakeLLM("休暇制度 / 年次有給休暇では、入社6か月後に10日付与されます[1]。"), q, "営業部")
+    assert ans.answer == "年次有給休暇では、入社6か月後に10日付与されます[1]。"
+    assert ans.sources[0]["title"] == "休暇制度" and ans.model_text.startswith("休暇制度 / ")
+
+
+def test_refusal_with_hidden_documents_is_no_permission(store):
+    """見られる文書に弱く当たっても答えられず、見られない文書に強く当たっていたら「権限がない」。返事は見つからないときと同じ。"""
+    from yanua.answer import NO_PERMISSION, NOT_FOUND
+    from yanua.search import hidden_count, search
+
+    q = "採用面接の進め方を教えてください"
+    assert search(store, q, "経理部") and hidden_count(store, q, "経理部") >= 1     # 見られる文書にも弱い当たりがある
+    ans = answer_question(store, FakeLLM("わかりません"), q, "経理部")
+    assert ans.refused and ans.reason == NO_PERMISSION and ans.hidden >= 1
+    plain = answer_question(store, FakeLLM("わかりません"), "在宅勤務は週に何日までできますか？", "経理部")
+    assert plain.reason == NOT_FOUND and plain.hidden == 0
+    assert ans.as_dict() == plain.as_dict()                  # 社員への返事は同じ
+
+
 def test_answer_drops_leading_number_but_keeps_its_source(store):
     ans = answer_question(store, FakeLLM("[1] 就業規則の在宅勤務の記述から、週3日まで使えます。"), "在宅勤務は週に何日までできますか？", "営業部")
     assert ans.answer == "就業規則の在宅勤務の記述から、週3日まで使えます。"

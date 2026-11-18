@@ -340,7 +340,7 @@ def test_helpdesk_skips_identity_for_logged_in_user(client):
     r = client.post("/api/chat/sessions", json={}, headers=H)
     assert r.status_code == 201
     first = r.json()
-    assert first["reply"].startswith("佐藤 花子さん、ありがとうございます。どのようなことでお困りですか") and not first["finished"]
+    assert first["reply"] == "佐藤 花子さん、どのようなことでお困りですか？" and not first["finished"]
     sid = first["session_id"]
     last = chat(client, "パスワードを忘れました", sid)
     assert "解決しましたか" in last["reply"]

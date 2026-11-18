@@ -361,3 +361,30 @@ def test_reset_when_already_default_adds_no_version_and_no_record(client):
     assert again["already_default"] is True
     assert [v["version"] for v in client.get("/api/paper/rules/history").json()["versions"]] == [3, 2, 1]
     assert [r["action"] for r in entries(client, action="paper.rules")] == ["paper.rules.reset", "paper.rules.save"]
+
+
+def test_refusal_with_hidden_documents_is_recorded_as_denied(client):
+    """経理部が人事部の文書のことを聞く。見られる文書にも弱く当たるが答えられず、見られない文書に強く当たる → 拒否（権限がない）。"""
+    login(client, "10001")                               # 山田（経理部）
+    q = "採用面接の進め方を教えてください"
+    reply = client.post("/api/ask", json={"question": q}, headers=H).json()
+    plain = client.post("/api/ask", json={"question": "ｘｙｚｚｙ"}, headers=H).json()
+    assert reply["refused"] and reply["answer"] == plain["answer"]      # 社員への返事は、見つからないときと同じ
+    rows = [r for r in entries(client, action="ask.chat") if r["actor"] == "10001"]
+    denied = next(r for r in rows if r["result"] == "拒否")
+    assert denied["detail"].startswith("チャット：断りました（権限がない）。部署の権限で見せなかった文書 ")
+    assert next(r for r in rows if r["result"] == "失敗")["detail"] == "チャット：断りました（文書が見つからない）"
+    assert q not in auditor(client).all_text() and "採用面接の進め方" not in auditor(client).all_text()
+
+
+def test_helpdesk_guided_by_procedure_is_a_success(client):
+    """社内文書に答えがなく、決まった手順（プリンターなど）で案内したら「手順で案内」＝成功。"""
+    login(client, EMP)
+    sid = client.post("/api/chat/sessions", json={}, headers=H).json()["session_id"]
+    for text in ("プリンターから印刷できません", "本社2階の営業部の複合機です。自分だけ印刷できません。", "一部できない"):
+        r = client.post(f"/api/chat/sessions/{sid}/messages", json={"text": text}, headers=H).json()
+    assert "解決しましたか" in r["reply"]
+    rows = [r for r in entries(client, action="ask.helpdesk")]
+    assert len(rows) == 1, rows
+    assert rows[0]["result"] == "成功" and rows[0]["detail"].startswith("ヘルプデスク：手順で案内しました（手順：")
+    assert "プリンターから印刷できません" not in auditor(client).all_text()

@@ -266,9 +266,18 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     ASK_SCREENS = {"chat": "チャット", "helpdesk": "ヘルプデスク"}
     ASK_RESULTS = {ANSWERED: audit.OK, NOT_FOUND: audit.FAILED, NO_PERMISSION: audit.DENIED}
 
-    def audit_question(user: User, screen: str, question: str, ans: Answer, ip: str | None = None) -> None:
+    def audit_question(user: User, screen: str, question: str, ans: Answer | None, ip: str | None = None,
+                       procedure: str | None = None) -> None:
         """質問の記録：どの画面で・出典の文書の番号と題名・答えたか断ったか。部署の権限で見せなかった文書は件数だけ。
+        procedure は、ヘルプデスクが社内文書を使わず決まった手順で案内したときの手順の名前（「手順で案内」＝成功）。
         質問の文は、本文を残す設定（--audit-body）のときだけ body に入る。"""
+        if procedure:
+            detail = f"{ASK_SCREENS[screen]}：手順で案内しました（手順：{procedure}）"
+            if ans and ans.hidden:
+                detail += f"。部署の権限で見せなかった文書 {ans.hidden}件"
+            auditor.record(f"ask.{screen}", actor=user.employee_no, actor_name=user.name, result=audit.OK,
+                           detail=detail, body=question, ip=ip)
+            return
         if ans.refused:
             detail = f"{ASK_SCREENS[screen]}：断りました（{ans.reason or NOT_FOUND}）"
         else:
@@ -444,7 +453,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
         app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy,
-                                              on_answer=lambda u, q, a: audit_question(u, "helpdesk", q, a))
+                                              on_answer=lambda u, q, a, proc: audit_question(u, "helpdesk", q, a, procedure=proc))
         app.state.reception = ReceptionSessions(chats, settings.db_path, settings.reception_data, llm, settings.top_k,
                                                 settings.today)
 

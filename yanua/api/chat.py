@@ -144,10 +144,10 @@ def _text(text: str) -> str:
 _answered: contextvars.ContextVar[list | None] = contextvars.ContextVar("yanua_helpdesk_answers", default=None)
 
 
-def _observe(question, answer) -> None:
+def _observe(question, answer, procedure=None) -> None:
     got = _answered.get()
     if got is not None:
-        got.append((question, answer))
+        got.append((question, answer, procedure))
 
 
 class HelpdeskSessions:
@@ -155,7 +155,7 @@ class HelpdeskSessions:
 
     def __init__(self, chats: ChatDB, db_path: Path, helpdesk_data: Path, llm: ChatModel, top_k: int, policy=None,
                  on_answer=None):
-        """on_answer(User, 質問, Answer)：社内文書から答えた（断った）たびに呼ぶ（監査ログに残すため）。"""
+        """on_answer(User, 質問, Answer か None, 手順)：案内したたびに呼ぶ（監査ログに残すため）。"""
         self.on_answer = on_answer
         self.chats = chats
         self.policy = policy
@@ -211,8 +211,8 @@ class HelpdeskSessions:
         finally:
             _answered.reset(token)
         if self.on_answer:
-            for question, answer in got:
-                self.on_answer(user, question, answer)
+            for question, answer, procedure in got:
+                self.on_answer(user, question, answer, procedure)
         return self._reply(session_id, state)
 
     def end(self, user: User, session_id: str) -> None:

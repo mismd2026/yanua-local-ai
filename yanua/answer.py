@@ -84,11 +84,27 @@ def build_messages(question: str, hits: list[Hit], system_prompt: str = SYSTEM_P
 _CITATION = re.compile(r"\[(\d+)\]")
 # 文の頭に付いた出典の番号（「[1] 就業規則の…」。小さなモデルの書き方の癖）
 _LEADING_CITATIONS = re.compile(r"^\s*(?:\[\d+\]\s*[、,，:：]?\s*)+")
+# 資料の見出しの区切り（チャンクの先頭は「題名 / 見出し」。モデルがこれをまねて書き始める癖がある）
+_SLASH = r"\s*[/／]\s*"
 
 
-def strip_leading_citations(text: str) -> str:
-    """文の頭の出典の番号だけを外す。文中・文末の番号はそのまま。番号しかないときは元のまま返す。"""
+def strip_leading_citations(text: str, hits: list[Hit] | None = None) -> str:
+    """文の頭の出典の番号と、資料の見出しを外す。文中・文末はそのまま。外すと何も残らないときは元のまま返す。
+
+    見出しは、渡した検索結果（hits）の「題名 / 見出し」と同じときだけ外す（ふつうの文の「 / 」は外さない）。
+    「休暇制度 / 年次有給休暇では…」→「年次有給休暇では…」。見出しだけの行（そのあとに改行で本文）なら、その行ごと外す。"""
     rest = _LEADING_CITATIONS.sub("", text, count=1)
+    for title in dict.fromkeys(h.title for h in hits or [] if h.title):
+        m = re.match(re.escape(title) + _SLASH, rest)
+        if not m:
+            continue
+        after = rest[m.end():]
+        first, nl, body = after.partition("\n")
+        sections = {h.section for h in hits if h.title == title and h.section}
+        if nl and body.strip() and first.strip() in sections:
+            after = body
+        rest = _LEADING_CITATIONS.sub("", after.lstrip(), count=1)
+        break
     return rest if rest.strip() else text
 
 
@@ -132,10 +148,11 @@ def answer_question(store: Store, llm: ChatModel, question: str, department: str
     step("check")
 
     if is_refusal(text):
-        return Answer(not_found, [], refused=True, model_text=text, reason=NOT_FOUND, hidden=hidden)
+        # 見られる文書に弱く当たっても答えられず、見られない文書に当たっていたなら「権限がない」（返事の文は同じ）
+        return Answer(not_found, [], refused=True, model_text=text, reason=NO_PERMISSION if hidden else NOT_FOUND, hidden=hidden)
 
     cited = cited_hits(text, hits)
     # 番号を付け忘れた回答は、いちばん近い検索結果を出典とする
     sources = [source_of(h) for h in (cited or hits[:1])]
     # 出典は番号から決めたあとなので、文の頭の番号は外してよい（model_text には元の文を残す）
-    return Answer(strip_leading_citations(text), sources, refused=False, model_text=text, reason=ANSWERED, hidden=hidden)
+    return Answer(strip_leading_citations(text, hits), sources, refused=False, model_text=text, reason=ANSWERED, hidden=hidden)
