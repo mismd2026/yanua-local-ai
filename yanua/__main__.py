@@ -184,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--roles", type=Path, default=Path("config/roles.json"), help="役割の設定")
     s.add_argument("--helpdesk-data", type=Path, default=DEFAULT_HELPDESK_DATA)
     s.add_argument("--identity", type=Path, default=DEFAULT_IDENTITY, help="本人確認の方針")
+    s.add_argument("--summary-model", default="qwen2.5:7b", help="議事録の要約に使う Ollama のモデル（既定: qwen2.5:7b）")
     llm_options(s)
 
     s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")
@@ -566,7 +567,7 @@ def _serve(args) -> int:
 
     settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
                         roles_path=args.roles, identity_path=args.identity, top_k=args.top_k, host=args.host,
-                        dev_login=args.dev_login)
+                        dev_login=args.dev_login, summary_model=args.summary_model)
     try:
         settings.check()
         load_roles(settings.roles_path)
@@ -580,10 +581,16 @@ def _serve(args) -> int:
     except LLMError as e:
         print(e)
         return 1
+    summary_llm = OllamaChat(settings.summary_model, args.ollama)
+    try:
+        summary_llm.check()
+    except LLMError as e:
+        # 要約のモデルがなくても、ほかの機能は使える。議事録は要約なしで確認の画面に進む（理由はログに残る）
+        print(f"注意：議事録の要約のモデルが使えません。{e}")
     import uvicorn
 
-    app = create_app(settings, llm)
-    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {args.model}）。止めるには Ctrl+C")
+    app = create_app(settings, llm, summary_llm=summary_llm)
+    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {args.model}、議事録の要約: {settings.summary_model}）。止めるには Ctrl+C")
     if settings.web_dist and (settings.web_dist / "index.html").is_file():
         print(f"Web画面: http://{args.host}:{args.port}/")
     else:

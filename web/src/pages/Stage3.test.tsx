@@ -189,7 +189,7 @@ const meeting = (over: object = {}) => ({
     { start: 6, end: 9, text: "承知しました。", speaker: "不明" },
   ],
   summary: { summary: "工事の日程を決めた。", points: ["工事の日程"], decisions: ["工事は土曜日"], todos: [{ who: "佐藤 一郎", what: "業者に連絡", due: "11/20" }], next_meeting: "" },
-  unknown_speakers: 2, attendees: ["佐藤 一郎"], ...over,
+  unknown_speakers: 2, attendees: ["佐藤 一郎"], summary_note: null, ...over,
 });
 
 describe("S-13 議事録", () => {
@@ -248,6 +248,28 @@ describe("S-13 議事録", () => {
     expect(put.segments.map((s: { speaker: string }) => s.speaker)).toEqual(["佐藤 一郎", "高橋 美咲", "高橋 美咲"]);
     expect(put.summary).toMatchObject({ decisions: ["工事は土曜日"], todos: [{ who: "佐藤 一郎", what: "業者に連絡", due: "11/20" }] });
     await waitFor(() => expect(screen.getByRole("link", { name: "議事録を Word で出す" })).toHaveAttribute("aria-disabled", "false"));
+  });
+
+  it("要約が空のときは注意を出し、書き始めると消える。出席者を直して保存できる", async () => {
+    window.history.replaceState(null, "", "/meetings?id=m1");
+    const note = "要約を作れませんでした。録画と照らして書いてください";
+    const { calls } = fakeApi({
+      "GET /api/meetings": { meetings: [] },
+      "GET /api/meetings/m1": meeting({ summary: { summary: "", points: [], decisions: [], todos: [], next_meeting: "" }, summary_note: note }),
+      "PUT /api/meetings/m1": (body: { attendees: string[] }) => ({ json: meeting({ updated_at: "2026-11-18T10:00:00+09:00", attendees: body.attendees }) }),
+    });
+    const user = userEvent.setup();
+    render(<Meetings />);
+    expect(await screen.findByText(`⚠ ${note}`)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("要約"), "工事の日程を決めた。");
+    expect(screen.queryByText(`⚠ ${note}`)).not.toBeInTheDocument();
+
+    const people = screen.getByLabelText("出席者（1行に1人）");
+    expect(people).toHaveValue("佐藤 一郎");
+    await user.type(people, "{enter}高橋 美咲");
+    await user.click(screen.getByRole("button", { name: "保存する" }));
+    expect(await screen.findByText("保存しました。")).toBeInTheDocument();
+    expect(calls.find((c) => c.method === "PUT")?.body.attendees).toEqual(["佐藤 一郎", "高橋 美咲"]);
   });
 
   it("失敗したときは、サーバーの文だけを1回出す", async () => {

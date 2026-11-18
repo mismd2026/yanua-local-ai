@@ -234,6 +234,7 @@ function Review({ m, saved, onEdit, onSaved }: { m: Meeting; saved: boolean; onE
   const [title, setTitle] = useState(m.title);
   const [day, setDay] = useState(m.date);
   const [place, setPlace] = useState(m.place);
+  const [people, setPeople] = useState(m.attendees.join("\n"));
   const [segs, setSegs] = useState<MeetingSegment[]>(m.segments);
   const base = m.summary ?? EMPTY_SUMMARY;
   const [summary, setSummary] = useState(base.summary);
@@ -289,7 +290,7 @@ function Review({ m, saved, onEdit, onSaved }: { m: Meeting; saved: boolean; onE
     setMessage("");
     try {
       const r = await api<Meeting>("PUT", `/api/meetings/${encodeURIComponent(m.meeting_id)}`, {
-        title, date: day, place,
+        title, date: day, place, attendees: rows(people),
         segments: segs.map((s) => ({ speaker: s.speaker, text: s.text })),
         summary: { summary, points: rows(points), decisions: rows(decisions),
           todos: todos.filter((t) => t.what.trim()), next_meeting: next },
@@ -321,10 +322,16 @@ function Review({ m, saved, onEdit, onSaved }: { m: Meeting; saved: boolean; onE
           <input id="r-place" type="text" maxLength={200} value={place} onChange={(e) => change(setPlace)(e.target.value)} />
         </div>
       </div>
-      <p className="small muted">録画：{m.media_name || "—"}　出席者：{m.attendees.join("、") || "—"}</p>
+      <p className="small muted">録画：{m.media_name || "—"}</p>
+      <div className="form-row">
+        <label htmlFor="r-people">出席者（1行に1人）</label>
+        <textarea id="r-people" rows={3} value={people} onChange={(e) => change(setPeople)(e.target.value)} />
+        <span className="small muted">話し手として読み取れた名前と、指定した出席者です。会議室・Room などの機器の名前は除いています。足りない人・違う人は直してください。</span>
+      </div>
 
       <h3>要約</h3>
       <p className="small muted">社内の LLM の下書きです。録画と照らして直してください。</p>
+      {m.summary_note && !summary.trim() && <p className="warn" role="note">⚠ {m.summary_note}</p>}
       <div className="form-row">
         <label htmlFor="r-summary">要約</label>
         <textarea id="r-summary" rows={4} value={summary} onChange={(e) => change(setSummary)(e.target.value)} />

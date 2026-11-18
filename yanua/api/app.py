@@ -71,7 +71,7 @@ from pydantic import BaseModel, Field
 
 from .. import hr, models, visits
 from ..answer import answer_question
-from ..llm import ChatModel, LLMError
+from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
 from . import auth, desk, errors, files, kiosk, meetings, paperjobs
@@ -202,7 +202,10 @@ VISIT_CSV_COLUMNS = ("date", "time", "company", "visitor", "host_employee_no", "
 # ------------------------------------------------------------ 本体
 
 
-def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> FastAPI:
+def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, summary_llm: ChatModel | None = None) -> FastAPI:
+    """summary_llm は議事録の要約に使うモデル。渡さないとき、llm が Ollama なら settings.summary_model を同じ Ollama で使う。"""
+    if summary_llm is None:
+        summary_llm = OllamaChat(settings.summary_model, llm.base_url) if isinstance(llm, OllamaChat) else llm
     """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。"""
     settings.check()
     roles = load_roles(settings.roles_path)
@@ -297,7 +300,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         seg_path = Path(job_file(params["owner"], seg, "segments")["path"]) if seg else None
         with closing(connect()) as db:
             return meetings.process(db, params["meeting_id"], media=media, segments_file=seg_path,
-                                    transcriber_factory=transcriber_factory or whisper, llm=llm,
+                                    transcriber_factory=transcriber_factory or whisper, llm=summary_llm,
                                     use_summary=params["summary"], progress=ctx.progress, job_id=ctx.job_id)
 
     jobs.register("paper-plan", paper_plan_job)

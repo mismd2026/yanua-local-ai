@@ -413,3 +413,72 @@ def test_paper_unknown_fields_are_flagged_and_same_names_do_not_overwrite(client
     assert len(result["placed"]) == 2 and len(set(result["placed"])) == 2
     assert [r["placed"].rsplit(".", 1)[0][-2:] for r in result["renamed"]] == ["_2", "_3"]
     assert all((settings.paper_out / p).read_bytes()[:5] == b"%PDF-" for p in result["placed"])
+
+
+class CountingLLM:
+    """要約のモデルとして呼ばれた回数を数え、JSON にならない答えを返す（3b で要約が空になった形）。"""
+
+    name = "small-model"
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages):
+        self.calls += 1
+        return "すみません、うまくまとめられませんでした。"
+
+
+def test_summary_uses_its_own_model_and_empty_summary_is_flagged(settings, caplog):
+    main, summary_llm = CountingLLM(), CountingLLM()
+    with TestClient(create_app(settings, main, summary_llm=summary_llm)) as c:
+        meeting_id, done = make_meeting(c)
+        m = c.get(f"/api/meetings/{meeting_id}").json()
+        assert done["status"] == "完了" and m["status"] == "確認待ち"
+        assert summary_llm.calls > 0 and main.calls == 0, "要約は要約のモデルで作る"
+        # 要約が空のとき：画面には決まった文、理由はログに
+        assert m["summary"]["summary"] == "" and m["summary_note"] == "要約を作れませんでした。録画と照らして書いてください"
+        assert "要約が空になりました（モデル small-model）" in caplog.text and "JSON" in caplog.text
+        assert m["summary"]["decisions"], "決まった言い方の発言から拾った分は残る"
+
+
+def test_default_summary_model_is_7b(settings):
+    from yanua.llm import OllamaChat
+
+    assert settings.summary_model == "qwen2.5:7b"
+    seen = {}
+
+    def fake_process(db, meeting_id, **kw):
+        seen["llm"] = kw["llm"]
+        return {}
+
+    app = create_app(settings, OllamaChat("qwen2.5:3b-instruct", "http://127.0.0.1:11434"))
+    from yanua.api import meetings as mod
+
+    orig, mod.process = mod.process, fake_process
+    try:
+        with TestClient(app) as c:
+            meeting_id, _ = make_meeting(c)
+    finally:
+        mod.process = orig
+    assert seen["llm"].name == "qwen2.5:7b" and seen["llm"].base_url == "http://127.0.0.1:11434"
+
+
+def test_room_devices_are_not_attendees_and_attendees_can_be_edited(client):
+    meeting_id, _ = make_meeting(client, participants=["本社5F会議室", "Tokyo-Room-3", "佐藤 花子"])
+    m = client.get(f"/api/meetings/{meeting_id}").json()
+    assert m["attendees"] == ["佐藤 花子"], m["attendees"]
+    # 機器の名前でも、話し手としては残す（誰の発言かの手がかり）
+    segs = [{**s, "speaker": "本社5F会議室"} for s in m["segments"]]
+    m = client.put(f"/api/meetings/{meeting_id}", json={"segments": segs}, headers=H).json()
+    assert m["segments"][0]["speaker"] == "本社5F会議室" and "本社5F会議室" not in m["attendees"]
+    # 出席者を画面で直す。Word にも直した出席者が入る
+    m = client.put(f"/api/meetings/{meeting_id}", json={"attendees": ["佐藤 花子", " 高橋 美咲 ", ""]}, headers=H).json()
+    assert m["attendees"] == ["佐藤 花子", "高橋 美咲"]
+    assert client.get(f"/api/meetings/{meeting_id}").json()["attendees"] == ["佐藤 花子", "高橋 美咲"]
+    from docx import Document
+    import io
+
+    doc = Document(io.BytesIO(client.get(f"/api/meetings/{meeting_id}/minutes.docx").content))
+    text = "\n".join(p.text for p in doc.paragraphs) + "\n".join(c.text for t in doc.tables for r in t.rows for c in r.cells)
+    assert "佐藤 花子、高橋 美咲" in text, text[:300]
+    assert client.put(f"/api/meetings/{meeting_id}", json={"attendees": "佐藤"}, headers=H).status_code == 400

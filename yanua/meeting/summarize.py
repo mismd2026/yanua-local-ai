@@ -107,17 +107,25 @@ def _norm(t: str) -> str:
     return re.sub(r"\s", "", t)
 
 
-def summarize(llm, segments: list[Segment], title: str = "", known_names: list[str] | None = None) -> Summary:
+def summarize(llm, segments: list[Segment], title: str = "", known_names: list[str] | None = None,
+              problems: list[str] | None = None) -> Summary:
+    """problems を渡すと、要約・要点が取れなかった理由をそこに足す（呼んだ側がログに残す）。"""
+    problems = problems if problems is not None else []
     text_all = _norm("".join(s.text + s.speaker for s in segments))
     names = [n for n in (known_names or []) if n]
     result = Summary()
-    for part in chunks(segments):
+    parts = chunks(segments)
+    if not parts:
+        problems.append("発言が1件もないので、要約しませんでした")
+    for i, part in enumerate(parts):
         data = ask_json(llm, (
             f"次は会議「{title}」の文字起こしの一部です。内容を読み取り、JSONで返してください。\n"
             '形式: {"points": [話し合った要点], "decisions": [決まったこと], '
             '"todos": [{"who": 担当者, "what": やること, "due": 期限（なければ空）}]}\n'
             "書かれていないことは書かない。決まっていないことは decisions に入れない。\n\n" + part
         ))
+        if not data:
+            problems.append(f"{i + 1}/{len(parts)} 番目の区切りの答えが、決まった形（JSON）になっていませんでした")
         result.points += _strings(data.get("points"))
         result.decisions += _strings(data.get("decisions"))
         for t in data.get("todos", []) if isinstance(data.get("todos"), list) else []:
@@ -155,4 +163,8 @@ def summarize(llm, segments: list[Segment], title: str = "", known_names: list[s
             + "\n".join(f"- {p}" for p in result.points) + f"\n\n決まったこと:\n{decided}"
         ))
         result.summary = str(data.get("summary", "")).strip()
+        if not result.summary:
+            problems.append("全体の要約の答えが空か、決まった形（JSON）になっていませんでした")
+    elif parts:
+        problems.append("要点を1つも読み取れなかったので、全体の要約を作りませんでした")
     return result

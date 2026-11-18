@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
+from ..llm import LLMError
 from ..meeting import minutes
 from ..meeting.run import company_words, load_segments
 from ..meeting.speakers import PRESETS, label_segments
@@ -22,7 +24,12 @@ from ..meeting.summarize import Summary, summarize
 from ..meeting.transcribe import Segment, build_prompt
 from .jobs import JobFailed, failure_text
 
+log = logging.getLogger("yanua.meeting")
+
 TOOLS = ("zoom", "teams", "meet", "none")
+# 要約が空になったときに画面に出す文（理由はログに残す）
+SUMMARY_FAILED = "要約を作れませんでした。録画と照らして書いてください"
+
 PROCESSING, REVIEW, FAILED = "処理中", "確認待ち", "失敗"
 
 SCHEMA = """
@@ -41,13 +48,16 @@ CREATE TABLE IF NOT EXISTS meetings (
     summary      TEXT,                  -- JSON（summary・points・decisions・todos・next_meeting）
     media_name   TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+    summary_note TEXT,                  -- 要約を作れなかったときの、画面に出す文
+    attendees_edit TEXT                 -- 画面で直した出席者（JSON）。NULL なら話し手と指定の出席者から作る
 );
 CREATE INDEX IF NOT EXISTS idx_meetings_owner ON meetings(owner, created_at);
 """
 
 KEYS = ("meeting_id", "owner", "job_id", "title", "date", "place", "tool", "participants", "status", "error",
-        "segments", "summary", "media_name", "created_at", "updated_at")
+        "segments", "summary", "media_name", "created_at", "updated_at", "summary_note", "attendees_edit")
+ADDED = {"summary_note": "TEXT", "attendees_edit": "TEXT"}   # 段階3のあとで足した列（前からある表にも足す）
 
 
 def _now() -> str:
@@ -56,6 +66,11 @@ def _now() -> str:
 
 def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    have = {r[1] for r in db.execute("PRAGMA table_info(meetings)")}
+    for col, kind in ADDED.items():
+        if col not in have:
+            with db:
+                db.execute(f"ALTER TABLE meetings ADD COLUMN {col} {kind}")
 
 
 def create(db: sqlite3.Connection, *, meeting_id: str, owner: str, title: str, day: str, place: str, tool: str,
@@ -79,6 +94,7 @@ def _row(r) -> dict:
     m["participants"] = json.loads(m["participants"])
     m["segments"] = json.loads(m["segments"]) if m["segments"] else []
     m["summary"] = json.loads(m["summary"]) if m["summary"] else None
+    m["attendees_edit"] = json.loads(m["attendees_edit"]) if m["attendees_edit"] else None
     return m
 
 
@@ -91,7 +107,8 @@ def get(db: sqlite3.Connection, meeting_id: str, owner: str) -> dict | None:
     m = _row(r)
     m.pop("owner")
     m["unknown_speakers"] = sum(1 for s in m["segments"] if (s.get("speaker") or "不明") == "不明")
-    m["attendees"] = minutes.attendees([Segment(**s) for s in m["segments"]], m["participants"])
+    edited = m.pop("attendees_edit")
+    m["attendees"] = edited if edited is not None else minutes.attendees([Segment(**s) for s in m["segments"]], m["participants"])
     return m
 
 
@@ -123,14 +140,24 @@ def process(db: sqlite3.Connection, meeting_id: str, *, media: Path, segments_fi
             found = label_segments(media, segs, m["tool"], people)
         for s in segs:
             s.speaker = s.speaker or "不明"
-        summary = Summary()
+        summary, note = Summary(), None
         if use_summary and llm is not None:
             progress(75, "要約しています")
-            summary = summarize(llm, segs, m["title"], people)
+            problems: list[str] = []
+            try:
+                summary = summarize(llm, segs, m["title"], people, problems)
+            except LLMError as e:
+                # 要約ができなくても、文字起こしと話し手は残して確認の画面に進める
+                problems.append(f"要約のモデルを呼べませんでした：{e}")
+            if not summary.summary:
+                note = SUMMARY_FAILED
+                log.warning("議事録 %s：要約が空になりました（モデル %s）：%s", meeting_id, getattr(llm, "name", "?"),
+                            "／".join(problems) or "理由は分かりません")
         with db:
-            db.execute("UPDATE meetings SET segments = ?, summary = ?, status = ?, updated_at = ? WHERE meeting_id = ?",
+            db.execute("UPDATE meetings SET segments = ?, summary = ?, summary_note = ?, status = ?, updated_at = ? "
+                       "WHERE meeting_id = ?",
                        (json.dumps([s.as_dict() for s in segs], ensure_ascii=False),
-                        json.dumps(summary.__dict__, ensure_ascii=False), REVIEW, _now(), meeting_id))
+                        json.dumps(summary.__dict__, ensure_ascii=False), note, REVIEW, _now(), meeting_id))
         progress(100, "完了")
         return {"meeting_id": meeting_id, "segments": len(segs), "speakers_found": found,
                 "unknown_speakers": sum(1 for s in segs if s.speaker == "不明")}
@@ -181,6 +208,8 @@ def update(db: sqlite3.Connection, meeting_id: str, changes: dict) -> None:
             segs.append({**old, "speaker": (s.get("speaker") or "不明").strip()[:60] or "不明",
                          "text": s.get("text", old["text"]).strip()[:2000]})
         sets["segments"] = json.dumps(segs, ensure_ascii=False)
+    if changes.get("attendees") is not None:
+        sets["attendees_edit"] = json.dumps([x[:60] for x in _strs(changes["attendees"], "出席者")][:100], ensure_ascii=False)
     if changes.get("summary") is not None:
         sm = changes["summary"]
         if not isinstance(sm, dict):
@@ -209,7 +238,7 @@ def minutes_docx(m: dict, template: Path) -> tuple[bytes, str]:
     segs = [Segment(**s) for s in m["segments"]]
     summary = Summary(**(m["summary"] or {}))
     d = date.fromisoformat(m["date"])
-    v = minutes.values(m["title"], f"{d.year}年{d.month}月{d.day}日", m["place"], minutes.attendees(segs, m["participants"]),
+    v = minutes.values(m["title"], f"{d.year}年{d.month}月{d.day}日", m["place"], m["attendees"],
                        summary, Path(m["media_name"] or "録画"), segs)
     name = f"{d:%Y%m%d}_議事録_{m['title']}.docx"
     with tempfile.TemporaryDirectory() as tmp:

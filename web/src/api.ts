@@ -370,7 +370,8 @@ export interface Meeting extends MeetingListItem {
   summary: MeetingSummary | null;
   media_name: string;
   unknown_speakers: number;
-  attendees: string[];
+  attendees: string[]; // 出席者（会議室などの機器の名前は除いたもの。画面で直したらその内容）
+  summary_note: string | null; // 要約を作れなかったときの文
 }
 
 export const MEETING_TOOLS: [string, string][] = [

@@ -7,6 +7,7 @@ Word の様式には、紙の書類の差し込み（yanua/paper/form.py）と�
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -16,11 +17,21 @@ from .transcribe import Segment, fmt_time
 NOTE = "この議事録は Yanua が録画・録音から作った下書きです。発言者・決まったこと・宿題は、出席者が確認してください。"
 
 
+# 会議室の機器（Zoom Rooms・Teams Rooms など）の表示名と分かる言葉。話し手には残すが、出席者（人）には入れない
+DEVICE = re.compile(r"(会議室|応接室|ミーティングルーム|ルーム|ホール|研修室|会議端末|room|hall|conference|boardroom)", re.I)
+
+
+def is_device(name: str) -> bool:
+    """会議室・Room などの機器の名前か（例：「本社5F会議室」「Tokyo-Room-3」）。"""
+    return bool(DEVICE.search(name or ""))
+
+
 def attendees(segments: list[Segment], extra: list[str] | None = None) -> list[str]:
-    """話し手として読み取れた名前（発言の多い順）と、指定された出席者。"""
+    """話し手として読み取れた名前（発言の多い順）と、指定された出席者。会議室などの機器の名前は除く。"""
     counted = Counter(s.speaker for s in segments if s.speaker and s.speaker != "不明")
     names = [n for n, _ in counted.most_common()]
-    return names + [n for n in (extra or []) if n not in names]
+    people = names + [n for n in (extra or []) if n not in names]
+    return [n for n in people if not is_device(n)]
 
 
 def transcript_text(segments: list[Segment]) -> str:
