@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, InboxFile, Job, Plan, PlanItem, PaperRule, SortRecord } from "../api";
 import { useJob } from "../useJob";
-import { DraftSource, RuleDraftPanel, RuleHistory } from "./PaperRules";
+import { DefaultRulesNotice, DraftSource, RuleDraftPanel, RuleHistory } from "./PaperRules";
 import { bytes, errorText, JobProgress, queryParam, setQuery, Status, time } from "../ui";
 
 const BY: Record<string, string> = { rule: "ルール", forced: "選び直し", llm: "LLM", none: "当たらない" };
@@ -35,6 +35,7 @@ export default function PaperSort({ canRules = false }: { canRules?: boolean }) 
     <>
       <h1 className="page-title">PDF の仕分け</h1>
       <div className="jobs-page">
+        <DefaultRulesNotice tick={rulesTick} />
         {saved !== null && (
           <p className="notice" role="status">
             ルールを保存しました（版 {saved}）。予定を作り直すと、新しいルールが使われます。

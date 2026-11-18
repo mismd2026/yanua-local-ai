@@ -368,6 +368,34 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
     expect(await screen.findByText("版 2 の中身に戻しました（新しい版 4）。")).toBeInTheDocument();
   });
 
+  it("画面で保存したあとに既定のルールが更新されたら知らせ、確かめてから既定に戻す", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    let using: "saved" | "default" = "saved";
+    const status = () => ({ using, default_changed: using === "saved", current_version: using === "saved" ? 2 : 3, default_updated_at: "2026-11-18T12:00:00+09:00" });
+    const { calls } = fakeApi({
+      ...planRoutes([item()]),
+      "GET /api/paper/rules/status": () => ({ json: status() }),
+      "GET /api/paper/rules/history": () => ({ json: { current: status().current_version, status: status(), versions: [
+        { version: 2, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "10002", saved_by_name: "佐藤 花子", action: "ルール「案内」を足した" },
+        { version: 1, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "（既定）", saved_by_name: "（既定）", action: "保存の前の中身（既定）" },
+      ] } }),
+      "POST /api/paper/rules/reset": () => {
+        using = "default";
+        return { json: { version: 3, rules: RULES.rules } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<PaperSort canRules />);
+    expect(await screen.findByText(/既定のルールが更新されています/)).toBeInTheDocument();
+    expect(await screen.findByText("画面で保存したもの")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "既定に戻す" }));
+    expect(calls.some((c) => c.path === "/api/paper/rules/reset")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "はい、既定に戻す" }));
+    expect(await screen.findByText(/既定のルールに戻しました（版 3）/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/既定のルールが更新されています/)).not.toBeInTheDocument());
+    expect(screen.getByText("既定")).toBeInTheDocument();
+  });
+
   it("ルールの権限がなければ、下書きのボタンと版を出さない", async () => {
     window.history.replaceState(null, "", "/paper/sort?plan=p1");
     const { calls } = fakeApi(planRoutes([item({ rule: "", by: "none" })]));

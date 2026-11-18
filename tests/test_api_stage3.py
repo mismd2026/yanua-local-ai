@@ -489,7 +489,7 @@ def test_attendees_are_screen_names_and_can_be_edited(client):
 
 @pytest.fixture
 def own_rules(settings, tmp_path):
-    # ルールのファイルは書き換えるので、作業用の場所に写す（様式のフォルダも一緒に）
+    # 既定のルールのファイルも、作業用の場所に写して使う（様式のフォルダも一緒に）。既定は画面から書き換えないことを確かめる
     d = tmp_path / "paper"
     shutil.copytree(PAPER / "templates", d / "templates")
     shutil.copy2(PAPER / "rules.json", d / "rules.json")
@@ -499,7 +499,9 @@ def own_rules(settings, tmp_path):
 
 def test_rule_draft_save_replan_history_and_restore(client, settings, own_rules):
     original = own_rules.read_text(encoding="utf-8")
+    saved_copy = settings.settings_dir / "rules.json"
     login(client, "10002")
+    assert client.get("/api/paper/rules/status").json()["using"] == "default"
     plan_id = wait_job(client, client.post("/api/paper/plans", json={}, headers=H).json()["job_id"])["result"]["plan_id"]
     items = {x["file"]: x for x in client.get(f"/api/paper/plans/{plan_id}").json()["items"]}
     unsorted = items["scan_0005.pdf"]
@@ -522,38 +524,71 @@ def test_rule_draft_save_replan_history_and_restore(client, settings, own_rules)
     assert client.post("/api/paper/rules", json={"rule": {**draft, "name": "請求書"}}, headers=H).json()["error"]["details"][0]["where"] == "name"
     assert client.post("/api/paper/rules", json={"rule": {**draft, "templates": {"xlsx": "../../x.xlsx"}}}, headers=H).status_code == 400
     assert client.post("/api/paper/rules/validate", json={"rule": bad}, headers=H).status_code == 400
-    assert own_rules.read_text(encoding="utf-8") == original
+    assert not saved_copy.exists()
 
-    # 正しいものだけを保存する。保存すると、予定を作り直したときに新しいルールが使われる
+    # 正しいものだけを保存する。写しは data/settings/rules.json（ここでは作業用の場所）に書き、既定は書き換えない
     assert client.post("/api/paper/rules/validate", json={"rule": draft}, headers=H).json() == {"ok": True}
     saved = client.post("/api/paper/rules", json={"rule": draft}, headers=H)
     assert saved.status_code == 201 and "案内" in [x["name"] for x in saved.json()["rules"]]
+    assert own_rules.read_text(encoding="utf-8") == original
+    copy = json.loads(saved_copy.read_text(encoding="utf-8"))
+    assert [r["name"] for r in copy["rules"]] == ["請求書", "見積書", "納品書", "議事録", "案内"]     # 全部の写し
+    assert client.get("/api/paper/rules/status").json()["using"] == "saved"
+    # 写しを使っても、様式のファイルは既定のフォルダから探す
+    assert {r["name"]: r["templates"] for r in saved.json()["rules"]}["請求書"] == ["docx", "xlsx"]
     again = wait_job(client, client.post("/api/paper/plans", json={"files": ["scan_0005.pdf"]}, headers=H).json()["job_id"])
     new_plan = client.get(f"/api/paper/plans/{again['result']['plan_id']}").json()
     assert new_plan["items"][0]["rule"] == "案内"
 
-    # 前の版が残っていて、元に戻せる（戻したことも1つの版になる）
+    # 版の記録も data/settings/ の下。前の版に戻せる（戻したことも1つの版になる）
+    assert (settings.settings_dir / "history" / "rules.json" / "index.jsonl").is_file()
     hist = client.get("/api/paper/rules/history").json()
     assert [v["version"] for v in hist["versions"]] == [2, 1] and hist["current"] == 2
     assert hist["versions"][0]["saved_by_name"] == "佐藤 花子" and "案内" in hist["versions"][0]["action"]
+    assert hist["versions"][1]["saved_by"] == "（既定）"
     assert "案内" not in client.get("/api/paper/rules/history/1").json()["rules"]
     restored = client.post("/api/paper/rules/history/1/restore", json={}, headers=H).json()
     assert restored["version"] == 3 and "案内" not in [x["name"] for x in restored["rules"]]
-    assert own_rules.read_text(encoding="utf-8") == original
+    assert saved_copy.read_text(encoding="utf-8") == original and own_rules.read_text(encoding="utf-8") == original
     assert client.get("/api/paper/rules/history").json()["current"] == 3
     assert client.post("/api/paper/rules/history/99/restore", json={}, headers=H).status_code == 404
 
 
-def test_rule_file_edited_by_hand_is_kept_as_a_version(client, own_rules):
+def test_default_rules_updated_after_saving_is_notified(client, settings, own_rules):
     login(client, "10002")
-    data = json.loads(own_rules.read_text(encoding="utf-8"))
-    data["self_names"].append("デモ商事 本社")
-    own_rules.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")   # ファイルを直接直した
     rule = {"name": "案内", "keywords": {"any": ["案内"]}, "filename": "{date}_案内.pdf", "folder": "総務/案内"}
     assert client.post("/api/paper/rules", json={"rule": rule}, headers=H).status_code == 201
+    assert client.get("/api/paper/rules/status").json()["default_changed"] is False
+    # 既定（リポジトリのファイル）が、画面で保存したあとに変わった
+    data = json.loads(own_rules.read_text(encoding="utf-8"))
+    data["self_names"].append("デモ商事 本社")
+    own_rules.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    st = client.get("/api/paper/rules/status").json()
+    assert st["default_changed"] is True and st["using"] == "saved" and st["default_updated_at"]
+    login(client, "10003")    # 総務の全員に知らせる
+    assert client.get("/api/paper/rules/status").json()["default_changed"] is True
+    # 既定に戻すと、写しを消して新しい既定を使う。消す前の写しは版として残る
+    r = client.post("/api/paper/rules/reset", json={}, headers=H).json()
+    assert not (settings.settings_dir / "rules.json").exists()
+    assert "案内" not in [x["name"] for x in r["rules"]]
+    st = client.get("/api/paper/rules/status").json()
+    assert st == {**st, "using": "default", "default_changed": False, "current_version": r["version"]}
+    assert client.post(f"/api/paper/rules/history/{r['version'] - 1}/restore", json={}, headers=H).status_code == 200
+
+
+def test_saved_copy_edited_by_hand_is_kept_as_a_version(client, settings, own_rules):
+    login(client, "10002")
+    rule = {"name": "案内", "keywords": {"any": ["案内"]}, "filename": "{date}_案内.pdf", "folder": "総務/案内"}
+    assert client.post("/api/paper/rules", json={"rule": rule}, headers=H).status_code == 201
+    copy = settings.settings_dir / "rules.json"
+    data = json.loads(copy.read_text(encoding="utf-8"))
+    data["self_names"].append("デモ商事 本社")
+    copy.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")   # 写しを直接直した
+    rule2 = {**rule, "name": "お知らせ", "keywords": {"any": ["お知らせ"]}}
+    assert client.post("/api/paper/rules", json={"rule": rule2}, headers=H).status_code == 201
     hist = client.get("/api/paper/rules/history").json()["versions"]
-    assert [v["saved_by"] for v in hist] == ["10002", "（ファイル）"]
-    assert "デモ商事 本社" in client.get("/api/paper/rules/history/1").json()["body"]
+    assert [v["saved_by"] for v in hist] == ["10002", "（ファイル）", "10002", "（既定）"]
+    assert "デモ商事 本社" in client.get("/api/paper/rules/history/3").json()["body"]
 
 
 def test_rule_save_is_for_general_affairs_only(client, own_rules):

@@ -391,6 +391,14 @@ export interface RuleDraft {
   priority: number;
 }
 
+// 設定のファイル（yanua/settingfiles.py）の今の状態。using：saved（画面で保存した写し）/ default（既定）
+export interface SettingStatus {
+  using: "saved" | "default";
+  default_changed: boolean;
+  current_version: number | null;
+  default_updated_at: string | null;
+}
+
 export interface RuleVersion {
   version: number;
   saved_at: string;

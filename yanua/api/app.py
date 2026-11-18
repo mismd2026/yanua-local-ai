@@ -74,11 +74,12 @@ from ..answer import answer_question
 from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
-from . import auth, confighist, desk, errors, files, kiosk, meetings, paperjobs
+from . import auth, desk, errors, files, kiosk, meetings, paperjobs
 from .auth import User
 from .chat import ChatDB, HelpdeskSessions, ReceptionSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
 from ..paper.extract import OCRUnavailable
+from ..settingfiles import SettingError
 from .jobs import FINISHED, JobContext, JobFailed, JobQueue
 from ..identity import load_policy
 from .roles import allowed, load_roles, permissions_of
@@ -241,10 +242,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         visits.ensure_schema(db)
         files.ensure_schema(db)
         paperjobs.ensure_schema(db)
-        confighist.ensure_schema(db)
         meetings.ensure_schema(db)
         files.cleanup(db, settings.work_dir)
     limiter = kiosk.FailureLimiter(settings.kiosk_max_failures)
+    def rule_store():
+        # 仕分けルール（既定のファイルと、画面から保存した写し）。設定を変えたらすぐ使えるよう、使うたびに作る（ロックは置き場所ごとに共通）
+        return paperjobs.rule_store(settings)
 
     def today() -> date:
         return settings.today or date.today()
@@ -350,13 +353,19 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         from ..paper import rules as paper_rule_file
 
         try:
-            return paper_rule_file.load_rules(settings.paper_rules)
+            # 画面から保存した写し（data/settings/rules.json）があればそれを、なければ既定のファイルを使う。
+            # 様式のファイルは、既定のルールのファイルのフォルダから探す
+            return paper_rule_file.parse_rules_text(rule_store().read_text(), settings.paper_rules.parent, rule_store().path().name)
         except (OSError, ValueError) as e:
-            log.error("仕分けルール %s を読めません：%s", settings.paper_rules, e)
+            log.error("仕分けルール %s を読めません：%s", rule_store().path(), e)
             raise ApiError(500, "paper_rules", "仕分けルールを読めません。管理者に連絡してください") from e
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        path, problems = paperjobs.check_rules(settings)
+        if problems:
+            # 起動は止めない（ほかの機能は使える）。仕分け・変換の画面では「管理者に連絡してください」になる
+            log.error("仕分けルール %s が読み込めません。直すところ：%s", path, "／".join(f"{w}: {m}" if w else m for w, m in problems))
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
         app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy)
@@ -1060,7 +1069,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return jobs.submit("paper-rule-draft", user.employee_no, params)
 
     def rules_with(rule: dict):
-        """今のルールのファイルに rule を足した中身を、読み込みと同じ検証にかける。誤りは位置つきで 400。"""
+        """今のルールに rule を足した中身を作る。読み込みと同じ検証にかけ、誤りは位置つきで 400。"""
         from ..paper import rules as paper_rule_file
 
         unknown = sorted(set(rule) - RULE_KEYS)
@@ -1068,13 +1077,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             raise ApiError(400, "invalid_rule", "ルールに書けない項目があります",
                            [{"where": k, "message": "画面からは書けない項目です（様式はルールのファイルで設定します）"} for k in unknown])
 
-        def build(current: str | None) -> str:
+        def build(current: str) -> str:
             try:
-                data = json.loads(current) if current else {"rules": []}
+                data = json.loads(current)
             except ValueError as e:
                 raise ApiError(409, "rules_broken", "今のルールのファイルが読めません。管理者に連絡してください") from e
-            data.setdefault("rules", [])
-            if not isinstance(data["rules"], list):
+            if not isinstance(data, dict) or not isinstance(data.setdefault("rules", []), list):
                 raise ApiError(409, "rules_broken", "今のルールのファイルが読めません。管理者に連絡してください")
             data["rules"].append(rule)
             at = f"rules[{len(data['rules'])}]"
@@ -1089,35 +1097,41 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
         return build
 
+    def setting_error(e: SettingError, status: int, code: str, message: str) -> ApiError:
+        return ApiError(status, code, message, [{"where": w, "message": m} for w, m in e.problems])
+
     @app.post("/api/paper/rules/validate")
     def paper_rule_validate(req: PaperRuleSave, user: User = Depends(require("paper.rules"))):
-        path = settings.paper_rules
-        rules_with(req.rule)(path.read_text(encoding="utf-8") if path.is_file() else None)
+        rules_with(req.rule)(rule_store().read_text())
         return {"ok": True}
 
     @app.post("/api/paper/rules", status_code=201)
     def paper_rule_save(req: PaperRuleSave, user: User = Depends(require("paper.rules"))):
         name = str(req.rule.get("name", "")).strip()
-        with closing(connect()) as db:
-            version = confighist.save(db, "paper_rules", settings.paper_rules, rules_with(req.rule), user.employee_no,
-                                      f"ルール「{name}」を足した")
-        log.info("仕分けルール「%s」を足しました（版 %s、%s）", name, version, user.employee_no)
+        try:
+            version = rule_store().save(rules_with(req.rule), user.employee_no, f"ルール「{name}」を足した")
+        except SettingError as e:
+            raise setting_error(e, 400, "invalid_rule", "ルールに直すところがあります") from e
+        log.info("仕分けルール「%s」を足しました（版 %s、%s、%s）", name, version, user.employee_no, rule_store().saved)
         return {"version": version, "rules": paper_rule_list(user)["rules"]}
+
+    @app.get("/api/paper/rules/status")
+    def paper_rule_status(user: User = Depends(require("paper"))):
+        # 仕分けの画面で「既定のルールが更新されています」を知らせるのに使う（総務の全員）
+        return rule_store().status()
 
     @app.get("/api/paper/rules/history")
     def paper_rule_history(user: User = Depends(require("paper.rules"))):
+        versions = rule_store().history()
         with closing(connect()) as db:
-            versions = confighist.history(db, "paper_rules")
-            current = confighist.current_version(db, "paper_rules", settings.paper_rules)
-            names = {no: ((hr.lookup(db, no) or {}).get("name") or no) for no in {v["saved_by"] for v in versions}
-                     if no != confighist.FILE_EDIT}
+            names = {no: ((hr.lookup(db, no) or {}).get("name") or no) for no in {v["saved_by"] for v in versions}}
         # 保存した人は名前で出す（総務の人どうしで、だれが直したかを見るため）
-        return {"versions": [{**v, "saved_by_name": names.get(v["saved_by"], v["saved_by"])} for v in versions], "current": current}
+        return {"versions": [{**v, "saved_by_name": names.get(v["saved_by"], v["saved_by"])} for v in versions],
+                "current": rule_store().status()["current_version"], "status": rule_store().status()}
 
     @app.get("/api/paper/rules/history/{version}")
     def paper_rule_version(version: int, user: User = Depends(require("paper.rules"))):
-        with closing(connect()) as db:
-            body_text = confighist.get(db, "paper_rules", version)
+        body_text = rule_store().get(version)
         if body_text is None:
             raise not_found("ルールの版")
         try:
@@ -1129,20 +1143,22 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.post("/api/paper/rules/history/{version}/restore")
     def paper_rule_restore(version: int, user: User = Depends(require("paper.rules"))):
-        from ..paper import rules as paper_rule_file
-
-        with closing(connect()) as db:
-            body_text = confighist.get(db, "paper_rules", version)
-            if body_text is None:
-                raise not_found("ルールの版")
-            try:
-                paper_rule_file.parse_rules(json.loads(body_text), settings.paper_rules.parent, settings.paper_rules.name)
-            except (ValueError, paper_rule_file.RuleError) as e:
-                problems = getattr(e, "problems", [("", "JSON として読めません")])
-                raise ApiError(409, "invalid_version", "この版は、今の検証を通らないので戻せません",
-                               [{"where": w, "message": m} for w, m in problems]) from e
-            new = confighist.save(db, "paper_rules", settings.paper_rules, body_text, user.employee_no, f"版 {version} に戻した")
+        try:
+            new = rule_store().restore(version, user.employee_no)
+        except KeyError as e:
+            raise not_found("ルールの版") from e
+        except SettingError as e:
+            raise setting_error(e, 409, "invalid_version", "この版は、今の検証を通らないので戻せません") from e
         log.info("仕分けルールを版 %s に戻しました（新しい版 %s、%s）", version, new, user.employee_no)
+        return {"version": new, "rules": paper_rule_list(user)["rules"]}
+
+    @app.post("/api/paper/rules/reset")
+    def paper_rule_reset(user: User = Depends(require("paper.rules"))):
+        try:
+            new = rule_store().reset_to_default(user.employee_no)
+        except SettingError as e:
+            raise setting_error(e, 409, "invalid_default", "既定のルールが今の検証を通らないので、戻せません。管理者に連絡してください") from e
+        log.info("仕分けルールを既定に戻しました（版 %s、%s）", new, user.employee_no)
         return {"version": new, "rules": paper_rule_list(user)["rules"]}
 
     @app.post("/api/paper/convert", status_code=202)

@@ -185,6 +185,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--helpdesk-data", type=Path, default=DEFAULT_HELPDESK_DATA)
     s.add_argument("--identity", type=Path, default=DEFAULT_IDENTITY, help="本人確認の方針")
     s.add_argument("--summary-model", default="qwen2.5:7b", help="議事録の要約に使う Ollama のモデル（既定: qwen2.5:7b）")
+    s.add_argument("--paper-rules", type=Path, default=Path("demo/company/paper/rules.json"),
+                   help="仕分けルールの既定のファイル（画面からは書き換えない）")
+    s.add_argument("--settings-dir", type=Path, default=Path("data/settings"),
+                   help="画面で変えた設定の写しと版の記録の置き場所（あればこちらを使う）")
     llm_options(s)
 
     s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")
@@ -567,7 +571,8 @@ def _serve(args) -> int:
 
     settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
                         roles_path=args.roles, identity_path=args.identity, top_k=args.top_k, host=args.host,
-                        dev_login=args.dev_login, summary_model=args.summary_model)
+                        dev_login=args.dev_login, summary_model=args.summary_model, paper_rules=args.paper_rules,
+                        settings_dir=args.settings_dir)
     try:
         settings.check()
         load_roles(settings.roles_path)
@@ -575,6 +580,14 @@ def _serve(args) -> int:
     except (ValueError, RoleConfigError) as e:
         print(e)
         return 1
+    from .api import paperjobs
+
+    rules_path, problems = paperjobs.check_rules(settings)
+    if problems:
+        # 起動は続ける（ほかの機能は使える）。PDF の仕分け・変換は、直すまで使えない
+        print(f"注意：仕分けルール {rules_path} が読み込めません。PDF の仕分け・変換は、直すまで使えません。直すところ：")
+        for where, why in problems:
+            print(f"  - {where}：{why}" if where else f"  - {why}")
     llm = OllamaChat(args.model, args.ollama)
     try:
         llm.check()

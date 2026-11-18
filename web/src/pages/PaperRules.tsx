@@ -3,7 +3,7 @@
 // - 保存の前に、サーバーがルールの読み込みと同じ検証をかける。誤りは項目の横に出す（where の位置）
 // - 保存するたびに前の版が残り、元に戻せる（段階4の設定の画面 S-52 と同じ考え方）
 import { useEffect, useState } from "react";
-import { api, ApiError, Job, RULE_FIELDS, RuleDraft, RuleVersion } from "../api";
+import { api, ApiError, Job, RULE_FIELDS, RuleDraft, RuleVersion, SettingStatus } from "../api";
 import { useJob } from "../useJob";
 import { errorText, JobProgress, time } from "../ui";
 
@@ -12,6 +12,22 @@ export type DraftSource = { plan_id: string; index: number; file: string } | { i
 type Problems = Record<string, string[]>;
 
 const lines = (s: string) => s.split("\n").map((x) => x.trim()).filter(Boolean);
+
+// 仕分けの画面の上に出す知らせ：画面で保存したルールを使っていて、そのあと既定のルールが更新されたとき
+export function DefaultRulesNotice({ tick }: { tick: number }) {
+  const [status, setStatus] = useState<SettingStatus | null>(null);
+  useEffect(() => {
+    api<SettingStatus>("GET", "/api/paper/rules/status").then(setStatus).catch(() => setStatus(null));
+  }, [tick]);
+  if (!status?.default_changed) return null;
+  return (
+    <p className="warn notice-box" role="status">
+      ⚠ 既定のルールが更新されています{status.default_updated_at && `（${time(status.default_updated_at)}）`}。
+      今は画面で保存したルールを使っているので、既定の更新は反映されていません。
+      新しい既定を使うときは、「ルールの版」の「既定に戻す」を使ってください（画面で足したルールは、版として残ります）。
+    </p>
+  );
+}
 
 // 下書きを作るジョブを始めて、できたら編集の画面を出す
 export function RuleDraftPanel({ source, onClose, onSaved }: { source: DraftSource; onClose: () => void; onSaved: (version: number) => void }) {
@@ -221,6 +237,8 @@ function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: st
 export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: () => void }) {
   const [versions, setVersions] = useState<RuleVersion[] | null>(null);
   const [current, setCurrent] = useState<number | null>(null);
+  const [status, setStatus] = useState<SettingStatus | null>(null);
+  const [askingReset, setAskingReset] = useState(false);
   const [asking, setAsking] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -228,10 +246,11 @@ export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: ()
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
-    api<{ versions: RuleVersion[]; current: number | null }>("GET", "/api/paper/rules/history")
+    api<{ versions: RuleVersion[]; current: number | null; status: SettingStatus }>("GET", "/api/paper/rules/history")
       .then((r) => {
         setVersions(r.versions);
         setCurrent(r.current);
+        setStatus(r.status);
         setError("");
       })
       .catch((e) => setError(errorText(e, "ルールの版を読み込めませんでした")));
@@ -253,10 +272,43 @@ export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: ()
     }
   };
 
+  const reset = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await api<{ version: number }>("POST", "/api/paper/rules/reset", {});
+      setMessage(`既定のルールに戻しました（版 ${r.version}）。画面で足したルールは、版として残っています。`);
+      setReload((n) => n + 1);
+      onRestored();
+    } catch (e) {
+      setError(errorText(e, "既定に戻せませんでした"));
+    } finally {
+      setBusy(false);
+      setAskingReset(false);
+    }
+  };
+
   return (
     <section className="card">
       <h2>ルールの版</h2>
-      <p className="small muted">画面から保存するたびに版が残ります。前の版に戻すと、その中身が新しい版になります（戻したことも、また戻せます）。</p>
+      <p className="small muted">
+        画面から保存したルールは、既定のファイルとは別に、全部の写しとして保存します（既定は書き換えません）。
+        保存するたびに版が残り、前の版に戻せます。戻すと、その中身が新しい版になります（戻したことも、また戻せます）。
+      </p>
+      {status && (
+        <div className="toolbar">
+          <span>今使っているルール：<strong>{status.using === "saved" ? "画面で保存したもの" : "既定"}</strong></span>
+          {status.using === "saved" && (askingReset ? (
+            <span className="confirm">
+              <span className="small">画面で保存したルールをやめて、既定のルールを使います。</span>
+              <button className="primary" disabled={busy} onClick={() => void reset()}>はい、既定に戻す</button>
+              <button disabled={busy} onClick={() => setAskingReset(false)}>やめる</button>
+            </span>
+          ) : (
+            <button onClick={() => setAskingReset(true)}>既定に戻す</button>
+          ))}
+        </div>
+      )}
       {error && <p className="error" role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
       {versions?.length === 0 && <p className="muted">まだ画面から保存したことはありません。</p>}

@@ -96,7 +96,7 @@ curl -b c.txt -H 'X-Yanua-Client: curl' -H 'Content-Type: application/json' \
 段階3の API（画面は次の段階）：
 
 - **ファイルの受け渡し**：`POST /api/uploads?kind=pdf|recording|segments&name=...` に本文でファイルを送ります（上限：PDF 50MB・録画 2GB）。結果のファイルは `GET /api/files/{file_id}` で受け取ります。開けるのは作った本人で、その種類の権限がある人だけです。アップロードも結果も24時間で消えます。作業用フォルダ（既定 `data/work`）の合計にも上限（`work_max_bytes`、既定 20GB）があり、超えるアップロードは断ります（507）
-- **PDF の仕分け**（総務）：受信箱（既定 `demo/company/paper/inbox`）の一覧 → `POST /api/paper/plans` で予定を作る（ジョブ）→ `PUT /api/paper/plans/{id}/items/{index}` でルールを選び直す → `POST .../execute` で保存先（既定 `data/paper/sorted`）に置く → `GET /api/paper/history` で記録。予定は作った人だけが見られますが、仕分けの記録は総務の全員が見られます。未分類の PDF からは、画面でルールの下書きを作って直し、検証してから保存できます（`POST /api/paper/rule-drafts`・`POST /api/paper/rules`）。保存の前の版は残り、`POST /api/paper/rules/history/{版}/restore` で戻せます
+- **PDF の仕分け**（総務）：受信箱（既定 `demo/company/paper/inbox`）の一覧 → `POST /api/paper/plans` で予定を作る（ジョブ）→ `PUT /api/paper/plans/{id}/items/{index}` でルールを選び直す → `POST .../execute` で保存先（既定 `data/paper/sorted`）に置く → `GET /api/paper/history` で記録。予定は作った人だけが見られますが、仕分けの記録は総務の全員が見られます。未分類の PDF からは、画面でルールの下書きを作って直し、検証してから保存できます（`POST /api/paper/rule-drafts`・`POST /api/paper/rules`）。保存したルールは `data/settings/rules.json` に全部の写しとして書き、既定の `rules.json` は書き換えません（「画面で変えた設定」）。保存の前の版は残り、`POST /api/paper/rules/history/{版}/restore` で戻せます。`POST /api/paper/rules/reset` で既定に戻せます
 - **PDF の変換**（総務）：`POST /api/paper/convert`（ジョブ）。アップロードした PDF か受信箱の PDF を、Word・Excel にします。`form: true` なら仕分けルールの会社の様式に差し込みます
 - **議事録**（社員。自分のものだけ）：録画をアップロード → `POST /api/meetings`（ジョブ：文字起こし → 話し手 → 要約）→ `GET/PUT /api/meetings/{id}` で確認と修正（「不明」の話し手を直す、要約・宿題を直す）→ `GET /api/meetings/{id}/minutes.docx`。文字起こしのモデル（`models pull whisper-small`）がないときは、文字起こし済みの発言（`kind=segments`。デモは `demo/company/meeting/demo_zoom_segments.json`）を一緒に渡せば試せます
 
@@ -348,6 +348,17 @@ Yanua は、質問・資料・会議の中身を社外に送りません。そ�
 - **通信するのは、明示したコマンドのときだけ**：`models pull` のように、管理者が実行したときだけ通信します。文字起こしや要約などのふだんの処理は、通信しない設定で動かします（ライブラリが勝手にモデルをダウンロードしないようにしています）。
 - **改ざんの防止**：入手したモデルのファイルの SHA-256 を `data/models/models.lock.json` に記録し、使う前に毎回照合します。版（revision）は固定し、上げるときは `--update` で明示します。通信は https だけで、証明書の検証は外しません。
 - **会社側での強制**：アプリの中の制限は「うっかり」を防ぐためのものです。会社のファイアウォール・プロキシでも、同じ宛先だけを許可してください。モデルの入手には `huggingface.co` と `*.hf.co` が、ライブラリの更新（pip）には `pypi.org` と `files.pythonhosted.org` が要ります。
+
+## 画面で変えた設定
+
+**画面で変えた設定は `data/settings/` にあり、リポジトリのファイルは既定です。**
+
+- 画面から保存すると、その設定の中身の全部を写しとして `data/settings/` に書きます（例：仕分けルールは `data/settings/rules.json`）。リポジトリのファイル（例：`demo/company/paper/rules.json`）は書き換えません
+- 読むときは、`data/settings/` に写しがあれば写しだけを使い、なければリポジトリの既定のファイルを使います
+- 版の記録も `data/settings/history/<ファイル名>/` に残ります（`index.jsonl` と、版ごとの中身）。前の版に戻せます。「既定に戻す」は写しを消して既定を使います（消す前の写しは版として残ります）
+- 画面で保存したあとに既定のファイルが更新されると（リポジトリを更新したときなど）、画面に「既定のルールが更新されています」と出ます。写しを使っている間は、既定の更新は入らないためです
+- 保存の前に、その設定の読み込みと同じ検証をかけます。起動のときも、今使う設定を検証し、読み込めないところがあれば位置つきで出します（例：`rules[2].priority：優先度は整数にしてください`）
+- 置き場所は `serve --settings-dir` で変えられます。この仕組みは `yanua/settingfiles.py` の共通の部品で、仕分けルールのほか、本人確認の方針・`routes.csv`・`kb.csv` なども、設定の画面（K-042）からこの部品で直せるようにします
 
 ## 依存ライブラリと、社外に通信できない環境への導入
 

@@ -51,7 +51,8 @@ class Settings:
     # PDF の仕分け・変換
     paper_inbox: Path = Path("demo/company/paper/inbox")     # 受信箱（スキャナーが PDF を置くフォルダ）
     paper_out: Path = Path("data/paper/sorted")              # 仕分けの保存先（_仕分け記録.csv もここ）
-    paper_rules: Path = Path("demo/company/paper/rules.json")  # 仕分けルール（会社の様式の場所もここに書く）
+    paper_rules: Path = Path("demo/company/paper/rules.json")  # 仕分けルールの既定（会社の様式の場所もここに書く。画面からは書き換えない）
+    settings_dir: Path = Path("data/settings")   # 画面で変えた設定の写しと版の記録（yanua/settingfiles.py）。あればこちらを使う
     # 議事録
     meeting_template: Path = Path("demo/company/meeting/templates/議事録.docx")   # 議事録の様式（Word）
     whisper_model: str = "whisper-small"         # 文字起こしのモデル（models pull で入手したもの）

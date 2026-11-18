@@ -100,12 +100,27 @@ class RuleSet:
         raise RuleError(f"ルール「{name}」はありません（ある: {'、'.join(self.names())}）")
 
 
-def load_rules(path: Path) -> RuleSet:
+def load_rules(path: Path, base_dir: Path | None = None) -> RuleSet:
+    """ルールのファイルを読む。様式のファイルは base_dir（省略時はルールのファイルのフォルダ）からの相対パス。"""
+    return parse_rules_text(path.read_text(encoding="utf-8"), base_dir or path.parent, path.name)
+
+
+def parse_rules_text(text: str, base_dir: Path, label: str = "rules.json") -> RuleSet:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(text)
     except ValueError as e:
-        raise RuleError(f"{path.name}: JSON として読めません: {e}") from e
-    return parse_rules(data, path.parent, path.name)
+        where = f"{getattr(e, 'lineno', '?')}行目 {getattr(e, 'colno', '?')}文字目"
+        raise RuleError(f"{label}: JSON として読めません（{where}）: {e}", [(where, f"JSON として読めません: {getattr(e, 'msg', e)}")]) from e
+    return parse_rules(data, base_dir, label)
+
+
+def rule_problems(text: str, base_dir: Path) -> list[tuple[str, str]]:
+    """設定の部品（yanua/settingfiles.py）の検証として使う。誤りがなければ空。"""
+    try:
+        parse_rules_text(text, base_dir)
+    except RuleError as e:
+        return e.problems
+    return []
 
 
 def _strs(v) -> bool:

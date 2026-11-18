@@ -143,7 +143,7 @@
 | `GET /api/tickets`、`PATCH /api/tickets/{id}` | （新規） | 情シス | |
 | `GET /api/paper/inbox`・`rules`、`POST /api/paper/plans`、`PUT .../items/{index}`、`.../execute`、`GET /api/paper/history` | `pdf-sort`（`--dry-run` が plans） | 総務 | plans は○ |
 | `POST /api/paper/convert` | `pdf-convert` | 総務 | ○ |
-| `POST /api/paper/rule-drafts`（予定の1件か受信箱の PDF から）、`POST /api/paper/rules/validate`、`POST /api/paper/rules`（足して保存）、`GET /api/paper/rules/history`、`GET .../history/{版}`、`POST .../history/{版}/restore` | `pdf-rule-draft`（`--add-to` が保存） | 総務（`paper.rules`） | rule-drafts は○ |
+| `POST /api/paper/rule-drafts`（予定の1件か受信箱の PDF から）、`POST /api/paper/rules/validate`、`POST /api/paper/rules`（足して保存）、`GET /api/paper/rules/status`、`GET /api/paper/rules/history`、`GET .../history/{版}`、`POST .../history/{版}/restore`、`POST /api/paper/rules/reset` | `pdf-rule-draft`（`--add-to` が保存） | 総務（`paper.rules`） | rule-drafts は○ |
 | `POST /api/paper/text` | `pdf-text` | 総務 | ○ |
 | `POST /api/meetings`、`GET /api/meetings`、`GET/PUT /api/meetings/{id}`、`GET .../minutes.docx` | `meeting` | 社員・総務（自分のものだけ） | ○ |
 | `POST /api/uploads`、`GET /api/files/{file_id}` | （新規） | 種類による（PDF は総務、録画は社員）。開けるのは作った本人だけ | |
@@ -194,7 +194,8 @@
   - ジョブが失敗したときに画面に出す文は、利用者に見せてよい文だけにします（`JobFailed` の文。例：「文字起こしのモデルが準備されていません。管理者に連絡してください」）。直すためのコマンドや、例外の中身・サーバーの置き場所は、サーバーのログにだけ残します。思わぬ失敗は「処理の途中で問題が起きました。続くときは、管理者に連絡してください（ジョブ番号 …）」とし、ジョブ番号でログを探せるようにします
   - 仕分けの予定の表では、名前に使う項目が読み取れずに「不明」になる行と、置き先が同じ行に注意を出します。実行のときに同じ名前のファイルがあれば上書きせず、`_2`・`_3` … を付けて分けます（名前は、なければ作る1回の操作で押さえるので、同時に実行してもぶつかりません）。番号を付けて置いたものは実行の結果に出します
   - 仕分けルールの下書き（K-047）：S-20 の予定の行（未分類のものなど）か、受信箱で選んだ1件から、`pdf-rule-draft` と同じ処理（`draft_rule`）をジョブで動かします。予定の行からなら、予定を作ったときの文字を使います（OCR し直さない）。下書きは画面で直し、保存の前にルールの読み込みと同じ検証（`parse_rules`。名前の重なり・言葉の形・正規表現のかっこ・ファイル名と保存先で使える項目・優先度）をかけます。誤りはすべて位置つきで返し、正しいものだけを保存します。保存したルールは、その場で予定を作り直したとき・選び直したときに使われます。画面からは様式（templates）は書けません
-  - ルールの版：保存するたびに版を残し（`config_versions`。だれが・いつ・したこと・中身）、前の版に戻せます。戻すのも新しい版として保存するので、戻したこともまた戻せます。保存の前のファイルが最後の版と違えば（ファイルを直接直したとき）、その中身も「（ファイル）」の版として先に残します。ファイルは一時ファイルに書いてから置き換えます。段階4の設定の画面（S-52）でも同じ仕組み（`yanua/api/confighist.py`）を使います
+  - ルールの置き場所と版：既定の `rules.json`（リポジトリ）は書き換えず、画面から保存したルール一式は `data/settings/rules.json` に全部の写しとして書きます。読むときは写しがあれば写しだけ、なければ既定を使います。様式のファイルは既定のフォルダから探します。版の記録も `data/settings/history/rules.json/` に残し、前の版に戻せます（戻すのも新しい版。戻す版も今の検証にかけます）。写しを直接直していたら、その中身も「（ファイル）」の版として先に残します。`POST /api/paper/rules/reset` で写しを消して既定に戻せます。写しのもとになった既定がそのあと変わったら、`GET /api/paper/rules/status` の `default_changed` で、仕分けの画面に「既定のルールが更新されています」と知らせます。起動のときに今使うルールを検証し、読み込めなければ位置つきで出します（起動は止めない）
+  - この仕組みは共通の部品 `yanua/settingfiles.py`（`SettingFile`：既定を読む・画面から保存した写しを書く・版を残して戻す・既定の更新を知らせる・保存の前に検証）にしてあり、段階4の設定の画面（S-52、K-042）で、本人確認の方針・routes.csv・kb.csv なども同じ部品で直せるようにします
   - 開けるのは、そのファイルを作った人で、しかもその種類の権限（PDF は総務、議事録は社員）を今も持っている人だけ。ほかの人・期限切れ・ないものは同じ 404 にします
   - 仕分けの予定・議事録も、作った人だけが見られます（総務・管理者でも、ほかの人のものは見えない）
   - 仕分けの予定には取り出した文字も残し、ルールを選び直すときは PDF を読み直しません（OCR をし直さない）。実行のときは、予定を作ったあとにファイルが変わっていないかを確かめ、変わっていたら置きません

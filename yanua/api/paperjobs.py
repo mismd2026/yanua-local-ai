@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..paper import convert, rules, sort
 from ..paper.extract import read_pdf
+from ..settingfiles import SettingFile
 
 log = logging.getLogger("yanua.paper")
 
@@ -40,6 +41,23 @@ def _now() -> str:
 
 def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+
+
+def rule_store(settings) -> SettingFile:
+    """仕分けルールの設定のファイル。既定は settings.paper_rules、画面から保存した写しは settings_dir/rules.json。"""
+    base = Path(settings.paper_rules).parent    # 様式のファイルは、既定のルールのファイルのフォルダから探す
+    return SettingFile("rules.json", settings.paper_rules, settings.settings_dir, lambda text: rules.rule_problems(text, base))
+
+
+def check_rules(settings) -> tuple[Path, list[tuple[str, str]]]:
+    """起動のときに、今使う仕分けルール（写しか既定）を読み込みと同じ検証にかける。(ファイル, [(位置, 理由)])。"""
+    store = rule_store(settings)
+    path = store.path()
+    try:
+        text = store.read_text()
+    except OSError as e:
+        return path, [("", f"ファイルを読めません: {e}")]
+    return path, rules.rule_problems(text, Path(settings.paper_rules).parent)
 
 
 def inbox_files(inbox: Path) -> list[Path]:

@@ -279,3 +279,28 @@ def test_free_path_reserves_the_name(tmp_path):
     first = _free_path(tmp_path / "x.pdf")
     second = _free_path(tmp_path / "x.pdf")      # 1つ目を置く前でも、同じ名前は返さない
     assert first.name == "x.pdf" and second.name == "x_2.pdf" and first.exists() and second.exists()
+
+
+def test_hand_written_rules_problems_are_reported_with_positions_at_startup(tmp_path):
+    # 起動のときの確かめ（yanua/api/paperjobs.check_rules）。写しがなければ既定を、あれば写しを見る
+    from yanua.api import Settings, paperjobs
+
+    bad = tmp_path / "rules.json"
+    bad.write_text(json.dumps({"rules": [
+        {"name": "請求書", "keywords": {"any": ["請求書"]}, "filename": "{date}_{会社名}.pdf"},
+        {"name": "請求書", "keywords": {"any": ["請求"]}, "priority": "高"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    s = Settings(paper_rules=bad, settings_dir=tmp_path / "settings")
+    path, problems = paperjobs.check_rules(s)
+    assert path == bad
+    assert [w for w, _ in problems] == ["rules[1].filename", "rules[2].name", "rules[2].priority"]
+    assert "rules[1]" in problems[1][1]                       # 同じ名前は、もう1つの位置も出す
+
+    bad.write_text('{"rules": [\n  {"name": "請求書",}\n]}', encoding="utf-8")   # JSON の書き間違い
+    _, problems = paperjobs.check_rules(s)
+    assert problems[0][0] == "2行目 18文字目" and "JSON" in problems[0][1]
+
+    (tmp_path / "settings").mkdir()
+    shutil.copy(RULES, tmp_path / "settings" / "rules.json")   # 画面から保存した写しがあれば、そちらだけを見る
+    path, problems = paperjobs.check_rules(s)
+    assert path == tmp_path / "settings" / "rules.json" and problems == []
