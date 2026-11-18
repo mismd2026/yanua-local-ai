@@ -162,7 +162,7 @@ class SettingFile:
             except Exception:  # noqa: BLE001  記録できなくても、設定の保存は止めない
                 pass
 
-    def _logged(self, op: str, by: str, what: str, fn: Callable[[], int]) -> int:
+    def _logged(self, op: str, by: str, what: str, fn: Callable[[], int | None]) -> int | None:
         try:
             version = fn()
         except SettingError as e:
@@ -172,7 +172,8 @@ class SettingFile:
             reason = getattr(e, "message", None) or type(e).__name__     # 使う側の検証の断り（例：ApiError）は、その文
             self._log(op, by, False, f"{what}（保存しませんでした：{reason}）")
             raise
-        self._log(op, by, True, f"{what}（版 {version}）")
+        if version is not None:      # 何もしなかったとき（すでに既定）は残さない
+            self._log(op, by, True, f"{what}（版 {version}）")
         return version
 
     def save(self, new_body: str | Callable[[str], str], by: str, action: str) -> int:
@@ -210,12 +211,15 @@ class SettingFile:
             return self._save(body, by, f"版 {version} に戻した")
         return self._logged("restore", by, f"版 {version} に戻した", run)
 
-    def reset_to_default(self, by: str) -> int:
-        """写しを消して、既定を使う（新しい既定も、ここから使われる）。消す前の写しは版として残る。"""
+    def reset_to_default(self, by: str) -> int | None:
+        """写しを消して、既定を使う（新しい既定も、ここから使われる）。消す前の写しは版として残る。
+        すでに既定を使っている（写しがない）ときは何もせず None を返す（版も監査ログも増やさない）。"""
         return self._logged("reset", by, "既定に戻した", lambda: self._reset(by))
 
-    def _reset(self, by: str) -> int:
+    def _reset(self, by: str) -> int | None:
         with self._lock:
+            if not self.saved.is_file():
+                return None
             default_text = self._default_text()
             if default_text is None:
                 raise FileNotFoundError(self.default)

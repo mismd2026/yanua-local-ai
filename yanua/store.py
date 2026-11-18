@@ -163,6 +163,17 @@ class Store:
         )
         return [StoredChunk(*row) for row in rows]
 
+    def all_chunks(self) -> list[StoredChunk]:
+        """すべての文書のチャンク（監査ログで、部署の権限で見せなかった文書の件数を数えるときだけ使う。回答には使わない）。"""
+        rows = self.db.execute(
+            """
+            SELECT c.chunk_id, c.doc_id, d.title, c.section, c.text
+            FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
+            ORDER BY c.doc_id, c.position
+            """
+        )
+        return [StoredChunk(*row) for row in rows]
+
     def public_chunks(self) -> list[StoredChunk]:
         """社外公開の文書のチャンクだけを返す。社外の人向けの検索はこれだけを使う。"""
         rows = self.db.execute(

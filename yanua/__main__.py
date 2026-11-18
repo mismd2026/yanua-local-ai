@@ -191,8 +191,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="画面で変えた設定の写しと版の記録の置き場所（あればこちらを使う）")
     s.add_argument("--audit-db", type=Path, default=None, help="監査ログの保存先（既定: --db と同じフォルダの audit.db）")
     s.add_argument("--audit-keep-days", type=int, default=365, help="監査ログを残す日数（既定: 365）")
-    s.add_argument("--audit-keep-body", action="store_true",
-                   help="監査ログに質問・会話の本文なども残す（既定は残さない。パスワード・トークン・コードはどの設定でも残さない）")
+    s.add_argument("--audit-body", "--audit-keep-body", dest="audit_keep_body", action="store_true",
+                   help="監査ログに質問の文も残す（既定は残さない。パスワード・トークン・コードはどの設定でも残さない）")
     llm_options(s)
 
     s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")

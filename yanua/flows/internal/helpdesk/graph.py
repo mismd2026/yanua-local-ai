@@ -140,11 +140,12 @@ def extract_slots(llm: ChatModel, problem: str, answer: str) -> dict:
 
 
 def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, checkpointer=None,
-              policy: identity.Policy | None = None):
+              policy: identity.Policy | None = None, observe=None):
     """ヘルプデスクのグラフを作る。store は取り込み済みの社内文書と人事データを持つ保存先。
 
     checkpointer は会話の途中の状態の保存先。省略時はメモリ（CLI 用）。API では SQLite に保存する。
     policy は本人確認の方針（config/identity.json）。省略時は既定（標準）。
+    observe(質問, Answer) は、社内文書から答えた（断った）たびに呼ぶ（API が監査ログに残すため）。
     """
     policy = policy or identity.Policy.default()
     kb_rows = _read_csv(data_dir / "kb.csv")
@@ -227,6 +228,8 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
         # 1. 社内文書から出典つきで答える（照合できた人は部署の権限で、できない人は全社の文書だけ）
         dept = s["requester"]["dept"] if s["requester"]["verified"] != "照合できず" else ""
         ans = answer_question(store, llm, s["problem"], dept, top_k)
+        if observe:
+            observe(s["problem"], ans)
         if not ans.refused:
             titles = "、".join(src["title"] for src in ans.sources)
             message = f"{ans.answer}\n（出典：{titles}）"

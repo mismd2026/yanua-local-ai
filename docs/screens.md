@@ -143,7 +143,7 @@
 | `GET /api/tickets`、`PATCH /api/tickets/{id}` | （新規） | 情シス | |
 | `GET /api/paper/inbox`・`rules`、`POST /api/paper/plans`、`PUT .../items/{index}`、`.../execute`、`GET /api/paper/history` | `pdf-sort`（`--dry-run` が plans） | 総務 | plans は○ |
 | `POST /api/paper/convert` | `pdf-convert` | 総務 | ○ |
-| `POST /api/paper/rule-drafts`（予定の1件か受信箱の PDF から）、`POST /api/paper/rules/validate`、`POST /api/paper/rules`（足して保存）、`GET /api/paper/rules/status`、`GET /api/paper/rules/history`、`GET .../history/{版}`、`POST .../history/{版}/restore`、`POST /api/paper/rules/reset` | `pdf-rule-draft`（`--add-to` が保存） | 総務（`paper.rules`） | rule-drafts は○ |
+| `POST /api/paper/rule-drafts`（予定の1件か受信箱の PDF から）、`POST /api/paper/rules/validate`、`POST /api/paper/rules`（足して保存）、`GET /api/paper/rules/status`、`GET /api/paper/rules/history`、`GET .../history/{版}`、`POST .../history/{版}/restore`、`POST /api/paper/rules/reset`（すでに既定なら `{"version": null, "already_default": true, "message": "すでに既定です"}`。版も監査ログも増やさない） | `pdf-rule-draft`（`--add-to` が保存） | 総務（`paper.rules`） | rule-drafts は○ |
 | `POST /api/paper/text` | `pdf-text` | 総務 | ○ |
 | `POST /api/meetings`、`GET /api/meetings`、`GET/PUT /api/meetings/{id}`、`GET .../minutes.docx` | `meeting` | 社員・総務（自分のものだけ） | ○ |
 | `POST /api/uploads`、`GET /api/files/{file_id}` | （新規） | 種類による（PDF は総務、録画は社員）。開けるのは作った本人だけ | |
@@ -235,6 +235,7 @@
 
 | 操作の名前 | いつ | 対象 |
 |---|---|---|
+| `ask.chat`・`ask.helpdesk` | 質問（チャット・ヘルプデスク）。説明に出典の文書の番号と題名、答えたか断ったか（文書が見つからない＝失敗・権限がない＝拒否）、部署の権限で見せなかった文書の件数（題名は残さない） | 出典の文書の番号 |
 | `auth.login`・`auth.logout` | ログイン（開発用ログインを含む）・ログアウト・ログインの失敗（結果「失敗」、した人は「なし」） | 社員番号 |
 | `access.denied` | 役割の確かめで断った（403）。説明に断った操作の名前（例 `audit.view`） | メソッドとパス |
 | `api.bearer`・`api.csrf` | 入口で断った（端末トークンで受付以外の API を呼んだ・`X-Yanua-Client` がない） | メソッドとパス |
@@ -246,9 +247,9 @@
 | `audit.view` | 監査ログを見た（どんな条件で見たか） | |
 | `audit.purge` | 保存期間を過ぎた記録を消した（何件、いつより前） | |
 
-残さないもの：パスワード・端末トークン・セッションのトークン・受付端末で入力されたコードは、どの設定でも残さない。質問・会話の本文、文書や PDF の中身は、既定では残さない（`--audit-keep-body` のときだけ `body` に残す。今はまだ本文を渡す操作はない）。仕分けの実行は、書類の中身から作るファイル名を残さず、フォルダだけを残す。
+残さないもの：パスワード・端末トークン・セッションのトークン・受付端末で入力されたコードは、どの設定でも残さない。質問の文、文書や PDF の中身は、既定では残さない（質問の文は `--audit-body` のときだけ `body` に残す）。部署の権限で見せなかった文書があることは、質問した人への返事には出さない。仕分けの実行は、書類の中身から作るファイル名を残さず、フォルダだけを残す。
 
-これから足すもの：質問と出典の文書番号（`ask`）、文書の変更（K-010）、役割の変更（S-54）、モデルの入手（S-53）、設定の画面の変更（K-042）、SSO のログイン（K-008）。
+これから足すもの：文書の変更（K-010）、役割の変更（S-54）、モデルの入手（S-53）、設定の画面の変更（K-042）、SSO のログイン（K-008）。
 
 ## 7. 作る順番
 

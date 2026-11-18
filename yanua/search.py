@@ -88,3 +88,10 @@ def search(store: Store, query: str, department: str, top_k: int = 5) -> list[Hi
 def search_public(store: Store, query: str, top_k: int = 5) -> list[Hit]:
     """社外公開の文書の中だけを検索する（社外の人向け）。"""
     return bm25(query, store.public_chunks(), top_k)
+
+
+def hidden_count(store: Store, query: str, department: str, top_k: int = 5) -> int:
+    """部署の権限がなければ検索で当たっていた文書の数（監査ログに件数だけを残すため）。
+    すべての文書で検索した上位 top_k のうち、その部署が見られない文書を数える。題名や中身は返さない。"""
+    visible = {c.doc_id for c in store.chunks_for(department)}
+    return len({h.doc_id for h in bm25(query, store.all_chunks(), top_k) if h.doc_id not in visible})

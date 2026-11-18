@@ -430,6 +430,25 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
     expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
   });
 
+  it("ほかの画面で先に既定に戻していたら「すでに既定です」と出し、作り直しは促さない", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    const status = { using: "saved", default_changed: false, current_version: 2, default_updated_at: null };
+    fakeApi({
+      ...planRoutes([item()]),
+      "GET /api/paper/rules/status": status,
+      "GET /api/paper/rules/history": { current: 2, status, versions: [
+        { version: 2, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "10002", saved_by_name: "佐藤 花子", action: "ルール「案内」を足した" }] },
+      "POST /api/paper/rules/reset": { version: null, already_default: true, message: "すでに既定です", rules: RULES.rules },
+    });
+    const user = userEvent.setup();
+    render(<PaperSort canRules />);
+    await user.click(await screen.findByRole("button", { name: "既定に戻す" }));
+    await user.click(screen.getByRole("button", { name: "はい、既定に戻す" }));
+    expect(await screen.findByText("すでに既定です")).toBeInTheDocument();
+    expect(screen.queryByText(/予定を作り直すと/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "この予定のファイルで、予定を作り直す" })).not.toBeInTheDocument();
+  });
+
   it("ルールの権限がなければ、下書きのボタンと版を出さない", async () => {
     window.history.replaceState(null, "", "/paper/sort?plan=p1");
     const { calls } = fakeApi(planRoutes([item({ rule: "", by: "none" })]));
