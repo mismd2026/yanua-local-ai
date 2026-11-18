@@ -202,21 +202,24 @@ class SettingFile:
         default_text = self._default_text()
         return sha256(default_text) if default_text is not None else ""
 
-    def restore(self, version: int, by: str) -> int:
+    def restore(self, version: int, by: str, note: str = "") -> int:
         """前の版の中身を、新しい版として写しに保存する。今の検証に通らない版には戻さない。"""
         def run() -> int:
             body = self.get(version)
             if body is None:
                 raise KeyError(version)
-            return self._save(body, by, f"版 {version} に戻した")
-        return self._logged("restore", by, f"版 {version} に戻した", run)
+            return self._save(body, by, what)
+        # note は変えた項目の短い説明（使う側が作る。秘密の値は入れない）
+        what = f"版 {version} に戻した" + (f"（{note}）" if note else "")
+        return self._logged("restore", by, what, run)
 
-    def reset_to_default(self, by: str) -> int | None:
+    def reset_to_default(self, by: str, note: str = "") -> int | None:
         """写しを消して、既定を使う（新しい既定も、ここから使われる）。消す前の写しは版として残る。
         すでに既定を使っている（写しがない）ときは何もせず None を返す（版も監査ログも増やさない）。"""
-        return self._logged("reset", by, "既定に戻した", lambda: self._reset(by))
+        what = "既定に戻した" + (f"（{note}）" if note else "")
+        return self._logged("reset", by, what, lambda: self._reset(by, note))
 
-    def _reset(self, by: str) -> int | None:
+    def _reset(self, by: str, note: str = "") -> int | None:
         with self._lock:
             if not self.saved.is_file():
                 return None
@@ -226,6 +229,7 @@ class SettingFile:
             self._check(default_text)
             entries = self._entries()
             self._keep_before(entries)
-            version = self._add(entries, by, "既定に戻した（画面で保存した写しを消した）", default_text, "default", None)
+            action = "既定に戻した（画面で保存した写しを消した" + (f"。{note}" if note else "") + "）"
+            version = self._add(entries, by, action, default_text, "default", None)
             self.saved.unlink(missing_ok=True)
             return version

@@ -135,6 +135,52 @@ def values_of(key: str, text: str) -> dict:
     return {k: data[k] for k in KEYS[key]}
 
 
+# 変えた項目の説明に使う名前（ここに書いた項目だけを説明に出す。ほかの項目の値は出さない）
+FIELD_LABELS = {
+    "identity": {"preset": "型", "question": "最初の聞き方", "clues": "使う手がかり", "confirm": "確定する組み合わせ",
+                 "surname_counts": "姓だけを数える", "max_follow_ups": "聞き返しの上限"},
+    "audit": {"keep_days": "保存期間", "keep_body": "質問の本文"},
+    "models": {"chat": "チャットのモデル", "summary": "要約のモデル"},
+    "files": {"work_max_gb": "作業用フォルダの上限", "file_keep_hours": "ファイルを消すまで"},
+}
+
+
+def _shown(key: str, field: str, v) -> str:
+    if key == "identity":
+        if field == "clues":
+            return "・".join(identity.MATCH_LABELS.get(c, str(c)) for c in v or []) or "なし"
+        if field == "confirm":
+            return "・".join("＋".join(identity.MATCH_LABELS.get(c, str(c)) for c in combo) for combo in v or []) or "なし"
+        if field == "surname_counts":
+            return "はい" if v else "いいえ"
+        if field == "max_follow_ups":
+            return f"{v}回"
+    if key == "audit":
+        return f"{v}日" if field == "keep_days" else ("残す" if v else "残さない")
+    if key == "files":
+        return f"{v:g}GB" if field == "work_max_gb" and isinstance(v, (int, float)) else f"{v}時間" if field == "file_keep_hours" else str(v)
+    return str(v)
+
+
+def describe_changes(key: str, old: dict | None, new: dict | None) -> str:
+    """変えた項目の短い説明（例「型 標準→社員コード必須、聞き返しの上限 2回→1回」）。版の「したこと」と監査ログに入れる。
+    決まった項目だけを、決まった書き方で出す（秘密の値は扱わない。長い文の項目は「変えた」とだけ書く）。"""
+    if old is None or new is None:
+        return ""
+    parts = []
+    for field, label in FIELD_LABELS[key].items():
+        a, b = old.get(field), new.get(field)
+        if a == b or (isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and float(a) == float(b)):
+            continue
+        if key == "identity" and field == "question":
+            parts.append("最初の聞き方を変えた")
+        elif key == "identity" and field in ("clues", "confirm") and sorted(map(str, a or [])) == sorted(map(str, b or [])):
+            continue                                   # 並べ方だけの違いは変えたことにしない
+        else:
+            parts.append(f"{label} {_shown(key, field, a)}→{_shown(key, field, b)}")
+    return "、".join(parts) or "変更なし"
+
+
 def text_of(key: str, values: dict) -> str:
     """画面から来た値を、保存するファイルの中身にする（説明の行をつける）。"""
     return json.dumps({"_説明": COMMENTS[key], **values}, ensure_ascii=False, indent=2) + "\n"
