@@ -6,6 +6,7 @@ python-docx==1.2.0    # PDFからWordへの変換
 pytesseract==0.3.13   # スキャンしたPDFのOCR（tesseract を呼ぶ。tesseract 本体は別に入れる）
 pdf2image==1.17.0     # OCRの前にPDFを画像にする（poppler を呼ぶ）
 faster-whisper==1.2.1    # 会議の文字起こし（yanua/meeting）。音声・動画の読み込み（av）も含む
+av==19.0.2               # 音声・動画の読み込み（PyAV）。faster-whisper の取り出しはこの版で止まるので、yanua/meeting/transcribe.py で取り出す
 huggingface_hub==2.4.0   # モデルの入手（models pull）。宛先の確認（netpolicy）がこの版の仕組みに合わせてある
 fastapi==0.162.7         # Web画面・クライアントアプリ向けの API（yanua/api）
 uvicorn==0.54.0          # API のサーバー
