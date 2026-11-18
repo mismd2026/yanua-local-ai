@@ -322,3 +322,48 @@ def test_hand_edited_copy_waits_for_restart_and_broken_copy_falls_back(client, s
         login(again, ADMIN)
         s = section(again, "audit")
         assert settings.audit_keep_days == 365 and s["values"] is None and s["problems"][0]["where"] == "keep_days"
+
+
+# ---------------------------------------------------------------- 変えた項目の説明（版の「したこと」と監査ログ）
+
+
+def test_versions_and_audit_log_describe_what_changed(client):
+    standard = section(client, "identity")["values"]
+    p = identity.PRESETS["社員コード必須"]
+    r = put(client, "identity", {**standard, "preset": "社員コード必須", "question": p["question"], "clues": p["clues"],
+                                 "confirm": p["confirm"], "max_follow_ups": 1})
+    assert r.status_code == 200, r.text
+    assert put(client, "models", {"chat": "qwen2.5:7b", "summary": "qwen2.5:7b"}).status_code == 200
+    assert put(client, "files", {"work_max_gb": 50, "file_keep_hours": 24}).status_code == 200
+    assert put(client, "audit", {"keep_days": 30, "keep_body": True}).status_code == 200
+
+    ident = section(client, "identity")["versions"][0]["action"]
+    assert ident.startswith("本人確認の方針を保存した（型 標準→社員コード必須、最初の聞き方を変えた、")
+    assert "確定する組み合わせ 名前＋従業員番号・名前＋部署・従業員番号＋部署→従業員番号＋名前・従業員番号＋部署" in ident
+    assert "聞き返しの上限 2回→1回" in ident and "使う手がかり" not in ident     # 並べ方だけ違う手がかりは書かない
+    assert section(client, "models")["versions"][0]["action"] == "モデルを保存した（チャットのモデル qwen2.5:3b-instruct→qwen2.5:7b）"
+    assert section(client, "files")["versions"][0]["action"] == "ファイル（作業用フォルダ）を保存した（作業用フォルダの上限 20GB→50GB）"
+    assert section(client, "audit")["versions"][0]["action"] == "監査ログを保存した（保存期間 365日→30日、質問の本文 残さない→残す）"
+
+    # 版に戻す・既定に戻すも、戻したことで変わる項目を書く
+    assert client.post("/api/admin/settings/models/history/1/restore", json={}, headers=H).status_code == 200
+    assert section(client, "models")["versions"][0]["action"] == "版 1 に戻した（チャットのモデル qwen2.5:7b→qwen2.5:3b-instruct）"
+    assert client.post("/api/admin/settings/files/reset", json={}, headers=H).status_code == 200
+    assert section(client, "files")["versions"][0]["action"] == "既定に戻した（画面で保存した写しを消した。作業用フォルダの上限 50GB→20GB）"
+    # 同じ説明が監査ログにも入る
+    details = {e["action"]: e["detail"] for e in reversed(client.get("/api/audit", params={"action": "settings", "per_page": 200}).json()["entries"])}
+    assert details["settings.models.save"] == "models.json：モデルを保存した（チャットのモデル qwen2.5:3b-instruct→qwen2.5:7b）（版 2）"
+    assert details["settings.models.restore"] == "models.json：版 1 に戻した（チャットのモデル qwen2.5:7b→qwen2.5:3b-instruct）（版 3）"
+    assert details["settings.files.reset"] == "files.json：既定に戻した（作業用フォルダの上限 50GB→20GB）（版 3）"
+    assert "型 標準→社員コード必須" in details["settings.identity.save"]
+
+
+def test_describe_changes_only_known_fields_and_no_change():
+    d = adminsettings.describe_changes
+    assert d("files", {"work_max_gb": 20, "file_keep_hours": 24}, {"work_max_gb": 20.0, "file_keep_hours": 24}) == "変更なし"
+    assert d("files", {"work_max_gb": 20, "file_keep_hours": 24}, {"work_max_gb": 2.5, "file_keep_hours": 48}) == \
+        "作業用フォルダの上限 20GB→2.5GB、ファイルを消すまで 24時間→48時間"
+    # 決まった項目のほかの値（たとえ紛れ込んでも）は説明に出さない
+    assert d("models", {"chat": "a", "summary": "b", "token": "x"}, {"chat": "a", "summary": "b", "token": "yk_secret"}) == "変更なし"
+    assert d("identity", {"surname_counts": False}, {"surname_counts": True}) == "姓だけを数える いいえ→はい"
+    assert d("audit", None, {"keep_days": 1}) == ""

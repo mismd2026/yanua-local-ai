@@ -1537,8 +1537,9 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def settings_save(key: str, req: SettingValues, user: User = Depends(require("settings.edit"))):
         st = setting_store(key)
         text = setting_text(key, req.values)
+        changes = adminsettings.describe_changes(key, setting_section(key)["values"], adminsettings.values_of(key, text))
         try:
-            version = st.save(text, user.employee_no, f"{adminsettings.LABELS[key]}を保存した")
+            version = st.save(text, user.employee_no, f"{adminsettings.LABELS[key]}を保存した（{changes}）")
         except SettingError as e:
             raise setting_error(e, 400, "invalid_setting", "設定に直すところがあります") from e
         apply_setting(key)
@@ -1546,8 +1547,13 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.post("/api/admin/settings/{key}/history/{version}/restore")
     def settings_restore(key: str, version: int, user: User = Depends(require("settings.edit"))):
+        st = setting_store(key)
         try:
-            new = setting_store(key).restore(version, user.employee_no)
+            note = adminsettings.describe_changes(key, setting_section(key)["values"], adminsettings.values_of(key, st.get(version) or ""))
+        except (ValueError, KeyError, identity.PolicyError):
+            note = ""                    # その版が読めないとき（戻すときの検証で断る）
+        try:
+            new = st.restore(version, user.employee_no, note)
         except KeyError as e:
             raise not_found("設定の版") from e
         except SettingError as e:
@@ -1557,8 +1563,14 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.post("/api/admin/settings/{key}/reset")
     def settings_reset(key: str, user: User = Depends(require("settings.edit"))):
+        st = setting_store(key)
         try:
-            new = setting_store(key).reset_to_default(user.employee_no)
+            note = adminsettings.describe_changes(key, setting_section(key)["values"],
+                                                  adminsettings.values_of(key, st.default.read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError, identity.PolicyError):
+            note = ""
+        try:
+            new = st.reset_to_default(user.employee_no, note if st.saved.is_file() else "")
         except SettingError as e:
             raise setting_error(e, 409, "invalid_default", "既定の設定が今の検証を通らないので、戻せません。管理者に連絡してください") from e
         if new is None:
