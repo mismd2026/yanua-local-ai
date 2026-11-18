@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import sqlite3
 import threading
 import uuid
@@ -138,10 +139,24 @@ def _text(text: str) -> str:
     return text
 
 
+# ヘルプデスクの1回の返事の間に、社内文書から答えた（断った）質問を集める。
+# グラフのノードが別のスレッドで動いても、文脈は写されて同じ一覧に入る
+_answered: contextvars.ContextVar[list | None] = contextvars.ContextVar("yanua_helpdesk_answers", default=None)
+
+
+def _observe(question, answer, procedure=None) -> None:
+    got = _answered.get()
+    if got is not None:
+        got.append((question, answer, procedure))
+
+
 class HelpdeskSessions:
     FLOW = "helpdesk"
 
-    def __init__(self, chats: ChatDB, db_path: Path, helpdesk_data: Path, llm: ChatModel, top_k: int, policy=None):
+    def __init__(self, chats: ChatDB, db_path: Path, helpdesk_data: Path, llm: ChatModel, top_k: int, policy=None,
+                 on_answer=None):
+        """on_answer(User, 質問, Answer か None, 手順)：案内したたびに呼ぶ（監査ログに残すため）。"""
+        self.on_answer = on_answer
         self.chats = chats
         self.policy = policy
         self.db_path = db_path
@@ -155,7 +170,7 @@ class HelpdeskSessions:
         if not hasattr(self._local, "app"):
             self._local.store = Store(self.db_path)
             self._local.app = build_app(self._local.store, self.llm, self.helpdesk_data, self.top_k,
-                                        checkpointer=self.chats.saver, policy=self.policy)
+                                        checkpointer=self.chats.saver, policy=self.policy, observe=_observe)
         return self._local.app
 
     def _app_store(self) -> Store:
@@ -181,12 +196,24 @@ class HelpdeskSessions:
                 "dept_code": p.get("dept_code", ""), "account": "", "account_type": "ログイン", "verified": "ログイン"}}
         else:
             start = {"account": account}   # 開発用：代表アカウントなどからの問い合わせを試す
-        return self._reply(session_id, self.chats.run(self._app(), session_id, start, busy_check=False))
+        return self._run(user, session_id, start, busy_check=False)
 
     def send(self, user: User, session_id: str, text: str) -> dict:
         self.chats.open(self.FLOW, user.employee_no, session_id)
         text = _text(text)
-        return self._reply(session_id, self.chats.run(self._app(), session_id, Command(resume=text)))
+        return self._run(user, session_id, Command(resume=text))
+
+    def _run(self, user: User, session_id: str, value, **kw) -> dict:
+        got: list = []
+        token = _answered.set(got)
+        try:
+            state = self.chats.run(self._app(), session_id, value, **kw)
+        finally:
+            _answered.reset(token)
+        if self.on_answer:
+            for question, answer, procedure in got:
+                self.on_answer(user, question, answer, procedure)
+        return self._reply(session_id, state)
 
     def end(self, user: User, session_id: str) -> None:
         self.chats.delete(self.FLOW, user.employee_no, session_id)

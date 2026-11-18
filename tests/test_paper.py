@@ -144,6 +144,12 @@ def test_draft_rule_from_sample():
     # LLMが挙げた言葉でも、書類に出てこない言葉は採らない
     draft = rules.draft_rule(text, llm=PickLLM("1. 休業日\n2. 夏季休暇\n3. 年末年始"))
     assert draft["keywords"]["any"] == ["案内", "休業日", "年末年始"]
+    # 書類の種類の名前を入れても、見分ける言葉の案は PDF の文字から出す
+    named = rules.draft_rule(text, "休業のお知らせ")
+    assert named["name"] == "休業のお知らせ" and named["keywords"]["any"] == ["案内"]
+    assert rules.draft_rule(text, "案内")["keywords"]["any"] == ["案内"]             # 同じ言葉を2回入れない
+    named = rules.draft_rule(text, "休業の案内", llm=PickLLM("年末年始"))
+    assert named["keywords"]["any"] == ["案内", "年末年始"]
     # 日付・相手先のない案内状では、ファイル名と保存先に {date}・{company} を入れない（「不明」だらけにしない）
     assert draft["filename"] == "案内_{original}.pdf" and draft["folder"] == "案内"
     # 読み取れる書類では、読み取れた項目だけを使う

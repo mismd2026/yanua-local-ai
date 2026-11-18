@@ -625,6 +625,8 @@ def test_rule_draft_from_inbox_and_other_users_plan(client, own_rules):
     login(client, "10002")
     done = wait_job(client, client.post("/api/paper/rule-drafts", json={"inbox": "scan_0002.pdf", "name": "見積の控え"}, headers=H).json()["job_id"])
     assert done["status"] == "完了" and done["result"]["draft"]["name"] == "見積の控え"
+    # 名前を入れても、見分ける言葉の案は PDF の文字から出す（「見積の控え」は書類にないので入れない）
+    assert done["result"]["draft"]["keywords"]["any"] == ["見積書"]
     assert client.post("/api/paper/rule-drafts", json={"inbox": "../rules.json"}, headers=H).status_code == 400
     plan_id = wait_job(client, client.post("/api/paper/plans", json={}, headers=H).json()["job_id"])["result"]["plan_id"]
     login(client, "10003")    # ほかの総務の人の予定からは作れない（ないものと同じ）

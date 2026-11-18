@@ -13,6 +13,7 @@ const TONE: Record<string, string> = { 成功: "ok", 失敗: "ng", 拒否: "ng" 
 // 操作の名前の頭 → 画面に出す言葉（絞り込みの選び肢）
 const GROUPS: [string, string][] = [
   ["auth", "ログイン・ログアウト"],
+  ["ask", "質問（チャット・ヘルプデスク）"],
   ["access", "権限で断った操作"],
   ["api", "入口で断ったリクエスト"],
   ["job", "ジョブ"],
@@ -148,7 +149,8 @@ function Row({ e, open, onToggle }: { e: AuditEntry; open: boolean; onToggle: ()
       <td className="small nowrap">{time(e.at)}</td>
       <td>
         {who}
-        {e.actor_kind !== "社員" && <div className="small muted">{e.actor_kind}</div>}
+        {/* 種類は受付端末のときだけ添える（ログイン前の「なし」・サーバーの「システム」は名前と同じなので1つだけ出す） */}
+        {e.actor_kind === "受付端末" && <div className="small muted">{e.actor_kind}</div>}
       </td>
       <td className="mono small">{e.action}</td>
       <td className="small">{e.target || "—"}</td>

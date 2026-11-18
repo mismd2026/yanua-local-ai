@@ -73,7 +73,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from .. import audit, hr, models, visits
-from ..answer import answer_question
+from ..answer import ANSWERED, NO_PERMISSION, NOT_FOUND, Answer, answer_question
 from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
@@ -263,6 +263,32 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def audit_by(user: User, action: str, **kw) -> None:
         auditor.record(action, actor=user.employee_no, actor_name=user.name, **kw)
 
+    ASK_SCREENS = {"chat": "チャット", "helpdesk": "ヘルプデスク"}
+    ASK_RESULTS = {ANSWERED: audit.OK, NOT_FOUND: audit.FAILED, NO_PERMISSION: audit.DENIED}
+
+    def audit_question(user: User, screen: str, question: str, ans: Answer | None, ip: str | None = None,
+                       procedure: str | None = None) -> None:
+        """質問の記録：どの画面で・出典の文書の番号と題名・答えたか断ったか。部署の権限で見せなかった文書は件数だけ。
+        procedure は、ヘルプデスクが社内文書を使わず決まった手順で案内したときの手順の名前（「手順で案内」＝成功）。
+        質問の文は、本文を残す設定（--audit-body）のときだけ body に入る。"""
+        if procedure:
+            detail = f"{ASK_SCREENS[screen]}：手順で案内しました（手順：{procedure}）"
+            if ans and ans.hidden:
+                detail += f"。部署の権限で見せなかった文書 {ans.hidden}件"
+            auditor.record(f"ask.{screen}", actor=user.employee_no, actor_name=user.name, result=audit.OK,
+                           detail=detail, body=question, ip=ip)
+            return
+        if ans.refused:
+            detail = f"{ASK_SCREENS[screen]}：断りました（{ans.reason or NOT_FOUND}）"
+        else:
+            sources = "、".join(f"{src['doc_id']}「{src['title']}」" for src in ans.sources)
+            detail = f"{ASK_SCREENS[screen]}：答えました（出典：{sources}）"
+        if ans.hidden:
+            detail += f"。部署の権限で見せなかった文書 {ans.hidden}件"
+        auditor.record(f"ask.{screen}", actor=user.employee_no, actor_name=user.name,
+                       target="、".join(src["doc_id"] for src in ans.sources), result=ASK_RESULTS.get(ans.reason, audit.OK),
+                       detail=detail, body=question, ip=ip)
+
     def audit_setting(action: str, by: str, result: str, detail: str) -> None:
         auditor.record(action, actor=by, target=action.rsplit(".", 1)[0], result=result, detail=detail)
 
@@ -426,7 +452,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         auditor.purge()      # 保存期間を過ぎた監査ログ（起動したときと、1日1回）
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
-        app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy)
+        app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy,
+                                              on_answer=lambda u, q, a, proc: audit_question(u, "helpdesk", q, a, procedure=proc))
         app.state.reception = ReceptionSessions(chats, settings.db_path, settings.reception_data, llm, settings.top_k,
                                                 settings.today)
 
@@ -600,12 +627,14 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             result = answer_question(store(), llm, req.question, user.dept, settings.top_k)
         except ValueError as e:
             raise ApiError(400, "invalid_question", str(e)) from e
+        audit_question(user, "chat", req.question, result)
         return {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}
 
     @app.post("/api/ask/stream")
     def ask_stream(req: Ask, user: User = Depends(require("ask"))):
         # ログイン・権限・質問の形は、送り始める前に確かめる（ふつうのエラーの形で返す）
         events: queue.Queue[tuple[str, dict] | None] = queue.Queue()
+        ip = audit.client_ip.get()     # 別のスレッドで答えるので、接続元をここで取っておく
 
         def work():
             started = time.monotonic()
@@ -613,6 +642,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             try:
                 result = answer_question(s, llm, req.question, user.dept, settings.top_k,
                                          progress=lambda st: events.put(("progress", {"stage": st, "message": ASK_STAGES[st]})))
+                audit_question(user, "chat", req.question, result, ip=ip)
                 events.put(("result", {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}))
             except ValueError as e:
                 events.put(("error", errors.body("invalid_question", str(e))["error"]))
@@ -1280,8 +1310,11 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             new = rule_store().reset_to_default(user.employee_no)
         except SettingError as e:
             raise setting_error(e, 409, "invalid_default", "既定のルールが今の検証を通らないので、戻せません。管理者に連絡してください") from e
+        if new is None:
+            # ほかの画面で先に戻していたときなど。版は増やさない
+            return {"version": None, "already_default": True, "message": "すでに既定です", "rules": paper_rule_list(user)["rules"]}
         log.info("仕分けルールを既定に戻しました（版 %s、%s）", new, user.employee_no)
-        return {"version": new, "rules": paper_rule_list(user)["rules"]}
+        return {"version": new, "already_default": False, "rules": paper_rule_list(user)["rules"]}
 
     @app.post("/api/paper/convert", status_code=202)
     def paper_convert(req: PaperConvert, user: User = Depends(require("paper"))):

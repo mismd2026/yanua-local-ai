@@ -56,7 +56,9 @@ describe("S-55 監査ログ", () => {
     expect(rows[1]).toHaveTextContent("拒否");
     expect(rows[2]).toHaveTextContent("高橋 美咲（10004）");
     expect(rows[2]).toHaveTextContent("操作「audit.view」の権限がありません");
-    expect(rows[3]).toHaveTextContent("なし");
+    // ログイン前の「した人」は「なし」を1つだけ出す
+    expect(within(rows[3]).getAllByText("なし")).toHaveLength(1);
+    expect(rows[3].querySelectorAll("td")[1].textContent).toBe("なし");
     expect(screen.getByRole("status")).toHaveTextContent("120件（1〜50件目）");
     expect(screen.getByText(/365日を過ぎた記録は自動で消え/)).toBeInTheDocument();
     expect(screen.getByText(/本文や文書の中身は残していません/)).toBeInTheDocument();

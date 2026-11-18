@@ -140,11 +140,13 @@ def extract_slots(llm: ChatModel, problem: str, answer: str) -> dict:
 
 
 def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, checkpointer=None,
-              policy: identity.Policy | None = None):
+              policy: identity.Policy | None = None, observe=None):
     """ヘルプデスクのグラフを作る。store は取り込み済みの社内文書と人事データを持つ保存先。
 
     checkpointer は会話の途中の状態の保存先。省略時はメモリ（CLI 用）。API では SQLite に保存する。
     policy は本人確認の方針（config/identity.json）。省略時は既定（標準）。
+    observe(質問, Answer か None, 手順) は、案内したたびに呼ぶ（API が監査ログに残すため）。
+    手順は社内文書を使わず決まった手順（kb.csv）で案内したときの、その手順の名前。文書を探して見つからず、手順もないときは None。
     """
     policy = policy or identity.Policy.default()
     kb_rows = _read_csv(data_dir / "kb.csv")
@@ -182,7 +184,11 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
 
     def intake(s: State) -> State:
         name = s["requester"].get("name", "")
-        problem = interrupt(f"{name + 'さん、' if name else ''}ありがとうございます。どのようなことでお困りですか？")
+        if name and s["requester"].get("verified") == "ログイン":
+            # ログインしている人には、本人確認を聞いていないので「ありがとうございます」は言わない
+            problem = interrupt(f"{name}さん、どのようなことでお困りですか？")
+        else:
+            problem = interrupt(f"{name + 'さん、' if name else ''}ありがとうございます。どのようなことでお困りですか？")
         return {"problem": problem, "slots": {}, "clarify_rounds": 0, "tried": [], "sources": []}
 
     def classify(s: State) -> State:
@@ -222,11 +228,15 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
         if s.get("urgent"):
             # 緊急時は社内文書の検索を待たず、決まった手順を先に出して必ず引き継ぐ
             tried.append(f"案内した手順：{row['question']}")
+            if observe:
+                observe(s["problem"], None, row["question"])
             return {"tried": tried, "notice": row["answer"]}
 
         # 1. 社内文書から出典つきで答える（照合できた人は部署の権限で、できない人は全社の文書だけ）
         dept = s["requester"]["dept"] if s["requester"]["verified"] != "照合できず" else ""
         ans = answer_question(store, llm, s["problem"], dept, top_k)
+        if observe:
+            observe(s["problem"], ans, row["question"] if ans.refused and row else None)
         if not ans.refused:
             titles = "、".join(src["title"] for src in ans.sources)
             message = f"{ans.answer}\n（出典：{titles}）"

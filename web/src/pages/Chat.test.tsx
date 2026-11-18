@@ -116,7 +116,7 @@ describe("S-10 チャット：社内文書に質問", () => {
 describe("S-10 チャット：ヘルプデスク", () => {
   it("相談を始め、やりとりして、問い合わせ票の番号を出す", async () => {
     const replies = [
-      { session_id: "s1", finished: false, reply: "高橋さん、ありがとうございます。どのようなことでお困りですか？" },
+      { session_id: "s1", finished: false, reply: "高橋 美咲さん、どのようなことでお困りですか？" },
       { session_id: "s1", finished: false, reply: "わかる範囲で教えてください：場所。" },
       { session_id: "s1", finished: true, reply: "受付番号 T-0001 で引き継ぎました（優先度：高）。担当者から連絡します。", ticket_id: "T-0001", sources: [] },
     ];

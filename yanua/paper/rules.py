@@ -366,8 +366,11 @@ def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None,
     ファイル名と保存先の案は、この PDF から読み取れた項目（日付・相手先）だけで作る（読み取れない項目は「不明」になるため）。"""
     t = norm(text)
     head = "\n".join(t.splitlines()[:6])
-    kind = name or next((k for k in KNOWN_TYPES if k in head), None) or next((k for k in KNOWN_TYPES if k in t), None)
-    keywords = [kind] if kind and kind in t else []
+    # 見分ける言葉の案は、名前を入れたときも PDF の文字から出す（入れた名前が書類にあれば、それも使う）
+    found = next((k for k in KNOWN_TYPES if k in head), None) or next((k for k in KNOWN_TYPES if k in t), None)
+    name = (name or "").strip() or None
+    kind = name or found
+    keywords = [w for w in dict.fromkeys([name, found]) if w and w in t]
     if llm is not None:
         prompt = ("次の書類を見分けるのに使える言葉（書類の中にそのまま出てくる短い言葉）を、3つまで挙げてください。"
                   "1行に1つずつ、言葉だけを書いてください。\n\n" + t[:800])
@@ -379,8 +382,8 @@ def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None,
         except Exception:  # noqa: BLE001
             pass
     kind = kind or "（種類の名前）"
-    found = find_fields(t, None, self_names or [])
-    has_date, has_company = "date" in found, "company" in found
+    fields = find_fields(t, None, self_names or [])
+    has_date, has_company = "date" in fields, "company" in fields
     parts = (["{date}"] if has_date else []) + [kind] + (["{company}"] if has_company else [])
     if not (has_date or has_company):
         parts.append("{original}")    # 日付も相手先もないときは、元のファイル名で分ける（同じ名前にならないように）

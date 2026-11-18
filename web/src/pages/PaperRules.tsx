@@ -300,9 +300,14 @@ export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: (m
     setBusy(true);
     setError("");
     try {
-      const r = await api<{ version: number }>("POST", "/api/paper/rules/reset", {});
-      setMessage(`既定のルールに戻しました（版 ${r.version}）。画面で足したルールは、版として残っています。`);
+      const r = await api<{ version: number | null; already_default?: boolean; message?: string }>("POST", "/api/paper/rules/reset", {});
       setReload((n) => n + 1);
+      if (r.already_default || r.version === null) {
+        // ほかの画面で先に戻していた。版は増えていない（予定の作り直しも要らない）
+        setMessage(r.message ?? "すでに既定です");
+        return;
+      }
+      setMessage(`既定のルールに戻しました（版 ${r.version}）。画面で足したルールは、版として残っています。`);
       onRestored(`ルールを既定に戻しました（版 ${r.version}）。`);
     } catch (e) {
       setError(errorText(e, "既定に戻せませんでした"));

@@ -288,3 +288,103 @@ def test_recording_failure_does_not_stop_the_operation(client, caplog, monkeypat
     assert client.get("/api/me").status_code == 200
     assert client.get("/api/paper/inbox").status_code == 403     # 断るのも、ふだんどおり
     assert "監査ログに記録できませんでした（auth.login）" in caplog.text
+
+
+# ---------------------------------------------------------------- 質問の記録（K-009 の続き）
+
+QUESTIONS = {
+    "answered": "在宅勤務は週に何日までできますか？",     # 全社の文書で答える
+    "no_permission": "採用面接",                         # 人事部だけの文書（採用面接の進め方）にしか当たらない
+    "not_found": "ｘｙｚｚｙ",                            # どの文書にも当たらない
+    "stream": "在宅勤務の申請は？",
+    "helpdesk": "パスワードを忘れました",
+}
+
+
+def ask_everything(client) -> dict:
+    login(client, EMP)                                   # 高橋（営業部）
+    out = {k: client.post("/api/ask", json={"question": QUESTIONS[k]}, headers=H).json()
+           for k in ("answered", "no_permission", "not_found")}
+    r = client.post("/api/ask/stream", json={"question": QUESTIONS["stream"]}, headers=H)
+    assert r.status_code == 200 and "event: result" in r.text
+    sid = client.post("/api/chat/sessions", json={}, headers=H).json()["session_id"]
+    reply = client.post(f"/api/chat/sessions/{sid}/messages", json={"text": QUESTIONS["helpdesk"]}, headers=H).json()
+    assert "解決しましたか" in reply["reply"]
+    return out
+
+
+def test_questions_are_recorded_without_their_text(client):
+    replies = ask_everything(client)
+    rows = entries(client, action="ask")
+    chat_rows = [r for r in rows if r["action"] == "ask.chat"]
+    assert len(chat_rows) == 4 and {r["actor"] for r in rows} == {EMP}
+    answered = next(r for r in chat_rows if r["result"] == "成功" and r["ip"] == "testclient")
+    assert answered["detail"].startswith("チャット：答えました（出典：A01「") and "A01" in answered["target"]
+    denied = next(r for r in chat_rows if r["result"] == "拒否")
+    assert denied["detail"] == "チャット：断りました（権限がない）。部署の権限で見せなかった文書 1件" and denied["target"] == ""
+    missing = next(r for r in chat_rows if r["result"] == "失敗")
+    assert missing["detail"] == "チャット：断りました（文書が見つからない）"
+    assert all(r["ip"] == "testclient" for r in chat_rows)          # 逐次表示（別のスレッド）でも接続元が残る
+    helpdesk = [r for r in rows if r["action"] == "ask.helpdesk"]
+    assert len(helpdesk) == 1 and helpdesk[0]["detail"].startswith("ヘルプデスク：答えました（出典：")
+    assert helpdesk[0]["actor_name"] == "高橋 美咲" and helpdesk[0]["ip"] == "testclient"
+    assert all(r["body"] is None for r in rows)
+    # 既定では、記録の全文に質問の文字列が入らない。見せなかった文書の題名も入らない
+    text = auditor(client).all_text()
+    for q in QUESTIONS.values():
+        assert q not in text, q
+    assert "採用面接の進め方" not in text and "H02" not in text
+    # 見られない文書があることは、質問した人への返事には出さない
+    for r in replies.values():
+        assert set(r) == {"answer", "sources", "refused", "elapsed_sec"}
+    assert replies["no_permission"] == {**replies["not_found"], "elapsed_sec": replies["no_permission"]["elapsed_sec"]}
+
+
+def test_question_text_is_kept_only_with_audit_body(settings):
+    settings.audit_keep_body = True
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        ask_everything(c)
+        rows = entries(c, action="ask")
+    assert {r["body"] for r in rows} == set(QUESTIONS.values())
+
+
+def test_reset_when_already_default_adds_no_version_and_no_record(client):
+    login(client, GA)
+    r = client.post("/api/paper/rules/reset", json={}, headers=H)
+    assert r.status_code == 200 and r.json()["already_default"] is True and r.json()["message"] == "すでに既定です"
+    assert r.json()["version"] is None
+    assert client.get("/api/paper/rules/history").json()["versions"] == []
+    rule = {"name": "案内", "keywords": {"any": ["案内"]}, "filename": "{original}.pdf", "folder": "総務/案内"}
+    assert client.post("/api/paper/rules", json={"rule": rule}, headers=H).status_code == 201
+    assert client.post("/api/paper/rules/reset", json={}, headers=H).json()["version"] == 3
+    again = client.post("/api/paper/rules/reset", json={}, headers=H).json()
+    assert again["already_default"] is True
+    assert [v["version"] for v in client.get("/api/paper/rules/history").json()["versions"]] == [3, 2, 1]
+    assert [r["action"] for r in entries(client, action="paper.rules")] == ["paper.rules.reset", "paper.rules.save"]
+
+
+def test_refusal_with_hidden_documents_is_recorded_as_denied(client):
+    """経理部が人事部の文書のことを聞く。見られる文書にも弱く当たるが答えられず、見られない文書に強く当たる → 拒否（権限がない）。"""
+    login(client, "10001")                               # 山田（経理部）
+    q = "採用面接の進め方を教えてください"
+    reply = client.post("/api/ask", json={"question": q}, headers=H).json()
+    plain = client.post("/api/ask", json={"question": "ｘｙｚｚｙ"}, headers=H).json()
+    assert reply["refused"] and reply["answer"] == plain["answer"]      # 社員への返事は、見つからないときと同じ
+    rows = [r for r in entries(client, action="ask.chat") if r["actor"] == "10001"]
+    denied = next(r for r in rows if r["result"] == "拒否")
+    assert denied["detail"].startswith("チャット：断りました（権限がない）。部署の権限で見せなかった文書 ")
+    assert next(r for r in rows if r["result"] == "失敗")["detail"] == "チャット：断りました（文書が見つからない）"
+    assert q not in auditor(client).all_text() and "採用面接の進め方" not in auditor(client).all_text()
+
+
+def test_helpdesk_guided_by_procedure_is_a_success(client):
+    """社内文書に答えがなく、決まった手順（プリンターなど）で案内したら「手順で案内」＝成功。"""
+    login(client, EMP)
+    sid = client.post("/api/chat/sessions", json={}, headers=H).json()["session_id"]
+    for text in ("プリンターから印刷できません", "本社2階の営業部の複合機です。自分だけ印刷できません。", "一部できない"):
+        r = client.post(f"/api/chat/sessions/{sid}/messages", json={"text": text}, headers=H).json()
+    assert "解決しましたか" in r["reply"]
+    rows = [r for r in entries(client, action="ask.helpdesk")]
+    assert len(rows) == 1, rows
+    assert rows[0]["result"] == "成功" and rows[0]["detail"].startswith("ヘルプデスク：手順で案内しました（手順：")
+    assert "プリンターから印刷できません" not in auditor(client).all_text()
