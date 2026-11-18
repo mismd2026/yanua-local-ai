@@ -23,6 +23,8 @@ class Settings:
     audit_config: Path = Path("config/audit.json")
     models_config: Path = Path("config/models.json")
     files_config: Path = Path("config/files.json")
+    network_config: Path = Path("config/network.json")              # 宛先の一覧と目録（既定。S-53 からは書き換えない）
+    network_state_config: Path = Path("config/network_state.json")  # 宛先の ON/OFF・追加・更新の確認の既定（写しは settings_dir）
     # 起動の指定が勝つ項目（例 "audit.keep_body"）。画面では変えられない。serve が付けたものを入れる
     pinned: set[str] = field(default_factory=set)
     top_k: int = 5

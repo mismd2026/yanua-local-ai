@@ -1,13 +1,18 @@
 {
-  "_説明": "Yanua が通信してよい相手（許可リスト）。ここにない宛先には通信しない。通信するのは models pull などの明示したコマンドのときだけ。models の kind が ollama のものは Ollama のモデル（入手は ollama pull。models pull は手元の digest を登録するだけで、社外に通信しない）。use は用途（chat・summary・embedding）。会社のファイアウォール・プロキシでも、同じ宛先だけを許可すること。",
+  "_説明": "Yanua が通信してよい相手（許可リスト）。ここにない宛先には通信しない。通信するのは models pull などの明示したコマンドのときだけ。models の kind が ollama のものは Ollama のモデル（入手は ollama pull。models pull は手元の digest を登録するだけで、社外に通信しない）。use は用途（chat・summary・embedding）。revision は入手する版（コミットのハッシュ）。空のモデルは入手しない。宛先ごとの ON/OFF・追加の宛先・更新の確認は、画面（S-53）で決める。会社のファイアウォール・プロキシでも、同じ宛先だけを許可すること。",
   "allowed_hosts": [
     "huggingface.co",
     "*.huggingface.co",
     "*.hf.co"
   ],
+  "purposes": {
+    "huggingface.co": "モデルの入手・新しい版の確認（Hugging Face）",
+    "*.huggingface.co": "モデルのファイルの入手（Hugging Face）",
+    "*.hf.co": "モデルのファイルの入手（Hugging Face の配信）"
+  },
   "models": {
-    "whisper-small": {"repo": "Systran/faster-whisper-small", "revision": ""},
-    "whisper-medium": {"repo": "Systran/faster-whisper-medium", "revision": ""},
+    "whisper-small": {"repo": "Systran/faster-whisper-small", "revision": "536b0662742c02347bc0e980a01041f333bce120", "use": ["transcribe"]},
+    "whisper-medium": {"repo": "Systran/faster-whisper-medium", "revision": "08e178d48790749d25932bbc082711ddcfdfbc4f", "use": ["transcribe"]},
     "qwen2.5:3b-instruct": {"kind": "ollama", "use": ["chat", "summary"]},
     "qwen2.5:7b": {"kind": "ollama", "use": ["chat", "summary"]}
   }

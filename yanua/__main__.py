@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -157,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--update", action="store_true", help="記録した版ではなく、いまの版を入手する")
     s.add_argument("--models-dir", type=Path, default=Path("data/models"))
     s.add_argument("--ollama", default=DEFAULT_OLLAMA_URL, help="手元の Ollama の URL（Ollama のモデルの digest を見る）")
+    s.add_argument("--settings-dir", type=Path, default=Path("data/settings"),
+                   help="通信の設定の画面（S-53）で保存した状態の置き場所（宛先の ON/OFF・入れ替えた版）")
 
     s = sub.add_parser("meeting", help="会議の録画・録音から議事録を作る（文字起こし・話し手・要約）")
     s.add_argument("media", type=Path, help="録画（mp4 など）か録音（wav / m4a / mp3 など）")
@@ -500,11 +503,31 @@ def _paper(args) -> int:
 
 
 
+def _effective_network(settings_dir: Path):
+    """サーバーと同じ、動いている許可リスト（S-53 で ON にした宛先だけ）と、固定した版。読めなければ (None, 理由)。"""
+    import json as _json
+
+    from .api import netsettings
+    from .netpolicy import DEFAULT_POLICY
+
+    defaults, error = netsettings.load_defaults(Path(os.environ.get("YANUA_NETWORK_POLICY", DEFAULT_POLICY)))
+    state_file = settings_dir / netsettings.STATE_NAME
+    default_state = Path(__file__).resolve().parent.parent / "config" / "network_state.json"
+    try:
+        state = netsettings.read_state_text((state_file if state_file.is_file() else default_state).read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, _json.JSONDecodeError):
+        state = netsettings.read_state_text(default_state.read_text(encoding="utf-8"))
+    return netsettings.effective(defaults, state), error
+
+
 def _models(args) -> int:
     from . import models
-    from .netpolicy import NetworkBlocked, load_policy
+    from .netpolicy import NetworkBlocked
 
-    policy = load_policy()
+    policy, error = _effective_network(args.settings_dir)
+    if policy is None:
+        print(f"通信の設定が読めないので、モデルの入手と照合を止めます：{error}")
+        return 1
     try:
         if args.action == "list":
             lock = models.read_lock(args.models_dir)
@@ -515,7 +538,7 @@ def _models(args) -> int:
                     print(f"{name}：Ollama（用途 {use}）　" + (f"登録済み（digest {got['digest'][:12]}、{got['registered_at']}）" if got else "未登録"))
                     continue
                 print(f"{name}：{spec['repo']}　" + (f"入手済み（版 {got['revision'][:12]}、{got['pulled_at']}）" if got else "未入手"))
-            print(f"通信してよい宛先：{'、'.join(policy.allowed_hosts)}（config/network.json）")
+            print(f"通信してよい宛先（ON のもの）：{'、'.join(policy.allowed_hosts) or 'なし'}（config/network.json と、画面 S-53 の設定）")
             return 0
         if args.action == "pull":
             entry = models.pull(args.name, policy, args.models_dir, update=args.update, ollama_url=args.ollama)
@@ -528,8 +551,8 @@ def _models(args) -> int:
             digest = models.verify_ollama(args.name, args.models_dir, ollama_url=args.ollama)
             print(f"{args.name}：登録した digest と一致しました（{digest[:12]}）。")
             return 0
-        path = models.verify(args.name, args.models_dir)
-        print(f"{args.name}：記録と一致しました（{path}）。")
+        path = models.verify(args.name, args.models_dir, revision=policy.models.get(args.name, {}).get("revision") or None)
+        print(f"{args.name}：記録と一致しました（版 {policy.models[args.name]['revision'][:12]}、{path}）。")
         return 0
     except (models.ModelError, NetworkBlocked) as e:
         print(e)
@@ -553,7 +576,9 @@ def _meeting(args, store: Store) -> int:
         if args.segments:
             segments = meeting_run.load_segments(args.segments)
         else:
-            transcriber = WhisperTranscriber(models.verify(args.model_name, args.models_dir))
+            policy, _ = _effective_network(Path("data/settings"))
+            pinned = (policy.models.get(args.model_name, {}).get("revision") or None) if policy else None
+            transcriber = WhisperTranscriber(models.verify(args.model_name, args.models_dir, revision=pinned))
         llm = None
         if not args.no_summary:
             llm = OllamaChat(args.model, args.ollama)

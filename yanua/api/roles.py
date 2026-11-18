@@ -39,6 +39,9 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # 段階4（K-042）設定の画面（S-52）
     "settings.view": frozenset({"管理者"}),           # 設定と版を見る・本人確認の方針を試す
     "settings.edit": frozenset({"管理者"}),           # 設定を保存する・版に戻す・既定に戻す
+    # 段階4（K-052）通信とモデル（S-53）
+    "network.view": frozenset({"管理者"}),            # 宛先・更新の確認・モデルの目録を見る
+    "network.edit": frozenset({"管理者"}),            # 宛先の ON/OFF・追加、更新の確認、照合、入れ替え
 }
 # 受付端末は人の役割ではない。端末トークンで受付の API（/api/kiosk/...）だけを使える（yanua/api/kiosk.py）
 KIOSK = "受付端末"

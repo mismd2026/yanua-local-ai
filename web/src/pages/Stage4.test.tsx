@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import Audit from "./Audit";
 import SettingsPage from "./Settings";
+import NetworkPage from "./Network";
 import { fakeApi, ME_EMPLOYEE } from "../test/fakeApi";
 
 beforeEach(() => window.history.replaceState(null, "", "/"));
@@ -267,5 +268,113 @@ describe("S-52 設定", () => {
     const box = await screen.findByRole("region", { name: "ファイル（作業用フォルダ）" });
     expect(await within(box).findByLabelText("作業用フォルダの合計の上限")).toBeDisabled();
     expect(within(box).queryByRole("button", { name: /保存する|既定に戻す|この版に戻す|戻す$/ })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------- S-53 通信とモデル
+
+const job = (over: object = {}) => ({ job_id: "j1", kind: "x", status: "完了", progress: 100, stage: "完了", result: null, error: null,
+  created_at: "2026-11-18T10:00:00+09:00", ...over });
+
+const netView = (over: object = {}) => ({
+  hosts: [
+    { host: "huggingface.co", kind: "default", purpose: "モデルの入手・新しい版の確認（Hugging Face）", new: false, on: true },
+    { host: "*.hf.co", kind: "default", purpose: "モデルのファイルの入手", new: false, on: true },
+    { host: "cdn.example.org", kind: "default", purpose: "新しい配信元", new: true, on: false },
+    { host: "registry.ollama.ai", kind: "added", purpose: "入手元との照合", new: false, on: true },
+  ],
+  new_defaults: [{ host: "cdn.example.org", purpose: "新しい配信元" }], removed_defaults: ["*.huggingface.co"], error: "",
+  update_check: { mode: "manual", time: "03:00", weekday: 0 }, schedule: "手動だけ",
+  modes: { none: "しない", manual: "手動だけ", daily: "毎日", weekly: "毎週" },
+  status: { using: "saved", default_changed: false, current_version: 2, default_updated_at: null }, current: 2,
+  versions: [{ version: 2, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "（システム）", saved_by_name: "システム", action: "初めての起動：既定の宛先をすべて ON にした" }],
+  last_check: null, ...over,
+});
+const MODELS = { models: [
+  { name: "whisper-small", kind: "whisper", use: ["transcribe"], revision: "536b0662742c02347bc0e980a01041f333bce120", recorded: "3e305921506d8872", files: 6,
+    state: "match", message: "記録と一致しました", latest: "f".repeat(40), check: "new", check_message: "新しい版があります（版 ffffffffffff）" },
+  { name: "qwen2.5:7b", kind: "ollama", use: ["chat", "summary"], revision: "", recorded: "", state: "not_registered",
+    message: "登録されていません（python -m yanua models pull qwen2.5:7b で登録してください）", latest: "", check: "", check_message: "" },
+] };
+
+describe("S-53 通信とモデル", () => {
+  const NET_ADMIN = { ...ADMIN, permissions: [...ADMIN.permissions, "network.view", "network.edit"] };
+
+  it("管理者のメニューにだけ出し、社員が URL を開いても読まない", async () => {
+    fakeApi({ "GET /api/me": NET_ADMIN, "GET /api/jobs": { jobs: [] }, "GET /api/notifications?unread=1": { notifications: [], unread: 0 } });
+    const { unmount } = render(<App />);
+    expect(await screen.findByRole("link", { name: /通信とモデル/ })).toBeInTheDocument();
+    unmount();
+    window.history.replaceState(null, "", "/admin/network");
+    const { calls } = fakeApi({ "GET /api/me": ME_EMPLOYEE });
+    render(<App />);
+    expect(await screen.findByText("この画面を使う権限がありません")).toBeInTheDocument();
+    expect(calls.some((c) => c.path.startsWith("/api/admin/network"))).toBe(false);
+  });
+
+  it("新しい既定・外れた既定を知らせ、既定は消せず、ON/OFF と追加の宛先を保存する", async () => {
+    let sent: unknown = null;
+    fakeApi({
+      "GET /api/admin/network": netView(), "GET /api/admin/models": MODELS,
+      "PUT /api/admin/network": (body: { values: { added: { host: string }[] } }) => {
+        if (body.values.added.some((a) => a.host.includes("/")))
+          return { status: 400, json: { error: { code: "invalid_setting", message: "設定に直すところがあります",
+            details: [{ where: "added[1]", message: "https のホスト名だけを書いてください" }] } } };
+        sent = body.values;
+        return { json: { ...netView(), version: 3 } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<NetworkPage canEdit />);
+    expect(await screen.findByRole("status", { name: "新しい既定の宛先" })).toHaveTextContent("cdn.example.org（新しい配信元）");
+    expect(screen.getByRole("status", { name: "既定から外れた宛先" })).toHaveTextContent("*.huggingface.co");
+    const box = screen.getByRole("region", { name: "許可する宛先" });
+    expect(within(box).queryByRole("button", { name: "huggingface.co を消す" })).not.toBeInTheDocument();   // 既定は消せない
+    expect(within(box).getByRole("button", { name: "registry.ollama.ai を消す" })).toBeInTheDocument();
+    expect(within(box).getByLabelText("cdn.example.org を使う")).not.toBeChecked();                       // 新しい既定は OFF
+    await user.click(within(box).getByLabelText("huggingface.co を使う"));
+    await user.type(within(box).getByLabelText("追加する宛先（ホスト名）"), "https://bad.example.com/x");
+    await user.click(within(box).getByRole("button", { name: "宛先を足す" }));
+    await user.click(screen.getByRole("button", { name: "保存する（宛先と更新の確認）" }));
+    expect(await within(box).findByText("https のホスト名だけを書いてください")).toBeInTheDocument();
+    expect(sent).toBeNull();
+    await user.click(within(box).getByRole("button", { name: "https://bad.example.com/x を消す" }));
+    await user.click(screen.getByRole("button", { name: "保存する（宛先と更新の確認）" }));
+    expect(await screen.findByText(/保存しました（版 3）/)).toBeInTheDocument();
+    expect(sent).toEqual({ defaults: { "huggingface.co": false, "*.hf.co": true, "cdn.example.org": false },
+      added: [{ host: "registry.ollama.ai", on: true, purpose: "入手元との照合" }], update_check: { mode: "manual", time: "03:00", weekday: 0 } });
+  });
+
+  it("更新の確認の予定を選び、「しない」なら今すぐ確かめるを押せない。既定に戻すは何が起きるかを伝える", async () => {
+    fakeApi({ "GET /api/admin/network": netView({ update_check: { mode: "none", time: "03:00", weekday: 0 } }), "GET /api/admin/models": MODELS });
+    const user = userEvent.setup();
+    render(<NetworkPage canEdit />);
+    expect(await screen.findByRole("button", { name: "今すぐ更新を確かめる" })).toBeDisabled();
+    const mode = screen.getByLabelText("いつ見に行くか");
+    await user.selectOptions(mode, "weekly");
+    expect(screen.getByLabelText("曜日")).toBeInTheDocument();
+    expect(screen.getByLabelText("時刻")).toHaveValue("03:00");
+    await user.click(screen.getByRole("button", { name: "既定に戻す" }));
+    expect(screen.getByText(/既定の宛先をすべて ON にし、追加の宛先を消します/)).toBeInTheDocument();
+  });
+
+  it("モデルの目録：状態と版を出し、新しい版は確かめてから入れ替える", async () => {
+    const { calls } = fakeApi({
+      "GET /api/admin/network": netView(), "GET /api/admin/models": MODELS,
+      "POST /api/admin/models/whisper-small/replace": job({ job_id: "r1", kind: "model-replace", status: "待ち" }),
+      "GET /api/jobs/r1": job({ job_id: "r1", kind: "model-replace", status: "完了" }),
+    });
+    const user = userEvent.setup();
+    render(<NetworkPage canEdit />);
+    const box = await screen.findByRole("region", { name: "モデルの目録" });
+    const rows = await within(box).findAllByRole("row");
+    expect(rows[1]).toHaveTextContent("536b0662742c");
+    expect(rows[1]).toHaveTextContent("一致");
+    expect(rows[2]).toHaveTextContent("登録していない");
+    await user.click(within(box).getByRole("button", { name: "whisper-small を入れ替える" }));
+    expect(calls.some((c) => c.path.endsWith("/replace"))).toBe(false);
+    expect(within(box).getByText(/入手元のハッシュと照らしてから入れ替えます。失敗したら今のモデルのままです/)).toBeInTheDocument();
+    await user.click(within(box).getByRole("button", { name: "はい、入れ替える" }));
+    expect(await within(box).findByText("入れ替えました（入手元のハッシュと照合済み）。")).toBeInTheDocument();
   });
 });

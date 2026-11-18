@@ -61,7 +61,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 
 Date = date   # 引数名 date（?date=...）に隠されないための別名
 from contextlib import asynccontextmanager, closing
@@ -77,13 +77,14 @@ from ..answer import ANSWERED, NO_PERMISSION, NOT_FOUND, Answer, answer_question
 from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
-from . import adminsettings, auth, desk, errors, files, kiosk, meetings, paperjobs
+from . import adminsettings, auth, desk, errors, files, kiosk, meetings, netsettings, paperjobs
 from .auth import User
 from .chat import ChatDB, HelpdeskSessions, ReceptionSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
 from ..paper.extract import OCRUnavailable
 from ..settingfiles import SettingError
 from .jobs import FINISHED, JobContext, JobFailed, JobQueue
+from ..netpolicy import NetworkBlocked
 from .. import identity
 from ..identity import load_policy
 from .roles import allowed, load_roles, permissions_of
@@ -98,7 +99,7 @@ log = logging.getLogger("yanua.api")
 # 逐次表示で画面に出す進み具合（answer_question の段階 → 画面の文言）
 # 監査ログに書くジョブの種類の名前
 JOB_NAMES = {"ingest": "文書の取り込み", "paper-plan": "仕分けの予定", "paper-convert": "PDF の変換", "meeting": "議事録",
-             "paper-rule-draft": "仕分けルールの下書き"}
+             "paper-rule-draft": "仕分けルールの下書き", "model-replace": "モデルの入れ替え"}
 
 
 def audit_bound(value: str | None, end: bool) -> str | None:
@@ -251,13 +252,16 @@ VISIT_CSV_COLUMNS = ("date", "time", "company", "visitor", "host_employee_no", "
 
 
 def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, summary_llm: ChatModel | None = None,
-               model_catalog=None) -> FastAPI:
+               model_catalog=None, model_downloader=None, clock=None, ollama_tags=None) -> FastAPI:
     """summary_llm は議事録の要約に使うモデル。渡さないとき、llm が Ollama なら settings.summary_model を同じ Ollama で使う。"""
     if summary_llm is None:
         summary_llm = OllamaChat(settings.summary_model, llm.base_url) if isinstance(llm, OllamaChat) else llm
     """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。
     model_catalog：設定の画面で選べるモデルの一覧を返す関数（テストでは偽のものを渡す）。既定は、目録（config/network.json）・
-    登録した digest（data/models/models.lock.json）・手元の Ollama の digest から作る（yanua/models.py の catalog）。"""
+    登録した digest（data/models/models.lock.json）・手元の Ollama の digest から作る（yanua/models.py の catalog）。
+    model_downloader：モデルの入れ替え（S-53）で使う入手の関数（テスト用。既定は Hugging Face のライブラリ）。
+    clock：今の時刻を返す関数（更新の確認の予定のテスト用）。
+    ollama_tags：手元の Ollama のモデル → digest を返す関数（テスト用。既定は手元の Ollama に聞く）。"""
     # 設定の画面（S-52）で保存した写しがあれば使う（起動の指定が勝つ項目は除く）。誤りのある写しは使わず既定で動く
     loaded, bad_settings = adminsettings.startup(settings)
     for key, found in bad_settings.items():
@@ -269,10 +273,10 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             summary_llm.name = settings.summary_model
     if model_catalog is None:
         def model_catalog() -> list[dict]:
-            from ..netpolicy import load_policy as load_network
-
-            base = llm.base_url if isinstance(llm, OllamaChat) else models.DEFAULT_OLLAMA_URL
-            return models.catalog(load_network(), settings.models_dir, models.ollama_tags(base))
+            policy = net_policy()
+            if policy is None:
+                raise models.ModelError(net_view()["error"])
+            return models.catalog(policy, settings.models_dir, local_tags())
     settings.check()
     roles = load_roles(settings.roles_path)
     # 本人確認の方針（画面で保存した写しがあれば写し）。誤りがあれば起動しない。設定の画面で保存すると入れ替わる
@@ -317,6 +321,38 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         auditor.record(f"ask.{screen}", actor=user.employee_no, actor_name=user.name,
                        target="、".join(src["doc_id"] for src in ans.sources), result=ASK_RESULTS.get(ans.reason, audit.OK),
                        detail=detail, body=question, ip=ip)
+
+    # ------------------------------------------------ 通信の設定（S-53。K-052）
+
+    def net_defaults() -> tuple[dict | None, str]:
+        return netsettings.load_defaults(settings.network_config)
+
+    def net_store():
+        defaults, _ = net_defaults()
+        return netsettings.store(settings, (defaults or {}).get("allowed_hosts", []), audit=audit_setting)
+
+    def net_state() -> dict:
+        try:
+            return netsettings.read_state(net_store())
+        except (OSError, ValueError, KeyError, AttributeError) as e:
+            # 写しを手で壊したときなど：既定の状態で動く（既定の宛先はすべて ON・追加なし・手動だけ）
+            log.error("通信の設定の状態を読めません（既定で動きます）：%s", e)
+            return netsettings.read_state_text(Path(settings.network_state_config).read_text(encoding="utf-8"))
+
+    def net_policy():
+        """動いている許可リスト（ON の宛先だけ）。network.json が読めなければ None（社外にはどこにも通信しない）。"""
+        defaults, _ = net_defaults()
+        return netsettings.effective(defaults, net_state())
+
+    def net_view() -> dict:
+        defaults, error = net_defaults()
+        return {**netsettings.view(defaults, net_state()), "error": error}
+
+    def local_tags() -> dict[str, str]:
+        if ollama_tags is not None:
+            return ollama_tags()
+        base = llm.base_url if isinstance(llm, OllamaChat) else models.DEFAULT_OLLAMA_URL
+        return models.ollama_tags(base)
 
     def audit_setting(action: str, by: str, result: str, detail: str) -> None:
         auditor.record(action, actor=by, target=action.rsplit(".", 1)[0], result=result, detail=detail)
@@ -376,7 +412,9 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         from ..meeting.transcribe import WhisperTranscriber
 
         try:
-            return WhisperTranscriber(models.verify(settings.whisper_model, settings.models_dir))
+            policy = net_policy()
+            pinned = (policy.models.get(settings.whisper_model, {}).get("revision") or None) if policy else None
+            return WhisperTranscriber(models.verify(settings.whisper_model, settings.models_dir, revision=pinned))
         except models.ModelError as e:
             # 社員の画面には連絡のお願いだけを出す。入手のコマンドと理由は、管理者がログで見る
             raise JobFailed("文字起こしのモデルが準備されていません。管理者に連絡してください",
@@ -479,6 +517,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             # 起動は止めない（ほかの機能は使える）。仕分け・変換の画面では「管理者に連絡してください」になる
             log.error("仕分けルール %s が読み込めません。直すところ：%s", path, "／".join(f"{w}: {m}" if w else m for w, m in problems))
         auditor.purge()      # 保存期間を過ぎた監査ログ（起動したときと、1日1回）
+        init_network()
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
         app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy_state["policy"],
@@ -505,9 +544,20 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 except Exception:  # noqa: BLE001  消せなかったものは次の回に
                     log.exception("期限切れのファイルを消せませんでした")
 
+        async def scheduled():
+            # 更新の確認の予定（毎日・毎週）。1分ごとに、決まった時刻を過ぎたかを見る
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await run_in_threadpool(run_scheduled_check)
+                except Exception:  # noqa: BLE001
+                    log.exception("更新の確認（予定）に失敗しました")
+
         sweeper = asyncio.create_task(sweep())
+        checker = asyncio.create_task(scheduled())
         yield
         sweeper.cancel()
+        checker.cancel()
         jobs.stop()
         chats.close()
 
@@ -1593,6 +1643,298 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return {"identified": ok, "matched": r.matched if ok else [],
                 "ask": [identity.LABELS[a] for a in r.ask] if not ok else [],
                 "question": r.question() if not ok and r.ask else "", "note": r.note}
+
+    # ------------------------------------------------ 通信とモデル（S-53。管理者だけ。K-052）
+
+    now = clock or (lambda: datetime.now().astimezone())
+    check_state = {"last": None, "started": now()}      # 予定の確認の、前に見に行った時刻（起動した時刻から数える）
+    CHECK_FILE = "network_check.json"
+
+    def init_network() -> None:
+        """初めて入れたとき（写しがないとき）：今の既定の宛先をすべて ON で覚える（あとで増えた既定は OFF で加わる）。"""
+        defaults, error = net_defaults()
+        if defaults is None:
+            log.error("通信の設定を読めません。社外には通信しません：%s", error)
+            return
+        st = netsettings.store(settings, defaults["allowed_hosts"])     # 監査ログは下で、システムとして1件残す
+        if st.saved.is_file():
+            return
+        st.save(netsettings.text_of(netsettings.first_state(defaults)), audit.SYSTEM, "初めての起動：既定の宛先をすべて ON にした")
+        auditor.record("network.init", actor=audit.SYSTEM, actor_name=audit.SYSTEM, kind=audit.SYSTEM, ip="",
+                       detail=f"初めての起動：既定の宛先をすべて ON にした（{'、'.join(defaults['allowed_hosts'])}）")
+
+    def last_check() -> dict | None:
+        p = settings.settings_dir / CHECK_FILE
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+        except (OSError, ValueError):
+            return None
+
+    def save_check(data: dict) -> None:
+        settings.settings_dir.mkdir(parents=True, exist_ok=True)
+        tmp = settings.settings_dir / f".{CHECK_FILE}.tmp"
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(settings.settings_dir / CHECK_FILE)
+
+    def run_check(actor: str, actor_name: str, kind: str) -> dict:
+        """更新の確認：ON の宛先だけを見に行く。新しい版があっても入れ替えない（知らせるだけ）。結果は監査ログに残す。"""
+        policy = net_policy()
+        results = []
+        for name, spec in (policy.models.items() if policy else []):
+            kind_m = models.kind_of(spec)
+            row = {"name": name, "kind": "ollama" if kind_m == models.OLLAMA else "whisper", "result": "skipped",
+                   "current": "", "latest": "", "message": ""}
+            if kind_m == models.OLLAMA:
+                host, url = "registry.ollama.ai", "https://registry.ollama.ai/"
+                lock = models.read_lock(settings.models_dir).get(name, {})
+                row["current"] = lock.get("digest", "")
+                if not policy.allows(url):
+                    row["message"] = "registry.ollama.ai を追加して ON にしたときだけ、入手元と照らします"
+                else:
+                    try:
+                        src = models.ollama_source_digest(name, policy)
+                        row["latest"] = src
+                        if not row["current"]:
+                            row.update(result="not_registered", message="登録されていません（models pull で登録してください）")
+                        elif src != row["current"]:
+                            row.update(result="differs", message="入手元と違います（手で ollama pull → models pull --update）")
+                        else:
+                            row.update(result="same", message="入手元と同じです")
+                    except Exception as e:  # noqa: BLE001
+                        row.update(result="error", message=f"見に行けませんでした（{e}）")
+            else:
+                host = "huggingface.co"
+                row["current"] = spec.get("revision", "")
+                if not policy.allows(f"https://{host}/"):
+                    row["message"] = f"{host} が OFF なので、見に行きませんでした"
+                else:
+                    try:
+                        latest = models.hf_latest(spec["repo"], policy)
+                        row["latest"] = latest
+                        if latest != row["current"]:
+                            row.update(result="new", message=f"新しい版があります（版 {latest[:12]}）。入れ替えるときは「入れ替える」を押してください")
+                        else:
+                            row.update(result="same", message="今の版が最新です")
+                    except Exception as e:  # noqa: BLE001
+                        row.update(result="error", message=f"見に行けませんでした（{e}）")
+            if row["result"] != "skipped":
+                auditor.record("network.check", actor=actor, actor_name=actor_name, kind=kind, target=name,
+                               result=audit.FAILED if row["result"] == "error" else audit.OK,
+                               detail=f"宛先 {host}：{row['message']}" + (f"（版 {row['latest'][:12]}）" if row["latest"] else ""))
+            results.append(row)
+        data = {"checked_at": now().isoformat(timespec="seconds"), "by": actor_name, "results": results}
+        save_check(data)
+        check_state["last"] = now()
+        return data
+
+    def run_scheduled_check() -> bool:
+        """予定の時刻を過ぎていたら見に行く（「しない」「手動だけ」なら、決して見に行かない）。見に行ったら True。"""
+        uc = net_state()["update_check"]
+        last = check_state["last"] or check_state["started"]
+        if not netsettings.due(uc, last, now()):
+            return False
+        run_check(audit.SYSTEM, audit.SYSTEM, audit.SYSTEM)
+        return True
+
+    app.state.run_scheduled_check = run_scheduled_check
+
+    def net_section() -> dict:
+        st = net_store()
+        state = net_state()
+        versions = st.history()
+        with closing(connect()) as db:
+            names = {no: ((hr.lookup(db, no) or {}).get("name") or no) for no in {v["saved_by"] for v in versions}}
+        return {**net_view(), "update_check": state["update_check"], "schedule": netsettings.schedule_text(state["update_check"]),
+                "modes": netsettings.MODES, "status": st.status(), "current": st.status()["current_version"],
+                "versions": [{**v, "saved_by_name": names.get(v["saved_by"], v["saved_by"])} for v in versions],
+                "last_check": last_check()}
+
+    def net_text(body: dict) -> tuple[str, dict, dict]:
+        defaults, error = net_defaults()
+        if defaults is None:
+            raise ApiError(409, "network_broken", f"通信の設定（config/network.json）が読めないので、変えられません：{error}")
+        old = net_state()
+        if not isinstance(body, dict):
+            body = {}
+        wrong = []
+        for host, v in (body.get("defaults") or {}).items():
+            if host not in defaults["allowed_hosts"]:
+                wrong.append({"where": f"defaults.{host}", "message": f"{host} は既定の宛先ではありません（足すときは、追加の宛先にしてください）"})
+            elif not isinstance(v, bool):
+                wrong.append({"where": f"defaults.{host}", "message": f"{host} は既定の宛先なので消せません。使わないときは OFF にしてください"})
+        if wrong:
+            raise ApiError(400, "invalid_setting", "設定に直すところがあります", wrong)
+        new = netsettings.from_screen(defaults, old, body)
+        text = netsettings.text_of(new)
+        found = netsettings.state_problems(text, defaults["allowed_hosts"])
+        if found:
+            raise ApiError(400, "invalid_setting", "設定に直すところがあります", [{"where": w, "message": m} for w, m in found])
+        return text, old, new
+
+    @app.get("/api/admin/network")
+    def network_get(user: User = Depends(require("network.view"))):
+        return net_section()
+
+    @app.post("/api/admin/network/validate")
+    def network_validate(req: SettingValues, user: User = Depends(require("network.edit"))):
+        net_text(req.values)
+        return {"ok": True}
+
+    @app.put("/api/admin/network")
+    def network_save(req: SettingValues, user: User = Depends(require("network.edit"))):
+        text, old, new = net_text(req.values)
+        changes = netsettings.describe_changes(net_defaults()[0], old, netsettings.read_state_text(text))
+        try:
+            version = net_store().save(text, user.employee_no, f"通信の設定を保存した（{changes}）")
+        except SettingError as e:
+            raise setting_error(e, 400, "invalid_setting", "設定に直すところがあります") from e
+        return {"version": version, **net_section()}
+
+    @app.post("/api/admin/network/history/{version}/restore")
+    def network_restore(version: int, user: User = Depends(require("network.edit"))):
+        st = net_store()
+        try:
+            note = netsettings.describe_changes(net_defaults()[0], net_state(), netsettings.read_state_text(st.get(version) or ""))
+        except (ValueError, KeyError, AttributeError):
+            note = ""
+        try:
+            new = st.restore(version, user.employee_no, note)
+        except KeyError as e:
+            raise not_found("設定の版") from e
+        except SettingError as e:
+            raise setting_error(e, 409, "invalid_version", "この版は、今の検証を通らないので戻せません") from e
+        return {"version": new, **net_section()}
+
+    @app.post("/api/admin/network/reset")
+    def network_reset(user: User = Depends(require("network.edit"))):
+        # 既定に戻す：既定の宛先をすべて ON、追加の宛先を消す、更新の確認は手動だけ（入れ替えた版も既定の版に戻る）
+        st = net_store()
+        defaults = net_defaults()[0]
+        note = netsettings.describe_changes(defaults, net_state(), netsettings.first_state(defaults)) if defaults and st.saved.is_file() else ""
+        try:
+            new = st.reset_to_default(user.employee_no, note)
+        except SettingError as e:
+            raise setting_error(e, 409, "invalid_default", "既定の設定が今の検証を通らないので、戻せません。管理者に連絡してください") from e
+        if new is None:
+            return {"version": None, "already_default": True, "message": "すでに既定です", **net_section()}
+        if defaults:
+            # 既定に戻したあとも「今の既定をすべて ON」で覚えておく（このあと増えた既定は OFF で加わる）
+            st.save(netsettings.text_of(netsettings.first_state(defaults)), user.employee_no, "既定に戻した：今の既定の宛先を覚えた")
+        return {"version": new, "already_default": False, **net_section()}
+
+    @app.post("/api/admin/network/check")
+    def network_check(user: User = Depends(require("network.edit"))):
+        if net_state()["update_check"]["mode"] == "none":
+            raise ApiError(409, "check_disabled", "更新の確認は「しない」になっています。見に行くときは、予定を「手動だけ」などに変えてください")
+        return run_check(user.employee_no, user.name, audit.EMPLOYEE)
+
+    def model_rows() -> dict:
+        policy = net_policy()
+        defaults, error = net_defaults()
+        catalog = (policy.models if policy else (defaults or {}).get("models", {}))
+        lock = models.read_lock(settings.models_dir)
+        verified = (last_check_file("models_verify.json") or {}).get("results", {})
+        latest = {r["name"]: r for r in (last_check() or {}).get("results", [])}
+        try:
+            tags, tags_error = local_tags(), ""
+        except Exception as e:  # noqa: BLE001
+            tags, tags_error = None, f"Ollama につながりません（{e}）"
+        rows = []
+        for name, spec in catalog.items():
+            entry = lock.get(name, {})
+            row = {"name": name, "use": spec.get("use", []), "latest": latest.get(name, {}).get("latest", ""),
+                   "check": latest.get(name, {}).get("result", ""), "check_message": latest.get(name, {}).get("message", "")}
+            if models.kind_of(spec) == models.OLLAMA:
+                row.update(kind="ollama", revision="", recorded=entry.get("digest", ""))
+                if tags is None:
+                    row.update(state="unknown", message=tags_error)
+                else:
+                    state, message = models.ollama_state(name, settings.models_dir, tags)
+                    row.update(state={"ok": "match", "changed": "differs"}.get(state, state), message=message)
+            else:
+                row.update(kind="whisper", revision=spec.get("revision", ""),
+                           recorded=(entry.get("files", {}).get("model.bin") or ""), files=len(entry.get("files", {})))
+                if not entry:
+                    row.update(state="not_registered", message=f"入手していません（python -m yanua models pull {name}）")
+                elif not (settings.models_dir / entry.get("path", name)).is_dir():
+                    row.update(state="not_installed", message="記録はありますが、ファイルがありません")
+                elif row["revision"] and entry.get("revision") != row["revision"]:
+                    row.update(state="differs", message=f"入手した版（{entry.get('revision', '')[:12]}）が、固定した版と違います")
+                else:
+                    v = verified.get(name)
+                    row.update(state=v["state"] if v else "unverified", message=v["message"] if v else "まだ照合していません（「照合する」）")
+                    if v:
+                        row["verified_at"] = v["at"]
+            rows.append(row)
+        return {"models": rows, "error": error}
+
+    def last_check_file(name: str) -> dict | None:
+        p = settings.settings_dir / name
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+        except (OSError, ValueError):
+            return None
+
+    @app.get("/api/admin/models")
+    def models_get(user: User = Depends(require("network.view"))):
+        return model_rows()
+
+    @app.post("/api/admin/models/verify")
+    def models_verify(user: User = Depends(require("network.edit"))):
+        """手元のファイル（whisper）と記録を照らす。通信しない。Ollama のモデルは、手元の Ollama の digest と照らす。"""
+        policy = net_policy()
+        defaults = net_defaults()[0] or {}
+        catalog = policy.models if policy else defaults.get("models", {})
+        results = {}
+        for name, spec in catalog.items():
+            if models.kind_of(spec) == models.OLLAMA:
+                continue                      # 一覧で、手元の Ollama の digest と毎回照らしている
+            try:
+                models.verify(name, settings.models_dir, revision=spec.get("revision") or None)
+                results[name] = {"state": "match", "message": "記録と一致しました", "at": now().isoformat(timespec="seconds")}
+            except models.ModelError as e:
+                if "入手していません" in str(e):
+                    continue
+                results[name] = {"state": "differs", "message": str(e), "at": now().isoformat(timespec="seconds")}
+            audit_by(user, "models.verify", target=name, result=audit.OK if results[name]["state"] == "match" else audit.FAILED,
+                     detail=results[name]["message"])
+        data = {"results": results}
+        settings.settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings.settings_dir / "models_verify.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return model_rows()
+
+    def model_replace_job(ctx: JobContext, params: dict) -> dict:
+        name, revision = params["name"], params["revision"]
+        policy = net_policy()
+        if policy is None:
+            raise JobFailed("通信の設定（config/network.json）が読めないので、入れ替えられません")
+        ctx.progress(10, "新しい版を入手しています")
+        try:
+            entry = models.replace(name, revision, policy, settings.models_dir, downloader=model_downloader)
+        except (models.ModelError, NetworkBlocked, ConnectionError) as e:
+            auditor.record("models.replace", actor=params["owner"], target=name, result=audit.FAILED,
+                           detail=f"版 {revision[:12]} に入れ替えられませんでした（元のモデルのまま）：{e}")
+            raise JobFailed(f"入れ替えられませんでした。元のモデルのままです（{e}）") from e
+        ctx.progress(80, "記録を更新しています")
+        st = net_store()
+        state = net_state()
+        old_rev = policy.models[name].get("revision", "")
+        state["revisions"][name] = revision
+        st.save(netsettings.text_of(state), params["owner"], f"{name} を版 {revision[:12]} に入れ替えた（前の版 {old_rev[:12]}）")
+        auditor.record("models.replace", actor=params["owner"], target=name,
+                       detail=f"版 {old_rev[:12]} → {revision[:12]} に入れ替えました（入手元のハッシュと照合済み、ファイル {len(entry['files'])} 件）")
+        ctx.progress(100, "完了")
+        return {"name": name, "revision": revision, "files": len(entry["files"])}
+
+    jobs.register("model-replace", model_replace_job)
+
+    @app.post("/api/admin/models/{name}/replace", status_code=202)
+    def models_replace(name: str, user: User = Depends(require("network.edit"))):
+        # 入れ替えは、管理者が押したときだけ。「更新の確認」で見つけた新しい版にする
+        row = next((r for r in (last_check() or {}).get("results", []) if r["name"] == name), None)
+        if not row or row.get("result") != "new" or row.get("kind") != "whisper":
+            raise ApiError(409, "no_new_version", "入れ替える新しい版がありません。先に「更新の確認」をしてください")
+        return jobs.submit("model-replace", user.employee_no, {"owner": user.employee_no, "name": name, "revision": row["latest"]})
 
     # ------------------------------------------------ 監査ログ（S-55。管理者だけ）
 
