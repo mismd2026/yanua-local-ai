@@ -20,20 +20,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_api import H, FakeLLM, login  # noqa: E402
 from test_api import settings as base_settings  # noqa: E402,F401  （fixture を使う）
 
-from yanua import identity  # noqa: E402
+from yanua import identity, models  # noqa: E402
 from yanua.api import Settings, adminsettings, create_app  # noqa: E402
+from yanua.netpolicy import Policy  # noqa: E402
 
 ADMIN, GA, EMP = "10005", "10002", "10004"
-INSTALLED = ["llama3.2:3b", "qwen2.5:3b-instruct", "qwen2.5:7b"]
+# 目録（config/network.json の models にあたるもの）と、手元の Ollama に入っているもの（名前 → digest）
+CATALOG = {
+    "whisper-small": {"repo": "Systran/faster-whisper-small", "revision": ""},
+    "qwen2.5:3b-instruct": {"kind": "ollama", "use": ["chat", "summary"]},
+    "qwen2.5:7b": {"kind": "ollama", "use": ["chat", "summary"]},
+    "llama3.2:3b": {"kind": "ollama", "use": ["chat"]},              # 目録にあるが、Ollama に入っていない
+    "gemma2:2b": {"kind": "ollama", "use": ["chat", "summary"]},     # 入っているが、まだ登録していない
+    "mistral:7b": {"kind": "ollama", "use": ["chat", "summary"]},    # 登録したあとに入れ替わった
+    "nomic-embed-text": {"kind": "ollama", "use": ["embedding"]},   # 埋め込み用
+}
+TAGS = {"qwen2.5:3b-instruct": "a" * 64, "qwen2.5:7b": "b" * 64, "gemma2:2b": "c" * 64, "mistral:7b": "d" * 64,
+        "nomic-embed-text:latest": "e" * 64, "complaint-agent:latest": "f" * 64}   # complaint-agent は目録にない
 
 
 @pytest.fixture
-def settings(base_settings):
+def settings(base_settings, tmp_path):
+    base_settings.models_dir = tmp_path / "models"
+    for name in ("qwen2.5:3b-instruct", "qwen2.5:7b", "mistral:7b", "nomic-embed-text"):
+        tags = dict(TAGS, **{"mistral:7b": "0" * 64}) if name == "mistral:7b" else TAGS
+        models.register_ollama(name, base_settings.models_dir, tags)
     return base_settings
 
 
-def make(settings, lister=lambda: INSTALLED):
-    return TestClient(create_app(settings, FakeLLM(), model_lister=lister))
+def catalog_of(settings):
+    return lambda: models.catalog(Policy([], CATALOG), settings.models_dir, TAGS)
+
+
+def make(settings, catalog=None):
+    return TestClient(create_app(settings, FakeLLM(), model_catalog=catalog or catalog_of(settings)))
 
 
 @pytest.fixture
@@ -198,23 +218,68 @@ def test_audit_body_flag_wins_over_the_screen(settings):
         assert r.status_code == 200 and settings.audit_keep_days == 30 and settings.audit_keep_body is True
 
 
-def test_models_only_installed_ones(client, settings):
+def test_models_only_from_the_catalog_and_usable(client, settings):
     meta = section(client, "models")["meta"]
-    assert meta["installed"] == INSTALLED and meta["error"] == ""
-    assert "手元に入っていません" in where(put(client, "models", {"chat": "nosuch:1b", "summary": "qwen2.5:7b"}))["chat"]
-    r = put(client, "models", {"chat": "llama3.2:3b", "summary": "qwen2.5:7b"})
-    assert r.status_code == 200 and settings.chat_model == "llama3.2:3b"
-    assert client.get("/health").json()["model"] == "llama3.2:3b"           # 再起動しなくても、次の回答から使う
+    by = {m["name"]: m for m in meta["catalog"]}
+    # Ollama に入っていても、目録にないもの（complaint-agent）は出さない。whisper（Ollama でない）も出さない
+    assert set(by) == {"qwen2.5:3b-instruct", "qwen2.5:7b", "llama3.2:3b", "gemma2:2b", "mistral:7b", "nomic-embed-text"}
+    assert by["qwen2.5:7b"]["state"] == "ok" and by["qwen2.5:7b"]["message"] == ""
+    assert by["llama3.2:3b"]["state"] == "not_installed" and "入っていません" in by["llama3.2:3b"]["message"]
+    assert by["gemma2:2b"]["state"] == "not_registered" and "models pull gemma2:2b" in by["gemma2:2b"]["message"]
+    assert by["mistral:7b"]["state"] == "changed" and "--update" in by["mistral:7b"]["message"]
+    assert by["nomic-embed-text"]["use"] == ["embedding"]
+
+    def bad(chat, summary="qwen2.5:7b"):
+        return where(put(client, "models", {"chat": chat, "summary": summary}))
+
+    assert "目録にありません" in bad("complaint-agent")["chat"]          # API でも断る
+    assert "入っていません" in bad("llama3.2:3b")["chat"]
+    assert "登録されていません" in bad("gemma2:2b")["chat"]
+    assert "登録した digest と違います" in bad("mistral:7b")["chat"]
+    assert "チャットには使えません" in bad("nomic-embed-text")["chat"]     # 埋め込み用は使えない
+    assert "議事録の要約には使えません" in bad("qwen2.5:7b", "llama3.2:3b")["summary"]
+    assert not (settings.settings_dir / "models.json").exists()
+    r = put(client, "models", {"chat": "qwen2.5:7b", "summary": "qwen2.5:7b"})
+    assert r.status_code == 200 and settings.chat_model == "qwen2.5:7b"
+    assert client.get("/health").json()["model"] == "qwen2.5:7b"           # 再起動しなくても、次の回答から使う
 
 
 def test_models_cannot_be_saved_when_ollama_does_not_answer(settings):
     def down():
         raise ConnectionError("つながりません")
 
-    with make(settings, lister=down) as c:
+    with make(settings, catalog=down) as c:
         login(c, ADMIN)
         assert "問い合わせられません" in section(c, "models")["meta"]["error"]
         assert "Ollama" in where(put(c, "models", {"chat": "qwen2.5:3b-instruct", "summary": "qwen2.5:7b"}))[""]
+
+
+def test_register_and_verify_ollama_models_without_network(tmp_path):
+    """models pull は、Ollama のモデルなら手元の digest を登録するだけ（社外に通信しない）。verify は登録との一致を確かめる。"""
+    policy = Policy([], CATALOG)       # 許可リストが空でも登録できる（通信しないため）
+    entry = models.pull("qwen2.5:7b", policy, tmp_path, tags=TAGS)
+    assert entry["kind"] == "ollama" and entry["digest"] == "b" * 64
+    assert models.verify_ollama("qwen2.5:7b", tmp_path, tags=TAGS) == "b" * 64
+    with pytest.raises(models.ModelError, match="登録した digest と違います"):
+        models.verify_ollama("qwen2.5:7b", tmp_path, tags={**TAGS, "qwen2.5:7b": "9" * 64})
+    with pytest.raises(models.ModelError, match="--update"):
+        models.pull("qwen2.5:7b", policy, tmp_path, tags={**TAGS, "qwen2.5:7b": "9" * 64})
+    assert models.pull("qwen2.5:7b", policy, tmp_path, update=True, tags={**TAGS, "qwen2.5:7b": "9" * 64})["digest"] == "9" * 64
+    with pytest.raises(models.ModelError, match="ollama pull llama3.2:3b"):
+        models.pull("llama3.2:3b", policy, tmp_path, tags=TAGS)
+    with pytest.raises(models.ModelError, match="目録|models にありません"):
+        models.pull("complaint-agent", policy, tmp_path, tags=TAGS)
+    assert models.pull("nomic-embed-text", policy, tmp_path, tags=TAGS)["digest"] == "e" * 64   # 「:latest」を省いた名前
+
+
+def test_repo_catalog_lists_the_default_models():
+    """リポジトリの目録に、既定のチャット・要約のモデルが用途つきで入っている。許可リストは変えていない。"""
+    net = json.loads((ROOT / "config" / "network.json").read_text(encoding="utf-8"))
+    assert net["allowed_hosts"] == ["huggingface.co", "*.huggingface.co", "*.hf.co"]
+    s = Settings()
+    for name in (s.chat_model, s.summary_model):
+        assert net["models"][name]["kind"] == "ollama"
+    assert "chat" in net["models"][s.chat_model]["use"] and "summary" in net["models"][s.summary_model]["use"]
 
 
 def test_files_units_limits_history_restore_and_reset(client, settings):

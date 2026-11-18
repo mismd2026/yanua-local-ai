@@ -347,16 +347,29 @@ function AuditEditor({ data, values, set, Err, Pinned, disabled }: EditorProps &
 }
 
 function ModelsEditor({ data, values, set, Err, Pinned, disabled }: EditorProps & { Pinned: (p: { at: string }) => ReactNode | null }) {
-  const installed = data.meta.installed ?? [];
-  const field = (k: string, label: string) => {
+  const catalog = data.meta.catalog ?? [];
+  const field = (k: "chat" | "summary", label: string) => {
     const v = String(values[k] ?? "");
+    // 選び肢は、目録にあってこの用途のモデルだけ（埋め込み用などは出さない）。使えないものは理由をつけて選ばせない
+    const usable = catalog.filter((m) => m.use.includes(k));
+    const known = usable.some((m) => m.name === v);
+    const blocked = usable.filter((m) => m.state !== "ok");
     return (
       <div className="form-row">
         <label htmlFor={`m-${k}`}>{label}</label>
-        <select id={`m-${k}`} value={v} onChange={(e) => set(k, e.target.value)} disabled={disabled || !!data.pinned[k] || installed.length === 0}>
-          {!installed.includes(v) && <option value={v}>{v}（手元に入っていません）</option>}
-          {installed.map((m) => <option key={m} value={m}>{m}</option>)}
+        <select id={`m-${k}`} value={v} onChange={(e) => set(k, e.target.value)} disabled={disabled || !!data.pinned[k] || usable.length === 0}>
+          {!known && <option value={v} disabled>{v}（Yanua の目録にありません）</option>}
+          {usable.map((m) => (
+            <option key={m.name} value={m.name} disabled={m.state !== "ok"}>
+              {m.name}{m.state === "ok" ? "" : `（${m.state === "not_installed" ? "入っていません" : m.state === "not_registered" ? "登録されていません" : "登録と違います"}）`}
+            </option>
+          ))}
         </select>
+        {blocked.length > 0 && (
+          <ul className="small muted">
+            {blocked.map((m) => <li key={m.name}>{m.name}：{m.message}</li>)}
+          </ul>
+        )}
         <Pinned at={k} />
         <Err at={k} />
       </div>
@@ -369,7 +382,10 @@ function ModelsEditor({ data, values, set, Err, Pinned, disabled }: EditorProps 
         {field("chat", "チャット・ヘルプデスク・受付のモデル")}
         {field("summary", "議事録の要約のモデル")}
       </div>
-      <p className="small muted">選べるのは、手元の Ollama に入っているモデルだけです。新しいモデルの入手は「通信とモデル」（S-53）で行います。</p>
+      <p className="small muted">
+        選べるのは、Yanua の目録（config/network.json）にあり、<code>python -m yanua models pull</code> で登録した digest と、手元の Ollama の digest が同じモデルだけです。
+        Ollama に入っていても、目録にないモデルは出しません。
+      </p>
     </>
   );
 }

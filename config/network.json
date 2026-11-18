@@ -1,5 +1,5 @@
 {
-  "_説明": "Yanua が通信してよい相手（許可リスト）。ここにない宛先には通信しない。通信するのは models pull などの明示したコマンドのときだけ。会社のファイアウォール・プロキシでも、同じ宛先だけを許可すること。",
+  "_説明": "Yanua が通信してよい相手（許可リスト）。ここにない宛先には通信しない。通信するのは models pull などの明示したコマンドのときだけ。models の kind が ollama のものは Ollama のモデル（入手は ollama pull。models pull は手元の digest を登録するだけで、社外に通信しない）。use は用途（chat・summary・embedding）。会社のファイアウォール・プロキシでも、同じ宛先だけを許可すること。",
   "allowed_hosts": [
     "huggingface.co",
     "*.huggingface.co",
@@ -7,6 +7,8 @@
   ],
   "models": {
     "whisper-small": {"repo": "Systran/faster-whisper-small", "revision": ""},
-    "whisper-medium": {"repo": "Systran/faster-whisper-medium", "revision": ""}
+    "whisper-medium": {"repo": "Systran/faster-whisper-medium", "revision": ""},
+    "qwen2.5:3b-instruct": {"kind": "ollama", "use": ["chat", "summary"]},
+    "qwen2.5:7b": {"kind": "ollama", "use": ["chat", "summary"]}
   }
 }

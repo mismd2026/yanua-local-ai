@@ -456,7 +456,8 @@ export interface SettingDetail extends SettingSection {
   meta: {
     presets?: Record<string, { description: string; question: string; clues: string[]; confirm: string[][] }>;
     clues?: Record<string, string>;
-    installed?: string[];
+    // 目録（config/network.json）にある Ollama のモデル。state が ok のものだけ選べる。message は使えない理由
+    catalog?: { name: string; use: string[]; state: "ok" | "not_installed" | "not_registered" | "changed"; message: string }[];
     error?: string;
     limits?: Record<string, { min: number; max: number; unit: string }>;
   };

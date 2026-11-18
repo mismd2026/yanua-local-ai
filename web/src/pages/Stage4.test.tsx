@@ -119,7 +119,12 @@ const detail = (key: string, values: object, over: object = {}) => ({
   meta: {
     identity: { presets: PRESETS, clues: { employee_no: "従業員番号", name: "名前", dept: "部署" } },
     audit: { limits: { keep_days: { min: 1, max: 3650, unit: "日" } } },
-    models: { installed: ["llama3.2:3b", "qwen2.5:3b-instruct", "qwen2.5:7b"], error: "" },
+    models: { error: "", catalog: [
+      { name: "qwen2.5:3b-instruct", use: ["chat", "summary"], state: "ok", message: "" },
+      { name: "qwen2.5:7b", use: ["chat", "summary"], state: "ok", message: "" },
+      { name: "llama3.2:3b", use: ["chat"], state: "not_installed", message: "入っていません（ollama pull llama3.2:3b で入手し、models pull llama3.2:3b で登録してください）" },
+      { name: "nomic-embed-text", use: ["embedding"], state: "ok", message: "" },
+    ] },
     files: { limits: { work_max_gb: { min: 1, max: 10000, unit: "GB" }, file_keep_hours: { min: 1, max: 720, unit: "時間" } } },
   }[key],
   ...over,
@@ -231,7 +236,7 @@ describe("S-52 設定", () => {
     expect(calls.some((c) => c.method === "PUT")).toBe(false);
   });
 
-  it("モデルは入っているものだけを選べ、版に戻すは確かめてから", async () => {
+  it("モデルは目録にあり使えるものだけを選べ、版に戻すは確かめてから", async () => {
     fakeApi({
       ...settingRoutes({ models: detail("models", { chat: "qwen2.5:3b-instruct", summary: "qwen2.5:7b" }, { status: status("saved"), current: 2,
         versions: [{ version: 2, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "10005", saved_by_name: "田中 健", action: "モデルを保存した" },
@@ -242,7 +247,13 @@ describe("S-52 設定", () => {
     render(<SettingsPage canEdit />);
     const box = await screen.findByRole("region", { name: "モデル" });
     const chat = await within(box).findByLabelText("チャット・ヘルプデスク・受付のモデル");
-    expect(within(chat).getAllByRole("option").map((o) => o.textContent)).toEqual(["llama3.2:3b", "qwen2.5:3b-instruct", "qwen2.5:7b"]);
+    // 目録にあってチャットに使えるものだけ（埋め込み用は出さない）。入っていないものは理由つきで選ばせない
+    const options = within(chat).getAllByRole("option") as HTMLOptionElement[];
+    expect(options.map((o) => o.textContent)).toEqual(["qwen2.5:3b-instruct", "qwen2.5:7b", "llama3.2:3b（入っていません）"]);
+    expect(options.map((o) => o.disabled)).toEqual([false, false, true]);
+    expect(within(box).getByText(/llama3.2:3b：入っていません（ollama pull llama3.2:3b で入手し/)).toBeInTheDocument();
+    const summary = within(box).getByLabelText("議事録の要約のモデル");
+    expect(within(summary).getAllByRole("option").map((o) => o.textContent)).toEqual(["qwen2.5:3b-instruct", "qwen2.5:7b"]);
     await user.click(within(box).getByRole("button", { name: "モデルを版 1 に戻す" }));
     expect(within(box).getByText("今の設定を、版 1 の中身にします。")).toBeInTheDocument();
     await user.click(within(box).getByRole("button", { name: "はい、戻す" }));

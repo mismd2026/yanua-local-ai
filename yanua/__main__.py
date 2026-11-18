@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("name", nargs="?", default="whisper-small")
     s.add_argument("--update", action="store_true", help="記録した版ではなく、いまの版を入手する")
     s.add_argument("--models-dir", type=Path, default=Path("data/models"))
+    s.add_argument("--ollama", default=DEFAULT_OLLAMA_URL, help="手元の Ollama の URL（Ollama のモデルの digest を見る）")
 
     s = sub.add_parser("meeting", help="会議の録画・録音から議事録を作る（文字起こし・話し手・要約）")
     s.add_argument("media", type=Path, help="録画（mp4 など）か録音（wav / m4a / mp3 など）")
@@ -509,12 +510,23 @@ def _models(args) -> int:
             lock = models.read_lock(args.models_dir)
             for name, spec in policy.models.items():
                 got = lock.get(name)
+                if models.kind_of(spec) == models.OLLAMA:
+                    use = "・".join(spec.get("use", []))
+                    print(f"{name}：Ollama（用途 {use}）　" + (f"登録済み（digest {got['digest'][:12]}、{got['registered_at']}）" if got else "未登録"))
+                    continue
                 print(f"{name}：{spec['repo']}　" + (f"入手済み（版 {got['revision'][:12]}、{got['pulled_at']}）" if got else "未入手"))
             print(f"通信してよい宛先：{'、'.join(policy.allowed_hosts)}（config/network.json）")
             return 0
         if args.action == "pull":
-            entry = models.pull(args.name, policy, args.models_dir, update=args.update)
-            print(f"{args.name} を入手しました（版 {entry['revision'][:12]}、ファイル {len(entry['files'])} 件を記録）。")
+            entry = models.pull(args.name, policy, args.models_dir, update=args.update, ollama_url=args.ollama)
+            if entry.get("kind") == models.OLLAMA:
+                print(f"{args.name} を登録しました（手元の Ollama の digest {entry['digest'][:12]}）。社外には通信していません。")
+            else:
+                print(f"{args.name} を入手しました（版 {entry['revision'][:12]}、ファイル {len(entry['files'])} 件を記録）。")
+            return 0
+        if models.kind_of(policy.models.get(args.name, {})) == models.OLLAMA:
+            digest = models.verify_ollama(args.name, args.models_dir, ollama_url=args.ollama)
+            print(f"{args.name}：登録した digest と一致しました（{digest[:12]}）。")
             return 0
         path = models.verify(args.name, args.models_dir)
         print(f"{args.name}：記録と一致しました（{path}）。")

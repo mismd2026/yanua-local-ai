@@ -4,6 +4,8 @@
     identity  本人確認の方針       既定 config/identity.json  → 写し data/settings/identity.json
     audit     監査ログ             既定 config/audit.json     → 写し data/settings/audit.json
     models    使うモデル           既定 config/models.json    → 写し data/settings/models.json
+              選べるのは、Yanua の目録（config/network.json の models）にある Ollama のモデルで、
+              その用途（use）があり、models pull で登録した digest と手元の Ollama の digest が同じものだけ
     files     作業用フォルダ       既定 config/files.json     → 写し data/settings/files.json
 
 決まり：
@@ -77,13 +79,12 @@ def _number(data: dict, key: str, where: str, integer: bool) -> list[tuple[str, 
     return []
 
 
-def has_model(installed: list[str], name: str) -> bool:
-    wanted = name if ":" in name else f"{name}:latest"
-    return wanted in installed or name in installed
+USES = {"chat": "チャット", "summary": "議事録の要約"}
+Catalog = Callable[[], list[dict]]   # [{name, use, state, message}]（yanua/models.py の catalog）
 
 
-def problems(key: str, text: str, installed: Callable[[], list[str]] | None = None) -> list[tuple[str, str]]:
-    """読み込みと同じ検証。installed を渡すと、モデルが手元に入っているかも確かめる（保存・戻すとき）。"""
+def problems(key: str, text: str, catalog: Catalog | None = None) -> list[tuple[str, str]]:
+    """読み込みと同じ検証。catalog を渡すと、モデルが目録にあり、その用途で、使える状態かも確かめる（保存・戻すとき）。"""
     data, out = _json_problems(text)
     if data is None:
         return out
@@ -108,14 +109,19 @@ def problems(key: str, text: str, installed: Callable[[], list[str]] | None = No
         for k in ("chat", "summary"):
             if not isinstance(data[k], str) or not data[k].strip():
                 out.append((k, "モデルの名前を選んでください"))
-        if not out and installed is not None:
+        if not out and catalog is not None:
             try:
-                names = installed()
+                entries = {e["name"]: e for e in catalog()}
             except Exception as e:  # noqa: BLE001  Ollama に聞けないときは保存しない（入っているか確かめられないため）
                 return [("", f"Ollama に、入っているモデルを問い合わせられません（{e}）。Ollama が動いているか確かめてください")]
             for k in ("chat", "summary"):
-                if not has_model(names, data[k]):
-                    out.append((k, f"{data[k]} は手元に入っていません（入っているもの：{'・'.join(names) or 'なし'}）"))
+                e = entries.get(data[k])
+                if not e:
+                    out.append((k, f"{data[k]} は Yanua の目録にありません（config/network.json の models に載せたモデルだけを選べます）"))
+                elif k not in e["use"]:
+                    out.append((k, f"{data[k]} は{USES[k]}には使えません（用途：{'・'.join(e['use']) or 'なし'}）"))
+                elif e["state"] != "ok":
+                    out.append((k, f"{data[k]} は使えません：{e['message']}"))
     return out
 
 
@@ -134,9 +140,9 @@ def text_of(key: str, values: dict) -> str:
     return json.dumps({"_説明": COMMENTS[key], **values}, ensure_ascii=False, indent=2) + "\n"
 
 
-def store(settings, key: str, audit=None, installed: Callable[[], list[str]] | None = None) -> SettingFile:
+def store(settings, key: str, audit=None, catalog: Catalog | None = None) -> SettingFile:
     return SettingFile(f"{key}.json", default_path(settings, key), settings.settings_dir,
-                       lambda text: problems(key, text, installed), audit=audit, audit_action=f"settings.{key}")
+                       lambda text: problems(key, text, catalog), audit=audit, audit_action=f"settings.{key}")
 
 
 def pinned_fields(settings, key: str) -> dict[str, str]:
@@ -200,7 +206,7 @@ def identity_path(settings) -> Path:
     return store(settings, "identity").path()
 
 
-def check_text(key: str, text: str, installed=None) -> None:
-    found = problems(key, text, installed)
+def check_text(key: str, text: str, catalog=None) -> None:
+    found = problems(key, text, catalog)
     if found:
         raise SettingError("設定に直すところがあります", found)

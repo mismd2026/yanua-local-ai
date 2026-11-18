@@ -117,7 +117,7 @@
 |---|---|---|---|
 | `identity` | 本人確認の方針（既定 `config/identity.json`）：型・最初の聞き方・使う手がかり・確定する組み合わせ・姓だけを数えるか・聞き返しの上限 | `identity.policy_problems`（項目ごとに全部）。誤りがあると起動しない決まりはそのまま（画面からは検証を通ったものしか保存できない） | — |
 | `audit` | 監査ログ（既定 `config/audit.json`）：保存期間（1〜3650日）・質問の本文を残すか（on にするときは画面の中で確かめる） | 範囲・型 | `--audit-keep-days`・`--audit-body` |
-| `models` | モデル（既定 `config/models.json`）：チャット（`chat`）・議事録の要約（`summary`） | 手元の Ollama に入っているか（問い合わせられないときは保存しない） | `--model`・`--summary-model` |
+| `models` | モデル（既定 `config/models.json`）：チャット（`chat`）・議事録の要約（`summary`） | 目録（`config/network.json` の models、`kind: ollama`）にあり、その用途（`use`）で、登録した digest と手元の Ollama の digest が同じか（目録にないもの・埋め込み用・入っていない・登録していない・digest が違うものは断る。Ollama に問い合わせられないときは保存しない） | `--model`・`--summary-model` |
 | `files` | 作業用フォルダ（既定 `config/files.json`）：合計の上限（1〜10000GB）・ファイルを消すまでの時間（1〜720時間） | 範囲・単位 | — |
 
 これから足す予定のもの（前の計画）：

@@ -74,7 +74,7 @@ from pydantic import BaseModel, Field
 
 from .. import audit, hr, models, visits
 from ..answer import ANSWERED, NO_PERMISSION, NOT_FOUND, Answer, answer_question
-from ..llm import ChatModel, LLMError, OllamaChat, installed_models
+from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
 from . import adminsettings, auth, desk, errors, files, kiosk, meetings, paperjobs
@@ -251,12 +251,13 @@ VISIT_CSV_COLUMNS = ("date", "time", "company", "visitor", "host_employee_no", "
 
 
 def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, summary_llm: ChatModel | None = None,
-               model_lister=None) -> FastAPI:
+               model_catalog=None) -> FastAPI:
     """summary_llm は議事録の要約に使うモデル。渡さないとき、llm が Ollama なら settings.summary_model を同じ Ollama で使う。"""
     if summary_llm is None:
         summary_llm = OllamaChat(settings.summary_model, llm.base_url) if isinstance(llm, OllamaChat) else llm
     """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。
-    model_lister：手元に入っているモデルの名前の一覧を返す関数（設定の画面）。既定は Ollama に問い合わせる。"""
+    model_catalog：設定の画面で選べるモデルの一覧を返す関数（テストでは偽のものを渡す）。既定は、目録（config/network.json）・
+    登録した digest（data/models/models.lock.json）・手元の Ollama の digest から作る（yanua/models.py の catalog）。"""
     # 設定の画面（S-52）で保存した写しがあれば使う（起動の指定が勝つ項目は除く）。誤りのある写しは使わず既定で動く
     loaded, bad_settings = adminsettings.startup(settings)
     for key, found in bad_settings.items():
@@ -266,9 +267,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         llm.name = settings.chat_model
         if summary_llm is not llm:
             summary_llm.name = settings.summary_model
-    if model_lister is None:
-        model_lister = (lambda: installed_models(llm.base_url)) if isinstance(llm, OllamaChat) \
-            else (lambda: sorted({llm.name, summary_llm.name}))
+    if model_catalog is None:
+        def model_catalog() -> list[dict]:
+            from ..netpolicy import load_policy as load_network
+
+            base = llm.base_url if isinstance(llm, OllamaChat) else models.DEFAULT_OLLAMA_URL
+            return models.catalog(load_network(), settings.models_dir, models.ollama_tags(base))
     settings.check()
     roles = load_roles(settings.roles_path)
     # 本人確認の方針（画面で保存した写しがあれば写し）。誤りがあれば起動しない。設定の画面で保存すると入れ替わる
@@ -1437,7 +1441,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def setting_store(key: str):
         if key not in adminsettings.SECTIONS:
             raise not_found("設定")
-        return adminsettings.store(settings, key, audit=audit_setting, installed=model_lister)
+        return adminsettings.store(settings, key, audit=audit_setting, catalog=model_catalog)
 
     def setting_section(key: str) -> dict:
         st = setting_store(key)
@@ -1465,10 +1469,11 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                                        "confirm": p["confirm"]} for name, p in identity.PRESETS.items()},
                     "clues": identity.MATCH_LABELS}
         if key == "models":
+            # 目録にあるモデルだけ（Ollama に入っていても、目録にないものは出さない）。使えないものは理由つき
             try:
-                return {"installed": model_lister(), "error": ""}
+                return {"catalog": model_catalog(), "error": ""}
             except Exception as e:  # noqa: BLE001
-                return {"installed": [], "error": f"Ollama に、入っているモデルを問い合わせられません（{e}）"}
+                return {"catalog": [], "error": f"Ollama に、入っているモデルを問い合わせられません（{e}）"}
         if key in ("audit", "files"):
             return {"limits": {k.split(".", 1)[1]: {"min": lo, "max": hi, "unit": u}
                                for k, (lo, hi, u) in adminsettings.LIMITS.items() if k.startswith(f"{key}.")}}
@@ -1502,7 +1507,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             if locked:
                 raise ApiError(400, "invalid_setting", "設定に直すところがあります", locked)
         text = adminsettings.text_of(key, values)
-        found = adminsettings.problems(key, text, model_lister)
+        found = adminsettings.problems(key, text, model_catalog)
         if found:
             raise ApiError(400, "invalid_setting", "設定に直すところがあります", [{"where": w, "message": m} for w, m in found])
         return text
