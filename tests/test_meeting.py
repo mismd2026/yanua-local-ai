@@ -145,17 +145,28 @@ def test_pull_is_refused_for_unknown_model_or_blocked_host(tmp_path):
         models.verify("whisper-small", tmp_path)
 
 
-def test_locked_revision_is_reused(tmp_path):
-    policy = Policy(["huggingface.co"], {"m": {"repo": "a/b", "revision": ""}})
-    models.write_lock(tmp_path, {"m": {"repo": "a/b", "revision": "first", "path": "m", "files": {}}})
-    seen = {}
+def test_unpinned_model_is_not_pulled_and_verify_checks_the_revision(tmp_path):
+    """K-052：版（revision）が空のモデルは入手しない。verify は、記録した版が固定した版と同じかと、ハッシュの両方を確かめる。"""
+    called = []
+    with pytest.raises(models.ModelError, match="版が固定されていません"):
+        models.pull("m", Policy(["huggingface.co"], {"m": {"repo": "a/b", "revision": ""}}), tmp_path,
+                    downloader=lambda **kw: called.append(kw))
+    assert called == []                                   # 通信する前に止まる
+    pinned = "a" * 40
+    policy = Policy(["huggingface.co"], {"m": {"repo": "a/b", "revision": pinned}})
+    models.pull("m", policy, tmp_path, downloader=fake_downloader())
+    assert models.verify("m", tmp_path, revision=pinned) == tmp_path / "m"
+    with pytest.raises(models.ModelError, match="固定した版"):
+        models.verify("m", tmp_path, revision="b" * 40)
 
-    def download(repo_id, revision, local_dir):
-        seen["revision"] = revision
-        fake_downloader()(repo_id, revision, local_dir)
 
-    models.pull("m", policy, tmp_path, downloader=download)
-    assert seen["revision"] == "first"   # 記録した版を使う（勝手に新しい版にしない）
+def test_repo_pins_whisper_revisions():
+    """リポジトリの目録の whisper は、コミットのハッシュで版を固定している（whisper-small は手元のファイルと入手元で照らした版）。"""
+    import json
+
+    spec = json.loads((ROOT / "config" / "network.json").read_text(encoding="utf-8"))["models"]
+    assert spec["whisper-small"]["revision"] == "536b0662742c02347bc0e980a01041f333bce120"
+    assert len(spec["whisper-medium"]["revision"]) == 40
 
 
 # ---------------------------------------------------------------- 文字起こしのヒント

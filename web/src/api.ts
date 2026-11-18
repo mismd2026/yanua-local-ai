@@ -470,3 +470,26 @@ export interface SettingsOverview {
   pending_restart: SettingKey[];
   links: { label: string; path: string; note: string }[];
 }
+
+// 通信とモデル（S-53。K-052）
+export interface NetHost { host: string; kind: "default" | "added"; purpose: string; new: boolean; on: boolean }
+export interface UpdateCheck { mode: "none" | "manual" | "daily" | "weekly"; time: string; weekday: number }
+export interface CheckResult { name: string; kind: string; result: string; current: string; latest: string; message: string }
+export interface NetworkView {
+  hosts: NetHost[];
+  new_defaults: { host: string; purpose: string }[];
+  removed_defaults: string[];
+  error: string;
+  update_check: UpdateCheck;
+  schedule: string;
+  modes: Record<string, string>;
+  status: SettingStatus;
+  current: number | null;
+  versions: RuleVersion[];
+  last_check: { checked_at: string; by: string; results: CheckResult[] } | null;
+}
+export interface ModelRow {
+  name: string; kind: "whisper" | "ollama"; use: string[]; revision: string; recorded: string; files?: number;
+  state: "match" | "differs" | "not_installed" | "not_registered" | "unverified" | "unknown"; message: string;
+  latest: string; check: string; check_message: string; verified_at?: string;
+}

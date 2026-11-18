@@ -88,6 +88,13 @@ export const MENU: MenuItem[] = [
     needs: ["settings.view"],
   },
   {
+    id: "S-53",
+    path: "/admin/network",
+    label: "通信とモデル",
+    description: "Yanua が社外に通信してよい宛先と、いつ更新を確かめるか、モデルの版と照合の状態を確かめて変えられます。",
+    needs: ["network.view"],
+  },
+  {
     id: "S-55",
     path: "/admin/audit",
     label: "監査ログ",

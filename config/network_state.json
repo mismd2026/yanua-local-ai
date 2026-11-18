@@ -1,0 +1,8 @@
+{
+  "_説明": "通信の設定の画面（S-53）で変える状態の既定：既定の宛先はすべて ON、追加の宛先なし、更新の確認は手動だけ。宛先の一覧そのものは config/network.json。画面で保存すると data/settings/network_state.json に写しを書く",
+  "known_defaults": null,
+  "off": [],
+  "added": [],
+  "revisions": {},
+  "update_check": {"mode": "manual", "time": "03:00", "weekday": 0}
+}

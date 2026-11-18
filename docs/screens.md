@@ -104,7 +104,7 @@
 | S-50 | 文書管理 | 管理者 | 文書の一覧、登録・差し替え・削除、見られる部署（社外公開を含む）の設定 | `GET /api/documents`、`POST /api/documents`、`PUT /api/documents/{doc_id}`、`DELETE /api/documents/{doc_id}` | K-010, K-002 | 4 |
 | S-51 | 人事データ | 人事・管理者 | ファイルを選ぶ→対応表の下書き→確認→取り込み→結果（在籍・退職・エラー） | `POST /api/hr/mapping-draft`、`POST /api/hr/imports`、`GET /api/hr/imports` | K-016 | 4 |
 | S-52 | 設定 | 管理者（`settings.view`・`settings.edit`。ほかは 403） | 設定ごとに1つの区切り：今使っているもの（既定／画面で保存したもの）→編集→確かめる（誤りは欄の下）→保存。版の一覧と「この版に戻す」「既定に戻す」（ルールの画面と同じ形）。再起動待ちの設定は画面の上にまとめる。起動の指定が勝つ項目は変えられない。本人確認は言い方を1行試せる（保存しない）。版の「したこと」と監査ログの説明に、変えた項目を短く書く（例「型 標準→社員コード必須」。決まった項目だけ）。仕分けルールは S-20 へのリンクだけ | `GET /api/admin/settings`、`GET/PUT /api/admin/settings/{key}`、`POST .../{key}/validate`、`POST .../{key}/history/{版}/restore`、`POST .../{key}/reset`、`POST /api/admin/settings/identity/try` | K-042, K-009 | 4 |
-| S-53 | 通信とモデル | 管理者 | 許可リストの宛先、モデルの一覧・版・ハッシュ、入手（pull）・照合（verify） | `GET /api/models`、`POST /api/models/{name}/pull`（ジョブ）、`POST /api/models/{name}/verify`、設定の `network` | K-023, K-011 | 4 |
+| S-53 | 通信とモデル | 管理者（`network.view`・`network.edit`。ほかは 403） | 許可する宛先（既定は ON/OFF だけ・追加は足す・消す・ON/OFF。新しい既定・外れた既定の知らせ）、更新の確認の予定（しない・手動だけ・毎日・毎週。ON の宛先だけ見に行き、知らせるだけ）、モデルの目録（名前・種類・用途・固定した版・記録したハッシュ／digest・状態）、照合（通信しない）、入れ替え（押したときだけ。入手→入手元のハッシュと照合→記録を更新）。版・既定に戻す | `GET/PUT /api/admin/network`、`POST .../validate`、`POST .../history/{版}/restore`、`POST .../reset`、`POST /api/admin/network/check`、`GET /api/admin/models`、`POST /api/admin/models/verify`、`POST /api/admin/models/{name}/replace`（ジョブ） | K-052, K-011, K-023 | 4 |
 | S-54 | 役割の割り当て | 管理者 | 人ごとの役割、SSO のグループとの対応、受付端末の登録・取り消し | `GET /api/roles`、`PUT /api/roles/{employee_no}`、`POST /api/admin/kiosk-devices`、`DELETE /api/admin/kiosk-devices/{id}` | K-049 | 4 |
 | S-55 | 監査ログ | 管理者（`audit.view`） | 誰が・いつ・何をしたかを、期間・した人（社員番号・名前の一部・端末）・操作の種類（`auth` のような頭か、名前そのもの）・結果（成功・失敗・拒否）で絞り込む。新しい順・ページ送り。見たことも記録する。消す・書き換える操作はない。CSV の書き出しはまだ作らない（K-042 と一緒に考える） | `GET /api/audit` | K-009 | 4 |
 | S-56 | 評価 | 管理者 | 質問セットでの採点の実行、モデルごとの比較 | `POST /api/eval/runs`（ジョブ）、`GET /api/eval/runs` | K-005, K-006 | 5 |
@@ -157,7 +157,8 @@
 | `POST /api/paper/text` | `pdf-text` | 総務 | ○ |
 | `POST /api/meetings`、`GET /api/meetings`、`GET/PUT /api/meetings/{id}`、`GET .../minutes.docx` | `meeting` | 社員・総務（自分のものだけ） | ○ |
 | `POST /api/uploads`、`GET /api/files/{file_id}` | （新規） | 種類による（PDF は総務、録画は社員）。開けるのは作った本人だけ | |
-| `GET /api/models`、`POST .../pull`、`POST .../verify` | `models list / pull / verify` | 管理者 | pull は○ |
+| `GET/PUT /api/admin/network`（宛先・知らせ・更新の確認・版・前の確認の結果）、`POST .../validate`、`POST .../history/{版}/restore`、`POST .../reset`、`POST /api/admin/network/check`（ON の宛先だけ見に行く。「しない」なら 409） | （新規） | 管理者（`network.view`・`network.edit`） | |
+| `GET /api/admin/models`（目録と状態）、`POST /api/admin/models/verify`（通信しない）、`POST /api/admin/models/{name}/replace`（更新の確認で見つけた新しい版に入れ替える） | `models list / verify`（入手は `models pull`） | 管理者 | replace は○ |
 | `GET /api/admin/settings`（4つの区切り・`pending_restart`・リンク）、`GET/PUT /api/admin/settings/{key}`（値・状態・起動の指定が勝つ項目・版・選び肢）、`POST .../{key}/validate`、`POST .../{key}/history/{版}/restore`、`POST .../{key}/reset`（すでに既定なら版を増やさない）、`POST /api/admin/settings/identity/try`（保存前の方針で言い方を試す。特定できたか・一致した手がかりの種類・聞き返す項目だけを返す） | （新規。前はファイルを直接編集） | 管理者（見るのは `settings.view`、変えるのは `settings.edit`） | |
 | `GET /api/roles`、`PUT /api/roles/{employee_no}` | （新規） | 管理者 | |
 | `GET /api/audit`（`since`・`until`：YYYY-MM-DD か ISO の時刻、`actor`、`action`、`result`、`page`、`per_page`（200まで））。返すのは `entries`・`total`・`actions`（記録にある操作の名前）・`keep_days`・`keep_body`。消す・書き換える API はない | （新規） | 管理者（`audit.view`。ほかは 403） | |
@@ -259,7 +260,9 @@
 
 残さないもの：パスワード・端末トークン・セッションのトークン・受付端末で入力されたコードは、どの設定でも残さない。質問の文、文書や PDF の中身は、既定では残さない（質問の文は `--audit-body` のときだけ `body` に残す）。部署の権限で見せなかった文書があることは、質問した人への返事には出さない。仕分けの実行は、書類の中身から作るファイル名を残さず、フォルダだけを残す。
 
-これから足すもの：文書の変更（K-010）、役割の変更（S-54）、モデルの入手（S-53）、設定の画面の変更（K-042）、SSO のログイン（K-008）。
+通信とモデル（S-53）：`network.init`（初めての起動で既定の宛先を ON にした。システム）・`network.save`・`.restore`・`.reset`（説明は「huggingface.co を OFF」など）・`network.check`（宛先・結果・版）・`models.verify`・`models.replace`（前の版→新しい版）。
+
+これから足すもの：文書の変更（K-010）、役割の変更（S-54）、SSO のログイン（K-008）。
 
 ## 7. 作る順番
 
