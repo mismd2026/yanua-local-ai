@@ -80,6 +80,13 @@ export const MENU: MenuItem[] = [
     description: "PDF を Word・Excel や、会社の様式にします。",
     needs: ["paper"],
   },
+  {
+    id: "S-55",
+    path: "/admin/audit",
+    label: "監査ログ",
+    description: "だれが・いつ・何をしたか（ログイン・権限で断ったこと・ジョブ・設定の変更・ダウンロードなど）を確かめられます。",
+    needs: ["audit.view"],
+  },
 ];
 
 export function menuFor(permissions: string[]): MenuItem[] {

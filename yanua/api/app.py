@@ -30,6 +30,9 @@
     POST   /api/meetings（ジョブ）, GET /api/meetings, GET/PUT /api/meetings/{id}   議事録（作った人だけ）
     GET    /api/meetings/{id}/minutes.docx                        議事録の Word
 
+段階4（K-009）：
+    GET    /api/audit                                             監査ログ（管理者。絞り込み・ページ送り。見たことも記録する）
+
 段階2（K-045・K-018・K-043）：
     GET    /api/notifications, POST /api/notifications/read      自分あて・自分の部署あてのお知らせ
     POST   /api/visits, GET /api/visits, DELETE /api/visits/{id}  来訪予定（社員は自分の。総務は全社）
@@ -69,7 +72,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response as RawRespons
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from .. import hr, models, visits
+from .. import audit, hr, models, visits
 from ..answer import answer_question
 from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
@@ -92,6 +95,27 @@ STREAM_PING_SEC = 10     # 回答を作っている間も、途中の機器に�
 log = logging.getLogger("yanua.api")
 
 # 逐次表示で画面に出す進み具合（answer_question の段階 → 画面の文言）
+# 監査ログに書くジョブの種類の名前
+JOB_NAMES = {"ingest": "文書の取り込み", "paper-plan": "仕分けの予定", "paper-convert": "PDF の変換", "meeting": "議事録",
+             "paper-rule-draft": "仕分けルールの下書き"}
+
+
+def audit_bound(value: str | None, end: bool) -> str | None:
+    """監査ログの期間の絞り込み。YYYY-MM-DD はサーバーの地域の日付（end なら、その日の終わりまで）、それ以外は ISO の時刻。"""
+    from datetime import datetime, timedelta
+
+    if not value:
+        return None
+    try:
+        if len(value) == 10:
+            t = datetime.fromisoformat(value).astimezone()
+            return audit.iso(t + timedelta(days=1) if end else t)
+        t = datetime.fromisoformat(value)
+        return audit.iso(t if t.tzinfo else t.astimezone())
+    except ValueError as e:
+        raise ApiError(400, "invalid_date", "期間は YYYY-MM-DD か、ISO 8601 の時刻で指定してください") from e
+
+
 ASK_STAGES = {
     "search": "社内の文書を探しています",
     "answer": "回答を作っています",
@@ -224,17 +248,43 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     settings.check()
     roles = load_roles(settings.roles_path)
     policy = load_policy(settings.identity_path)
-    jobs = JobQueue(settings.db_path, settings.job_workers)
     local = threading.local()
+
+    def connect() -> sqlite3.Connection:
+        return sqlite3.connect(str(settings.db_path), timeout=10)
+
+    def name_of(employee_no: str) -> str | None:
+        with closing(connect()) as db:
+            return (hr.lookup(db, employee_no) or {}).get("name")
+
+    # 監査ログ（K-009）。記録に失敗しても、元の操作は止めない（Auditor.record が例外を出さない）
+    auditor = audit.Auditor(settings.audit_path, settings.audit_keep_days, settings.audit_keep_body, names=name_of)
+
+    def audit_by(user: User, action: str, **kw) -> None:
+        auditor.record(action, actor=user.employee_no, actor_name=user.name, **kw)
+
+    def audit_setting(action: str, by: str, result: str, detail: str) -> None:
+        auditor.record(action, actor=by, target=action.rsplit(".", 1)[0], result=result, detail=detail)
+
+    JOB_EVENTS = {"start": ("job.start", audit.OK, "始めました"), "done": ("job.done", audit.OK, "終わりました"),
+                  "failed": ("job.failed", audit.FAILED, "失敗しました"), "cancelled": ("job.cancel", audit.OK, "取り消しました"),
+                  "interrupted": ("job.interrupted", audit.FAILED, "サーバーの再起動で中断しました")}
+
+    def job_event(event: str, job: dict) -> None:
+        action, result, what = JOB_EVENTS[event]
+        # 何のジョブかと、どうなったかだけを残す（params の中身や結果は残さない）
+        detail = f"{JOB_NAMES.get(job['kind'], job['kind'])}：{what}"
+        if event == "failed" and job.get("error"):
+            detail += f"（{job['error']}）"
+        auditor.record(action, actor=job["owner"], target=job["job_id"], result=result, detail=detail)
+
+    jobs = JobQueue(settings.db_path, settings.job_workers, listener=job_event)
 
     def store() -> Store:
         # SQLite の接続はスレッドをまたいで使えないので、スレッドごとに開く
         if not hasattr(local, "store"):
             local.store = Store(settings.db_path)
         return local.store
-
-    def connect() -> sqlite3.Connection:
-        return sqlite3.connect(str(settings.db_path), timeout=10)
 
     with closing(connect()) as db:
         auth.ensure_schema(db)
@@ -248,7 +298,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     limiter = kiosk.FailureLimiter(settings.kiosk_max_failures)
     def rule_store():
         # 仕分けルール（既定のファイルと、画面から保存した写し）。設定を変えたらすぐ使えるよう、使うたびに作る（ロックは置き場所ごとに共通）
-        return paperjobs.rule_store(settings)
+        return paperjobs.rule_store(settings, audit=audit_setting)
 
     def today() -> date:
         return settings.today or date.today()
@@ -373,16 +423,23 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         if problems:
             # 起動は止めない（ほかの機能は使える）。仕分け・変換の画面では「管理者に連絡してください」になる
             log.error("仕分けルール %s が読み込めません。直すところ：%s", path, "／".join(f"{w}: {m}" if w else m for w, m in problems))
+        auditor.purge()      # 保存期間を過ぎた監査ログ（起動したときと、1日1回）
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
         app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy)
         app.state.reception = ReceptionSessions(chats, settings.db_path, settings.reception_data, llm, settings.top_k,
                                                 settings.today)
 
+        last_purge = time.monotonic()
+
         async def sweep():
-            # 期限の来たファイルを10分ごとに消す
+            # 期限の来たファイルを10分ごとに消す。監査ログの保存期間を過ぎたものは1日1回
+            nonlocal last_purge
             while True:
                 await asyncio.sleep(600)
+                if time.monotonic() - last_purge >= 86400:
+                    last_purge = time.monotonic()
+                    await run_in_threadpool(auditor.purge)
                 try:
                     def run():
                         with closing(connect()) as db:
@@ -404,6 +461,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                   redoc_url=None, openapi_url="/api/openapi.json" if settings.dev_login else None)
     app.state.settings = settings
     app.state.jobs = jobs
+    app.state.audit = auditor
     errors.install(app)
 
     def openapi():
@@ -426,12 +484,18 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.middleware("http")
     async def csrf(request: Request, call_next):
         path = request.url.path
+        # 監査ログの接続元。プロキシのヘッダー（X-Forwarded-For）は、だれでも書けるので使わない
+        audit.client_ip.set(request.client.host if request.client else "")
         # 端末トークン（Bearer）で使えるのは受付の API（/api/kiosk/...）だけ
         if path.startswith("/api/") and request.headers.get("authorization", "").lower().startswith("bearer ") \
                 and not path.startswith("/api/kiosk/"):
+            await run_in_threadpool(auditor.record, "api.bearer", target=f"{request.method} {path}", result=audit.DENIED,
+                                    detail="端末トークンで、受付の API ではない API を呼ぼうとしました")
             return JSONResponse(errors.body("forbidden", "この操作をする権限がありません"), status_code=403)
         if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/") \
                 and not request.headers.get(CSRF_HEADER):
+            await run_in_threadpool(auditor.record, "api.csrf", target=f"{request.method} {path}", result=audit.DENIED,
+                                    detail=f"{CSRF_HEADER} ヘッダーのないリクエストを断りました")
             return JSONResponse(errors.body("csrf", "画面からの操作として受け付けられません。画面を読み込み直してください"),
                                 status_code=403)
         return await call_next(request)
@@ -445,10 +509,17 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             raise not_logged_in()
         return user
 
+    def deny(user: User, action: str, request: Request | None = None) -> ApiError:
+        """権限が足りずに断る（403）。断った操作の名前を監査ログに残す。"""
+        target = f"{request.method} {request.url.path}" if request is not None else ""
+        audit_by(user, "access.denied", target=target, result=audit.DENIED,
+                 detail=f"操作「{action}」の権限がありません（役割：{'・'.join(user.roles)}）")
+        return forbidden()
+
     def require(action: str):
-        def check(user: User = Depends(current_user)) -> User:
+        def check(request: Request, user: User = Depends(current_user)) -> User:
             if not allowed(user.roles, action):
-                raise forbidden()
+                raise deny(user, action, request)
             return user
         return check
 
@@ -482,13 +553,20 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.post("/api/auth/dev-login")
     def dev_login(req: DevLogin, response: Response):
         if not settings.dev_login:
+            auditor.record("auth.login", target=req.employee_no[:20], result=audit.FAILED,
+                           detail="開発用ログインは使えない設定です")
             raise not_found()
         with closing(connect()) as db:
             person = hr.lookup(db, req.employee_no)
             if not person:
+                # 入力された社員番号は対象に残す（パスワードはない。トークンは作っていない）
+                auditor.record("auth.login", target=req.employee_no[:20], result=audit.FAILED,
+                               detail="開発用ログイン：その社員番号ではログインできません")
                 raise ApiError(401, "login_failed", "その社員番号ではログインできません")
             token = auth.create_session(db, person["employee_no"], settings.session_max_hours)
         set_cookie(response, token)
+        auditor.record("auth.login", actor=person["employee_no"], actor_name=person["name"], target=person["employee_no"],
+                       detail="開発用ログイン")
         return {"employee_no": person["employee_no"], "name": person["name"]}
 
     @app.get("/api/auth/login")
@@ -502,7 +580,10 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         token = request.cookies.get(auth.COOKIE, "")
         if token:
             with closing(connect()) as db:
+                user = auth.user_for_token(db, token, roles, settings.session_idle_minutes)
                 auth.delete_session(db, token)
+            if user:
+                audit_by(user, "auth.logout", target=user.employee_no)
         response.delete_cookie(auth.COOKIE, path="/")
         return {"ok": True}
 
@@ -623,7 +704,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         if req.flow != "helpdesk":
             raise ApiError(400, "unknown_flow", "その会話は使えません")
         if req.account is not None and not settings.dev_login:
-            raise forbidden()
+            raise deny(user, "helpdesk.account（ほかの人として話す）", request)
         return request.app.state.helpdesk.start(user, req.account)
 
     @app.post("/api/chat/sessions/{session_id}/messages")
@@ -645,9 +726,9 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return job
 
     @app.get("/api/jobs")
-    def job_list(all: bool = False, user: User = Depends(require("jobs.own"))):
+    def job_list(request: Request, all: bool = False, user: User = Depends(require("jobs.own"))):
         if all and not allowed(user.roles, "jobs.all"):
-            raise forbidden()
+            raise deny(user, "jobs.all", request)
         return {"jobs": jobs.list(None if all else user.employee_no)}
 
     @app.get("/api/jobs/{job_id}")
@@ -659,6 +740,9 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         job = visible_job(job_id, user)
         if job["status"] in FINISHED:
             raise ApiError(409, "finished", "このジョブは終わっています")
+        # 取り消した人を残す（ジョブの持ち主の「取り消し」は、ジョブの出来事として別に残る）
+        if job["owner"] != user.employee_no:
+            audit_by(user, "job.cancel", target=job_id, detail=f"ほかの人のジョブ（{job['owner']}）を取り消しました")
         return jobs.cancel(job_id)
 
     # ------------------------------------------------ お知らせ（S-11）
@@ -692,10 +776,10 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return {**v, "host_name": host["name"] if host else "", "host_dept": host["dept"] if host else ""}
 
     @app.post("/api/visits", status_code=201)
-    def visit_create(req: VisitCreate, user: User = Depends(require("visits.own"))):
+    def visit_create(req: VisitCreate, request: Request, user: User = Depends(require("visits.own"))):
         host_no = req.host_employee_no or user.employee_no
         if host_no != user.employee_no and not allowed(user.roles, "visits.all"):
-            raise forbidden()
+            raise deny(user, "visits.all（ほかの人の来訪予定の登録）", request)
         with closing(connect()) as db:
             try:
                 visit, code = visits.create(db, host_employee_no=host_no, visit_date=req.date, time=req.time, room=req.room,
@@ -710,18 +794,18 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 "invitation": visits.invitation_text(visit, code, host["name"] if host else "")}
 
     @app.get("/api/visits")
-    def visit_list(host: str = "me", date: str | None = None, user: User = Depends(require("visits.own"))):
+    def visit_list(request: Request, host: str = "me", date: str | None = None, user: User = Depends(require("visits.own"))):
         everyone = allowed(user.roles, "visits.all")
         day = None
         if date is not None:
             if not everyone:
-                raise forbidden()
+                raise deny(user, "visits.all（日付で全社の予定を見る）", request)
             try:
                 day = Date.fromisoformat(date)
             except ValueError as e:
                 raise ApiError(400, "invalid_date", "日付は YYYY-MM-DD で指定してください") from e
         if host != "me" and not everyone:
-            raise forbidden()
+            raise deny(user, "visits.all（ほかの人の来訪予定を見る）", request)
         if day is not None:
             host_no = None if host in ("me", "all") else host          # 総務：その日の全社の予定
         else:
@@ -830,14 +914,18 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.post("/api/admin/kiosk-devices", status_code=201)
     def device_register(req: DeviceCreate, user: User = Depends(require("kiosk.devices"))):
         with closing(connect()) as db:
-            # 端末トークンはここで1回だけ返す（保存するのはハッシュだけ）
-            return kiosk.register(db, req.name.strip(), user.employee_no)
+            # 端末トークンはここで1回だけ返す（保存するのはハッシュだけ）。監査ログには番号と名前だけを残す
+            device = kiosk.register(db, req.name.strip(), user.employee_no)
+        audit_by(user, "kiosk.register", target=device["device_id"], detail=f"受付端末「{device['name']}」を登録しました")
+        return device
 
     @app.delete("/api/admin/kiosk-devices/{device_id}")
     def device_revoke(device_id: str, user: User = Depends(require("kiosk.devices"))):
         with closing(connect()) as db:
+            name = next((d["name"] for d in kiosk.devices(db) if d["device_id"] == device_id), "")
             if not kiosk.revoke(db, device_id):
                 raise not_found("受付端末")
+        audit_by(user, "kiosk.revoke", target=device_id, detail=f"受付端末「{name}」を取り消しました")
         return {"ok": True}
 
     # ------------------------------------------------ 受付端末（S-40・S-41。端末トークンだけ）
@@ -877,7 +965,11 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         with closing(connect()) as db:
             visit = visits.find_by_code(db, code, today())
             if not visit:
-                limiter.fail(device["device_id"])
+                if limiter.fail(device["device_id"]):
+                    # 入力されたコードは残さない（間違えた回数と、止めたことだけ）
+                    auditor.record("kiosk.locked", actor=device["device_id"], actor_name=device["name"], kind=audit.DEVICE,
+                                   target=device["device_id"], result=audit.DENIED,
+                                   detail=f"コードを1分に{settings.kiosk_max_failures}回間違えたので、しばらく照合を止めました")
                 return failed
             visit = visits.check_in(db, visit)
             host = hr.lookup(db, visit["host_employee_no"])
@@ -913,7 +1005,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             raise ApiError(400, "invalid_kind", "アップロードの種類が正しくありません")
         perm, limit_key, exts = UPLOAD_KINDS[kind]
         if not allowed(user.roles, perm):
-            raise forbidden()
+            raise await run_in_threadpool(deny, user, f"{perm}（{kind} のアップロード）", request)
         limit = getattr(settings, limit_key)
         shown = files.safe_name(name, f"upload{exts[0]}")
         if not shown.lower().endswith(exts):
@@ -990,6 +1082,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.get("/api/files/{file_id}")
     def download(file_id: str, user: User = Depends(current_user)):
         f = my_file(file_id, user)
+        audit_by(user, "file.download", target=file_id, detail=f"「{f['name']}」をダウンロードしました")
         return FileResponse(f["path"], filename=f["name"], headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
     # ------------------------------------------------ PDF の仕分け（S-20）・変換（S-21）
@@ -1049,10 +1142,18 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             names = set(paper_rules().names())
             gone = [x for x in plan["items"] if not x["error"] and x["rule"] and x["rule"] not in names]
             if gone:
+                audit_by(user, "paper.execute", target=plan_id, result=audit.FAILED,
+                         detail=f"使ったルールがなくなっていたので実行しませんでした（{len(gone)}件）")
                 raise ApiError(409, "rules_gone",
                                "予定を作ったあとに、使ったルールがなくなりました。予定を作り直してから実行してください",
                                [{"where": x["file"], "message": f"ルール「{x['rule']}」は今のルールにありません"} for x in gone])
-            return paperjobs.execute(db, plan_id, settings.paper_inbox, settings.paper_out, move=req.move)
+            result = paperjobs.execute(db, plan_id, settings.paper_inbox, settings.paper_out, move=req.move)
+        # 何件を、どのフォルダへ（ファイル名は書類の中身から作るので残さない。フォルダだけ）
+        folders = sorted({str(Path(p).parent) for p in result["placed"]})
+        audit_by(user, "paper.execute", target=plan_id,
+                 detail=f"{len(result['placed'])}件を{'移しました' if req.move else '写しました'}"
+                        f"（置かなかったもの {len(result['skipped'])}件）。置いた先：{'、'.join(folders) or 'なし'}")
+        return result
 
     @app.get("/api/paper/history")
     def paper_history(limit: int = 200, user: User = Depends(require("paper"))):
@@ -1266,11 +1367,30 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         if not settings.meeting_template.is_file():
             raise ApiError(500, "no_template", "議事録の様式（Word）が見つかりません。管理者に問い合わせてください")
         body, name = meetings.minutes_docx(m, settings.meeting_template)
+        audit_by(user, "meeting.download", target=meeting_id, detail=f"議事録の Word「{name}」をダウンロードしました")
         from urllib.parse import quote
 
         return RawResponse(body, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                            headers={"Content-Disposition": f"attachment; filename=\"minutes.docx\"; filename*=UTF-8''{quote(name)}",
                                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    # ------------------------------------------------ 監査ログ（S-55。管理者だけ）
+
+    @app.get("/api/audit")
+    def audit_list(since: str | None = None, until: str | None = None, actor: str = "", action: str = "", result: str = "",
+                   page: int = 1, per_page: int = 50, user: User = Depends(require("audit.view"))):
+        if result and result not in audit.RESULTS:
+            raise ApiError(400, "invalid_result", f"結果は {'・'.join(audit.RESULTS)} のどれかで指定してください")
+        page, per_page = max(1, page), max(1, min(per_page, 200))
+        lo, hi = audit_bound(since, False), audit_bound(until, True)
+        entries, total = auditor.query(since=lo, until=hi, actor=actor.strip()[:100], action=action.strip()[:100],
+                                       result=result, page=page, per_page=per_page)
+        # 見たことも記録する（どんな条件で見たか）
+        shown = "、".join(f"{k}={v}" for k, v in (("期間の始め", since), ("期間の終わり", until), ("した人", actor.strip()),
+                                                  ("操作", action.strip()), ("結果", result)) if v) or "条件なし"
+        audit_by(user, "audit.view", detail=f"監査ログを見ました（{shown}、{page}ページ目）")
+        return {"entries": entries, "total": total, "page": page, "per_page": per_page, "actions": auditor.actions(),
+                "keep_days": settings.audit_keep_days, "keep_body": settings.audit_keep_body}
 
     # ------------------------------------------------ Web画面（最後に登録する）
 

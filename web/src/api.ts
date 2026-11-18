@@ -412,3 +412,28 @@ export const RULE_FIELDS: [string, string][] = [
   ["date", "日付（YYYYMMDD）"], ["yyyy", "年"], ["mm", "月"], ["dd", "日"], ["amount", "金額（数字だけ）"],
   ["company", "相手先"], ["to", "宛先（御中）"], ["rule", "ルール名"], ["original", "元のファイル名"],
 ];
+
+// 監査ログ（S-55。K-009）
+export interface AuditEntry {
+  id: number;
+  at: string;
+  actor: string;
+  actor_name: string;
+  actor_kind: string;   // 社員・受付端末・なし・システム
+  action: string;
+  target: string;
+  result: "成功" | "失敗" | "拒否";
+  ip: string;
+  detail: string;
+  body: string | null;
+}
+
+export interface AuditPage {
+  entries: AuditEntry[];
+  total: number;
+  page: number;
+  per_page: number;
+  actions: string[];
+  keep_days: number;
+  keep_body: boolean;
+}

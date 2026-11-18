@@ -58,8 +58,16 @@ class Settings:
     whisper_model: str = "whisper-small"         # 文字起こしのモデル（models pull で入手したもの）
     summary_model: str = "qwen2.5:7b"            # 議事録の要約に使う Ollama のモデル。3b では要約・要点が空になりやすいので分ける
     models_dir: Path = Path("data/models")
+    # 監査ログ（K-009）。None なら db_path と同じフォルダの audit.db（既定 data/audit.db）
+    audit_db_path: Path | None = None
+    audit_keep_days: int = 365                   # 監査ログを残す日数。過ぎたものは起動したときと1日1回消す
+    audit_keep_body: bool = False                # 質問・会話の本文なども残すか（既定は残さない）。秘密の値はどの設定でも残さない
     # 組み立てた Web画面（cd web && npm run build）。なければ API だけを動かす
     web_dist: Path | None = WEB_DIST
+
+    @property
+    def audit_path(self) -> Path:
+        return Path(self.audit_db_path) if self.audit_db_path else Path(self.db_path).parent / "audit.db"
 
     @property
     def local_only(self) -> bool:
@@ -71,6 +79,8 @@ class Settings:
         return not (self.dev_login and self.local_only)
 
     def check(self) -> None:
+        if self.audit_keep_days < 1:
+            raise ValueError(f"監査ログを残す日数は1日以上にしてください（今の設定: {self.audit_keep_days}）")
         if self.dev_login and not self.local_only:
             raise ValueError(
                 f"開発用ログインは、127.0.0.1 で待ち受けるときだけ使えます（今の設定: {self.host}）。"

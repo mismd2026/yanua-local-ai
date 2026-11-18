@@ -43,10 +43,12 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
 
 
-def rule_store(settings) -> SettingFile:
-    """仕分けルールの設定のファイル。既定は settings.paper_rules、画面から保存した写しは settings_dir/rules.json。"""
+def rule_store(settings, audit=None) -> SettingFile:
+    """仕分けルールの設定のファイル。既定は settings.paper_rules、画面から保存した写しは settings_dir/rules.json。
+    audit を渡すと、保存・版に戻す・既定に戻すを監査ログに残す（paper.rules.save / .restore / .reset）。"""
     base = Path(settings.paper_rules).parent    # 様式のファイルは、既定のルールのファイルのフォルダから探す
-    return SettingFile("rules.json", settings.paper_rules, settings.settings_dir, lambda text: rules.rule_problems(text, base))
+    return SettingFile("rules.json", settings.paper_rules, settings.settings_dir, lambda text: rules.rule_problems(text, base),
+                       audit=audit, audit_action="paper.rules")
 
 
 def check_rules(settings) -> tuple[Path, list[tuple[str, str]]]:

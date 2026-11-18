@@ -104,9 +104,15 @@ class FailureLimiter:
                 q.popleft()
             return len(q) >= self.max
 
-    def fail(self, device_id: str) -> None:
+    def fail(self, device_id: str) -> bool:
+        """失敗を1回数える。この失敗で止めることになったら True（監査ログに「端末を止めた」を残すため）。"""
         with self._lock:
-            self._fails.setdefault(device_id, deque()).append(time.monotonic())
+            q = self._fails.setdefault(device_id, deque())
+            now = time.monotonic()
+            while q and now - q[0] > 60:
+                q.popleft()
+            q.append(now)
+            return len(q) == self.max
 
 
 def visit_for_kiosk(visit: dict, host: dict | None) -> dict:
