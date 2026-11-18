@@ -1,0 +1,5 @@
+{
+  "_説明": "使う Ollama のモデル。chat はチャット・ヘルプデスク・受付、summary は議事録の要約。画面（S-52）では、手元に入っているモデルだけを選べる",
+  "chat": "qwen2.5:3b-instruct",
+  "summary": "qwen2.5:7b"
+}

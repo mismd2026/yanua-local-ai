@@ -209,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         return _models(args)
 
     if args.command == "serve":
+        args.given = list(argv if argv is not None else sys.argv[1:])   # 起動の指定で付けたもの（画面より勝つ）
         return _serve(args)
 
     if args.command == "serve-legacy":
@@ -571,17 +572,29 @@ def _serve(args) -> int:
     if not Store(args.db).documents():
         print(f"{args.db} に文書がありません。先に ingest を実行してください。")
         return 1
+    from .api import adminsettings
     from .identity import load_policy
 
+    # 起動の指定で付けた項目は、設定の画面（S-52）の値より勝つ（画面では変えられない）
+    given = getattr(args, "given", [])
+    flag = lambda name: any(a == name or a.startswith(name + "=") for a in given)   # noqa: E731
+    pinned = {key for key, name in adminsettings.PIN_FLAGS.items()
+              if flag(name) or (name == "--audit-body" and flag("--audit-keep-body"))}
     settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
                         roles_path=args.roles, identity_path=args.identity, top_k=args.top_k, host=args.host,
                         dev_login=args.dev_login, summary_model=args.summary_model, paper_rules=args.paper_rules,
                         settings_dir=args.settings_dir, audit_db_path=args.audit_db, audit_keep_days=args.audit_keep_days,
-                        audit_keep_body=args.audit_keep_body)
+                        audit_keep_body=args.audit_keep_body, chat_model=args.model, pinned=pinned)
+    _, bad_settings = adminsettings.startup(settings)
+    for key, found in bad_settings.items():
+        # 監査ログ・モデル・ファイルの写しに誤りがあれば、その設定だけ既定で動く（起動は続ける）
+        print(f"注意：画面で保存した設定「{adminsettings.LABELS[key]}」が読み込めないので、既定で動きます。直すところ：")
+        for where, why in found:
+            print(f"  - {where}：{why}" if where else f"  - {why}")
     try:
         settings.check()
         load_roles(settings.roles_path)
-        load_policy(settings.identity_path)
+        load_policy(adminsettings.identity_path(settings))     # 画面で保存した写しがあれば写し。誤りがあれば起動しない
     except (ValueError, RoleConfigError) as e:
         print(e)
         return 1
@@ -593,7 +606,7 @@ def _serve(args) -> int:
         print(f"注意：仕分けルール {rules_path} が読み込めません。PDF の仕分け・変換は、直すまで使えません。直すところ：")
         for where, why in problems:
             print(f"  - {where}：{why}" if where else f"  - {why}")
-    llm = OllamaChat(args.model, args.ollama)
+    llm = OllamaChat(settings.chat_model, args.ollama)     # 画面で保存したモデル（--model を付けたときは、そちら）
     try:
         llm.check()
     except LLMError as e:
@@ -608,7 +621,7 @@ def _serve(args) -> int:
     import uvicorn
 
     app = create_app(settings, llm, summary_llm=summary_llm)
-    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {args.model}、議事録の要約: {settings.summary_model}）。止めるには Ctrl+C")
+    print(f"http://{args.host}:{args.port} で待ち受けます（モデル: {settings.chat_model}、議事録の要約: {settings.summary_model}）。止めるには Ctrl+C")
     if settings.web_dist and (settings.web_dist / "index.html").is_file():
         print(f"Web画面: http://{args.host}:{args.port}/")
     else:

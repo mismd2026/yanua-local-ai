@@ -36,6 +36,9 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "meetings": frozenset({EMPLOYEE}),                # 議事録（自分が作ったものだけ。総務も社員なので使える）
     # 段階4（K-009）
     "audit.view": frozenset({"管理者"}),              # 監査ログを見る（見たことも記録する）
+    # 段階4（K-042）設定の画面（S-52）
+    "settings.view": frozenset({"管理者"}),           # 設定と版を見る・本人確認の方針を試す
+    "settings.edit": frozenset({"管理者"}),           # 設定を保存する・版に戻す・既定に戻す
 }
 # 受付端末は人の役割ではない。端末トークンで受付の API（/api/kiosk/...）だけを使える（yanua/api/kiosk.py）
 KIOSK = "受付端末"

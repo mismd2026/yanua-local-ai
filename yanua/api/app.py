@@ -74,16 +74,17 @@ from pydantic import BaseModel, Field
 
 from .. import audit, hr, models, visits
 from ..answer import ANSWERED, NO_PERMISSION, NOT_FOUND, Answer, answer_question
-from ..llm import ChatModel, LLMError, OllamaChat
+from ..llm import ChatModel, LLMError, OllamaChat, installed_models
 from ..search import search
 from ..store import Store
-from . import auth, desk, errors, files, kiosk, meetings, paperjobs
+from . import adminsettings, auth, desk, errors, files, kiosk, meetings, paperjobs
 from .auth import User
 from .chat import ChatDB, HelpdeskSessions, ReceptionSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
 from ..paper.extract import OCRUnavailable
 from ..settingfiles import SettingError
 from .jobs import FINISHED, JobContext, JobFailed, JobQueue
+from .. import identity
 from ..identity import load_policy
 from .roles import allowed, load_roles, permissions_of
 from .settings import Settings
@@ -198,6 +199,15 @@ class PaperRuleDraft(BaseModel):
     use_llm: bool = False                                           # 見分ける言葉を、社内の LLM にも挙げさせる
 
 
+class SettingValues(BaseModel):
+    values: dict                                                    # 設定の画面（S-52）の値
+
+
+class IdentityTry(BaseModel):
+    values: dict                                                    # 保存前の本人確認の方針
+    said: str = Field(min_length=1, max_length=300)                 # 試す言い方（1行）
+
+
 class PaperRuleSave(BaseModel):
     rule: dict                                                      # 足すルール（下書きを直したもの）
     sample_text: str | None = Field(default=None, max_length=200_000)  # 下書きのもとの PDF の文字（読み取れない項目の注意に使う）
@@ -240,14 +250,29 @@ VISIT_CSV_COLUMNS = ("date", "time", "company", "visitor", "host_employee_no", "
 # ------------------------------------------------------------ 本体
 
 
-def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, summary_llm: ChatModel | None = None) -> FastAPI:
+def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, summary_llm: ChatModel | None = None,
+               model_lister=None) -> FastAPI:
     """summary_llm は議事録の要約に使うモデル。渡さないとき、llm が Ollama なら settings.summary_model を同じ Ollama で使う。"""
     if summary_llm is None:
         summary_llm = OllamaChat(settings.summary_model, llm.base_url) if isinstance(llm, OllamaChat) else llm
-    """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。"""
+    """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。
+    model_lister：手元に入っているモデルの名前の一覧を返す関数（設定の画面）。既定は Ollama に問い合わせる。"""
+    # 設定の画面（S-52）で保存した写しがあれば使う（起動の指定が勝つ項目は除く）。誤りのある写しは使わず既定で動く
+    loaded, bad_settings = adminsettings.startup(settings)
+    for key, found in bad_settings.items():
+        log.error("設定「%s」の写しが読み込めないので、既定で動きます。直すところ：%s", adminsettings.LABELS[key],
+                  "／".join(f"{w}: {m}" if w else m for w, m in found))
+    if "models" in loaded:
+        llm.name = settings.chat_model
+        if summary_llm is not llm:
+            summary_llm.name = settings.summary_model
+    if model_lister is None:
+        model_lister = (lambda: installed_models(llm.base_url)) if isinstance(llm, OllamaChat) \
+            else (lambda: sorted({llm.name, summary_llm.name}))
     settings.check()
     roles = load_roles(settings.roles_path)
-    policy = load_policy(settings.identity_path)
+    # 本人確認の方針（画面で保存した写しがあれば写し）。誤りがあれば起動しない。設定の画面で保存すると入れ替わる
+    policy_state = {"policy": load_policy(adminsettings.identity_path(settings))}
     local = threading.local()
 
     def connect() -> sqlite3.Connection:
@@ -452,7 +477,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         auditor.purge()      # 保存期間を過ぎた監査ログ（起動したときと、1日1回）
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
-        app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy,
+        app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy_state["policy"],
                                               on_answer=lambda u, q, a, proc: audit_question(u, "helpdesk", q, a, procedure=proc))
         app.state.reception = ReceptionSessions(chats, settings.db_path, settings.reception_data, llm, settings.top_k,
                                                 settings.today)
@@ -1406,6 +1431,151 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return RawResponse(body, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                            headers={"Content-Disposition": f"attachment; filename=\"minutes.docx\"; filename*=UTF-8''{quote(name)}",
                                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    # ------------------------------------------------ 設定の画面（S-52。管理者だけ。K-042）
+
+    def setting_store(key: str):
+        if key not in adminsettings.SECTIONS:
+            raise not_found("設定")
+        return adminsettings.store(settings, key, audit=audit_setting, installed=model_lister)
+
+    def setting_section(key: str) -> dict:
+        st = setting_store(key)
+        out = {"key": key, "label": adminsettings.LABELS[key], "status": st.status(),
+               "pinned": adminsettings.pinned_fields(settings, key), "values": None, "problems": []}
+        running = adminsettings.running_values(settings, key, policy_state["policy"])
+        try:
+            text = st.read_text()
+            found = adminsettings.problems(key, text)
+            if found:
+                out["problems"] = [{"where": w, "message": m} for w, m in found]
+            else:
+                out["values"] = adminsettings.values_of(key, text)
+        except OSError as e:
+            out["problems"] = [{"where": "", "message": f"設定のファイルを読めません（{e}）"}]
+        # 動いている値と、保存したもの（写しか既定）が同じか。違えば再起動すると使われる（写しを手で直したときなど）
+        values = out["values"] or {}
+        out["running"] = running
+        out["applied"] = bool(values) and all(running.get(k) == v for k, v in values.items() if k not in out["pinned"])
+        return out
+
+    def setting_meta(key: str) -> dict:
+        if key == "identity":
+            return {"presets": {name: {"description": p["_説明"], "question": p["question"], "clues": p["clues"],
+                                       "confirm": p["confirm"]} for name, p in identity.PRESETS.items()},
+                    "clues": identity.MATCH_LABELS}
+        if key == "models":
+            try:
+                return {"installed": model_lister(), "error": ""}
+            except Exception as e:  # noqa: BLE001
+                return {"installed": [], "error": f"Ollama に、入っているモデルを問い合わせられません（{e}）"}
+        if key in ("audit", "files"):
+            return {"limits": {k.split(".", 1)[1]: {"min": lo, "max": hi, "unit": u}
+                               for k, (lo, hi, u) in adminsettings.LIMITS.items() if k.startswith(f"{key}.")}}
+        return {}
+
+    def apply_setting(key: str) -> None:
+        """保存・版に戻す・既定に戻すのあとで、動いている値を入れ替える（再起動しなくても効く）。"""
+        text = setting_store(key).read_text()
+        if key == "identity":
+            policy_state["policy"] = identity.build_policy(json.loads(text))
+            if hasattr(app.state, "helpdesk"):
+                app.state.helpdesk.set_policy(policy_state["policy"])
+            return
+        adminsettings.apply_to_settings(settings, key, adminsettings.values_of(key, text))
+        if key == "audit":
+            auditor.keep_days, auditor.keep_body = settings.audit_keep_days, settings.audit_keep_body
+        elif key == "models":
+            llm.name = settings.chat_model
+            if summary_llm is not llm:
+                summary_llm.name = settings.summary_model
+
+    def setting_text(key: str, values) -> str:
+        """画面から来た値を確かめて、保存する中身にする。起動の指定が勝つ項目は、変えさせない。"""
+        if not isinstance(values, dict):
+            raise ApiError(400, "invalid_setting", "設定に直すところがあります", [{"where": "", "message": "値の形が正しくありません"}])
+        pins = adminsettings.pinned_fields(settings, key)
+        if pins:
+            now = setting_section(key)["values"] or {}
+            locked = [{"where": f, "message": f"起動の指定（{flag}）が勝っているので、画面では変えられません"}
+                      for f, flag in pins.items() if f in values and values[f] != now.get(f)]
+            if locked:
+                raise ApiError(400, "invalid_setting", "設定に直すところがあります", locked)
+        text = adminsettings.text_of(key, values)
+        found = adminsettings.problems(key, text, model_lister)
+        if found:
+            raise ApiError(400, "invalid_setting", "設定に直すところがあります", [{"where": w, "message": m} for w, m in found])
+        return text
+
+    @app.get("/api/admin/settings")
+    def settings_list(user: User = Depends(require("settings.view"))):
+        sections = [setting_section(k) for k in adminsettings.SECTIONS]
+        return {"sections": sections, "pending_restart": [s["key"] for s in sections if not s["applied"]],
+                "links": [{"label": "PDF の仕分けルール", "path": "/paper/sort", "note": "仕分けルールは「PDF の仕分け」の画面で直します"}]}
+
+    @app.get("/api/admin/settings/{key}")
+    def settings_get(key: str, user: User = Depends(require("settings.view"))):
+        out = setting_section(key)
+        versions = setting_store(key).history()
+        with closing(connect()) as db:
+            names = {no: ((hr.lookup(db, no) or {}).get("name") or no) for no in {v["saved_by"] for v in versions}}
+        return {**out, "meta": setting_meta(key), "current": out["status"]["current_version"],
+                "versions": [{**v, "saved_by_name": names.get(v["saved_by"], v["saved_by"])} for v in versions]}
+
+    @app.post("/api/admin/settings/{key}/validate")
+    def settings_validate(key: str, req: SettingValues, user: User = Depends(require("settings.edit"))):
+        setting_store(key)
+        setting_text(key, req.values)
+        return {"ok": True}
+
+    @app.put("/api/admin/settings/{key}")
+    def settings_save(key: str, req: SettingValues, user: User = Depends(require("settings.edit"))):
+        st = setting_store(key)
+        text = setting_text(key, req.values)
+        try:
+            version = st.save(text, user.employee_no, f"{adminsettings.LABELS[key]}を保存した")
+        except SettingError as e:
+            raise setting_error(e, 400, "invalid_setting", "設定に直すところがあります") from e
+        apply_setting(key)
+        return {"version": version, **setting_section(key)}
+
+    @app.post("/api/admin/settings/{key}/history/{version}/restore")
+    def settings_restore(key: str, version: int, user: User = Depends(require("settings.edit"))):
+        try:
+            new = setting_store(key).restore(version, user.employee_no)
+        except KeyError as e:
+            raise not_found("設定の版") from e
+        except SettingError as e:
+            raise setting_error(e, 409, "invalid_version", "この版は、今の検証を通らないので戻せません") from e
+        apply_setting(key)
+        return {"version": new, **setting_section(key)}
+
+    @app.post("/api/admin/settings/{key}/reset")
+    def settings_reset(key: str, user: User = Depends(require("settings.edit"))):
+        try:
+            new = setting_store(key).reset_to_default(user.employee_no)
+        except SettingError as e:
+            raise setting_error(e, 409, "invalid_default", "既定の設定が今の検証を通らないので、戻せません。管理者に連絡してください") from e
+        if new is None:
+            return {"version": None, "already_default": True, "message": "すでに既定です", **setting_section(key)}
+        apply_setting(key)
+        return {"version": new, "already_default": False, **setting_section(key)}
+
+    @app.post("/api/admin/settings/identity/try")
+    def settings_identity_try(req: IdentityTry, user: User = Depends(require("settings.view"))):
+        # 保存前の方針で、言い方を1つ試す。保存しない。人事データは本物を使うが、特定できたかと聞き返す項目だけを返す
+        problems = identity.policy_problems(req.values)
+        if problems:
+            raise ApiError(400, "invalid_setting", "設定に直すところがあります", [{"where": w, "message": m} for w, m in problems])
+        policy = identity.build_policy(req.values)
+        with closing(connect()) as db:
+            r = identity.check(db, [req.said], policy)
+        ok = r.person is not None
+        audit_by(user, "settings.identity.try", target="identity",
+                 detail=f"本人確認の方針を試しました（{'特定できた' if ok else '特定できなかった'}）")   # 試した言い方は残さない
+        return {"identified": ok, "matched": r.matched if ok else [],
+                "ask": [identity.LABELS[a] for a in r.ask] if not ok else [],
+                "question": r.question() if not ok and r.ask else "", "note": r.note}
 
     # ------------------------------------------------ 監査ログ（S-55。管理者だけ）
 

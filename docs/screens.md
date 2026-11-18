@@ -103,13 +103,24 @@
 |---|---|---|---|---|---|---|
 | S-50 | 文書管理 | 管理者 | 文書の一覧、登録・差し替え・削除、見られる部署（社外公開を含む）の設定 | `GET /api/documents`、`POST /api/documents`、`PUT /api/documents/{doc_id}`、`DELETE /api/documents/{doc_id}` | K-010, K-002 | 4 |
 | S-51 | 人事データ | 人事・管理者 | ファイルを選ぶ→対応表の下書き→確認→取り込み→結果（在籍・退職・エラー） | `POST /api/hr/mapping-draft`、`POST /api/hr/imports`、`GET /api/hr/imports` | K-016 | 4 |
-| S-52 | 設定 | 管理者（種類によって総務・情シス・人事も） | 設定の種類を選ぶ→今の中身→編集→検証（エラーの表示）→保存。変更の履歴と前の版への戻し | `GET /api/settings`、`GET /api/settings/{kind}`、`POST /api/settings/{kind}/validate`、`PUT /api/settings/{kind}`、`GET /api/settings/{kind}/history` | K-042, K-009 | 4 |
+| S-52 | 設定 | 管理者（`settings.view`・`settings.edit`。ほかは 403） | 設定ごとに1つの区切り：今使っているもの（既定／画面で保存したもの）→編集→確かめる（誤りは欄の下）→保存。版の一覧と「この版に戻す」「既定に戻す」（ルールの画面と同じ形）。再起動待ちの設定は画面の上にまとめる。起動の指定が勝つ項目は変えられない。本人確認は言い方を1行試せる（保存しない）。仕分けルールは S-20 へのリンクだけ | `GET /api/admin/settings`、`GET/PUT /api/admin/settings/{key}`、`POST .../{key}/validate`、`POST .../{key}/history/{版}/restore`、`POST .../{key}/reset`、`POST /api/admin/settings/identity/try` | K-042, K-009 | 4 |
 | S-53 | 通信とモデル | 管理者 | 許可リストの宛先、モデルの一覧・版・ハッシュ、入手（pull）・照合（verify） | `GET /api/models`、`POST /api/models/{name}/pull`（ジョブ）、`POST /api/models/{name}/verify`、設定の `network` | K-023, K-011 | 4 |
 | S-54 | 役割の割り当て | 管理者 | 人ごとの役割、SSO のグループとの対応、受付端末の登録・取り消し | `GET /api/roles`、`PUT /api/roles/{employee_no}`、`POST /api/admin/kiosk-devices`、`DELETE /api/admin/kiosk-devices/{id}` | K-049 | 4 |
 | S-55 | 監査ログ | 管理者（`audit.view`） | 誰が・いつ・何をしたかを、期間・した人（社員番号・名前の一部・端末）・操作の種類（`auth` のような頭か、名前そのもの）・結果（成功・失敗・拒否）で絞り込む。新しい順・ページ送り。見たことも記録する。消す・書き換える操作はない。CSV の書き出しはまだ作らない（K-042 と一緒に考える） | `GET /api/audit` | K-009 | 4 |
 | S-56 | 評価 | 管理者 | 質問セットでの採点の実行、モデルごとの比較 | `POST /api/eval/runs`（ジョブ）、`GET /api/eval/runs` | K-005, K-006 | 5 |
 
 ### S-52 で扱う設定の種類
+
+今あるもの（K-042 の最初の PR）。どれも管理者だけ。既定は `config/` のファイル、画面で保存した写しは `data/settings/<key>.json`。どれも再起動なしで効く（保存したものと動いている値が違うとき、例えば写しを手で直したときは「再起動すると使われます」と出す）。
+
+| key | 中身 | 保存の前の検証 | 起動の指定が勝つ項目 |
+|---|---|---|---|
+| `identity` | 本人確認の方針（既定 `config/identity.json`）：型・最初の聞き方・使う手がかり・確定する組み合わせ・姓だけを数えるか・聞き返しの上限 | `identity.policy_problems`（項目ごとに全部）。誤りがあると起動しない決まりはそのまま（画面からは検証を通ったものしか保存できない） | — |
+| `audit` | 監査ログ（既定 `config/audit.json`）：保存期間（1〜3650日）・質問の本文を残すか（on にするときは画面の中で確かめる） | 範囲・型 | `--audit-keep-days`・`--audit-body` |
+| `models` | モデル（既定 `config/models.json`）：チャット（`chat`）・議事録の要約（`summary`） | 手元の Ollama に入っているか（問い合わせられないときは保存しない） | `--model`・`--summary-model` |
+| `files` | 作業用フォルダ（既定 `config/files.json`）：合計の上限（1〜10000GB）・ファイルを消すまでの時間（1〜720時間） | 範囲・単位 | — |
+
+これから足す予定のもの（前の計画）：
 
 | 種類（kind） | 今のファイル | 編集できる役割 | 保存の前の検証 |
 |---|---|---|---|
@@ -119,11 +130,10 @@
 | `helpdesk-kb` | kb.csv | 情シス・管理者 | 列がそろっているか、手順が空でないか |
 | `helpdesk-outages` | outages.csv | 情シス・管理者 | 日時が読めるか |
 | `hr-mapping` | 人事の対応表（JSON） | 人事・管理者 | `hr.py` の load_mapping |
-| `identity` | 本人確認の方針（config/identity.json）：型・聞き方・使う手がかり・確定する組み合わせ・姓を数えるか・聞き返しの回数 | 情シス・管理者 | `identity.py` の build_policy。見本の返事で照合を試せるようにする |
 | `meeting-tools` | 会議ツールごとの名前の位置・枠の色 | 総務・管理者 | 値の範囲。デモ動画で読み取りを試せるようにする |
 | `meeting-glossary` | 用語集 | 総務・管理者 | 1行に1語 |
 | `network` | config/network.json | 管理者だけ | `netpolicy.py` の load_policy。宛先の書き方 |
-| `models` | 使う LLM の名前、文字起こしのモデル | 管理者だけ | Ollama にあるか、ハッシュが記録と合うか |
+| `models`（続き） | 文字起こしのモデル | 管理者だけ | ハッシュが記録と合うか |
 
 ## 5. API の一覧
 
@@ -148,7 +158,7 @@
 | `POST /api/meetings`、`GET /api/meetings`、`GET/PUT /api/meetings/{id}`、`GET .../minutes.docx` | `meeting` | 社員・総務（自分のものだけ） | ○ |
 | `POST /api/uploads`、`GET /api/files/{file_id}` | （新規） | 種類による（PDF は総務、録画は社員）。開けるのは作った本人だけ | |
 | `GET /api/models`、`POST .../pull`、`POST .../verify` | `models list / pull / verify` | 管理者 | pull は○ |
-| `GET/PUT /api/settings/{kind}`、`.../validate`、`.../history` | （新規。今はファイルを直接編集） | 種類による | |
+| `GET /api/admin/settings`（4つの区切り・`pending_restart`・リンク）、`GET/PUT /api/admin/settings/{key}`（値・状態・起動の指定が勝つ項目・版・選び肢）、`POST .../{key}/validate`、`POST .../{key}/history/{版}/restore`、`POST .../{key}/reset`（すでに既定なら版を増やさない）、`POST /api/admin/settings/identity/try`（保存前の方針で言い方を試す。特定できたか・一致した手がかりの種類・聞き返す項目だけを返す） | （新規。前はファイルを直接編集） | 管理者（見るのは `settings.view`、変えるのは `settings.edit`） | |
 | `GET /api/roles`、`PUT /api/roles/{employee_no}` | （新規） | 管理者 | |
 | `GET /api/audit`（`since`・`until`：YYYY-MM-DD か ISO の時刻、`actor`、`action`、`result`、`page`、`per_page`（200まで））。返すのは `entries`・`total`・`actions`（記録にある操作の名前）・`keep_days`・`keep_body`。消す・書き換える API はない | （新規） | 管理者（`audit.view`。ほかは 403） | |
 | `POST /api/eval/runs` | `eval/run_eval.py` | 管理者 | ○ |

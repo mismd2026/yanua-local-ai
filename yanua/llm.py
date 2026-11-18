@@ -25,6 +25,16 @@ class ChatModel(Protocol):
     def chat(self, messages: list[dict]) -> str: ...
 
 
+def installed_models(base_url: str = DEFAULT_OLLAMA_URL, timeout: float = 10.0) -> list[str]:
+    """Ollama に入っているモデルの名前の一覧（設定の画面で、選べるモデルを出すため）。つながらなければ LLMError。"""
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/api/tags", timeout=timeout) as res:
+            data = json.loads(res.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        raise LLMError(f"Ollama（{base_url}）に接続できません: {e}") from e
+    return sorted(m.get("name", "") for m in data.get("models", []) if m.get("name"))
+
+
 class OllamaChat:
     def __init__(self, model: str = DEFAULT_MODEL, base_url: str = DEFAULT_OLLAMA_URL, timeout: float = 300.0):
         self.name = model

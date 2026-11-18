@@ -65,3 +65,45 @@ def test_bad_paper_rules_only_stop_that_feature(base, capsys):
     assert "PDF の仕分け・変換は、直すまで使えません" in out
     assert "rules[1].fields.no：正規表現の誤り：かっこ「(」が閉じていません（3文字目）" in out
     assert "モデルの確かめで止めます" in out
+
+
+class _Stop(Exception):
+    pass
+
+
+def test_serve_pins_given_flags_and_uses_saved_settings(base, monkeypatch, capsys):
+    """起動の指定で付けた項目は画面より勝つ（pinned）。付けていない項目は、画面で保存した写しを使う。"""
+    args, tmp = base
+    settings_dir = Path(args[args.index("--settings-dir") + 1])
+    settings_dir.mkdir()
+    (settings_dir / "models.json").write_text('{"chat": "llama3.2:3b", "summary": "qwen2.5:7b"}', encoding="utf-8")
+    (settings_dir / "audit.json").write_text('{"keep_days": 30, "keep_body": false}', encoding="utf-8")
+    (settings_dir / "files.json").write_text('{"work_max_gb": "たくさん", "file_keep_hours": 24}', encoding="utf-8")
+    checked, got = [], {}
+    monkeypatch.setattr(cli.OllamaChat, "check", lambda self: checked.append(self.name))
+
+    def fake_create_app(settings, llm, **kw):
+        got["settings"] = settings
+        raise _Stop()
+
+    import yanua.api
+    monkeypatch.setattr(yanua.api, "create_app", fake_create_app)
+    with pytest.raises(_Stop):
+        cli.main([*args, "--audit-body", "--summary-model", "qwen2.5:7b"])
+    s = got["settings"]
+    assert s.pinned == {"audit.keep_body", "models.summary"}
+    assert s.audit_keep_body is True and s.audit_keep_days == 30          # 起動の指定が勝つ／画面で保存した日数
+    assert checked[0] == "llama3.2:3b" and s.chat_model == "llama3.2:3b"   # 画面で保存したモデルを確かめて使う
+    assert s.work_max_bytes == 20_000_000_000                             # 壊れた写しは使わず、既定のまま
+    out = capsys.readouterr().out
+    assert "設定「ファイル（作業用フォルダ）」が読み込めないので、既定で動きます" in out and "work_max_gb" in out
+
+
+def test_serve_does_not_start_with_a_broken_identity_copy(base, capsys):
+    args, tmp = base
+    settings_dir = Path(args[args.index("--settings-dir") + 1])
+    settings_dir.mkdir()
+    (settings_dir / "identity.json").write_text('{"preset": "ない型"}', encoding="utf-8")
+    assert cli.main(args) == 1
+    out = capsys.readouterr().out
+    assert "知らない型です" in out and "モデルの確かめ" not in out

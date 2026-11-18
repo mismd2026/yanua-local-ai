@@ -164,13 +164,21 @@ class HelpdeskSessions:
         self.llm = llm
         self.top_k = top_k
         self._local = threading.local()
+        self._generation = 0      # 方針を入れ替えた回数。スレッドごとのグラフを作り直す目印
+
+    def set_policy(self, policy) -> None:
+        """本人確認の方針を入れ替える（設定の画面で保存したとき。再起動しなくても、次の返事から使う）。"""
+        self.policy = policy
+        self._generation += 1
 
     def _app(self):
         # 社内文書の保存先（SQLite）はスレッドをまたいで使えないので、グラフもスレッドごとに作る
-        if not hasattr(self._local, "app"):
+        if not hasattr(self._local, "store"):
             self._local.store = Store(self.db_path)
+        if getattr(self._local, "generation", None) != self._generation:
             self._local.app = build_app(self._local.store, self.llm, self.helpdesk_data, self.top_k,
                                         checkpointer=self.chats.saver, policy=self.policy, observe=_observe)
+            self._local.generation = self._generation
         return self._local.app
 
     def _app_store(self) -> Store:

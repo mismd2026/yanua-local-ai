@@ -18,7 +18,13 @@ class Settings:
     helpdesk_data: Path = Path("demo/company/flows/helpdesk")
     reception_data: Path = Path("demo/company/flows/reception")   # 受付の引き継ぎ先（routes.csv）
     roles_path: Path = Path("config/roles.json")
-    identity_path: Path = Path("config/identity.json")   # 本人確認の方針
+    identity_path: Path = Path("config/identity.json")   # 本人確認の方針の既定（画面で保存した写しがあれば、そちらを使う）
+    # 設定の画面（S-52）で変えられる設定の既定。画面で保存した写しは settings_dir に置く（yanua/api/adminsettings.py）
+    audit_config: Path = Path("config/audit.json")
+    models_config: Path = Path("config/models.json")
+    files_config: Path = Path("config/files.json")
+    # 起動の指定が勝つ項目（例 "audit.keep_body"）。画面では変えられない。serve が付けたものを入れる
+    pinned: set[str] = field(default_factory=set)
     top_k: int = 5
 
     # 待ち受けるアドレス。開発用ログインは、このマシンの中（127.0.0.1）で待ち受けるときだけ使える
@@ -56,6 +62,7 @@ class Settings:
     # 議事録
     meeting_template: Path = Path("demo/company/meeting/templates/議事録.docx")   # 議事録の様式（Word）
     whisper_model: str = "whisper-small"         # 文字起こしのモデル（models pull で入手したもの）
+    chat_model: str = "qwen2.5:3b-instruct"      # チャット・ヘルプデスク・受付のモデル（serve の --model。画面からも変えられる）
     summary_model: str = "qwen2.5:7b"            # 議事録の要約に使う Ollama のモデル。3b では要約・要点が空になりやすいので分ける
     models_dir: Path = Path("data/models")
     # 監査ログ（K-009）。None なら db_path と同じフォルダの audit.db（既定 data/audit.db）
