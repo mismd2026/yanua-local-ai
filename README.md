@@ -351,7 +351,12 @@ Yanua は、質問・資料・会議の中身を社外に送りません。そ�
 
 ## 依存ライブラリと、社外に通信できない環境への導入
 
-依存ライブラリは版を固定し、CIで既知の脆弱性を検査しています（pip-audit）。
+依存ライブラリは版を固定し、CIで既知の脆弱性を検査しています。
+
+- **Python**：`pip-audit -r requirements.txt`。指摘があれば CI を止めます
+- **画面（web/）**：2段で検査します
+  1. `npm audit --omit=dev`：配る画面に入るもの（`dependencies`。React など）だけを検査します。指摘があれば CI を止めます
+  2. `npm audit`：組み立て・テストの道具（`devDependencies`。Vite・Vitest など）も含めた全部を検査します。指摘があっても CI は止めず、CI の画面に警告（⚠）を出します。道具は配る画面に入らず、利用者のパソコンでもサーバーでも動かないためです。警告が出たら、直った版が出しだい上げます
 
 社外に通信できない環境には、通信できる環境でライブラリをまとめてダウンロードして持ち込みます。モデルも、通信できる環境で `models pull` したあと、`data/models/` ごと持ち込めば使えます（`models verify` で照合できます）。
 
@@ -367,6 +372,7 @@ pip install --no-index --find-links wheels -r requirements.txt
 ```bash
 pip install -r requirements-dev.txt
 pip-audit -r requirements.txt        # 依存ライブラリの脆弱性検査
+(cd web && npm audit --omit=dev)    # 画面の依存ライブラリの検査（配る画面に入るもの。全部は npm audit）
 python eval/run_eval.py --check      # 質問セットと資料の整合チェック
 python eval/retrieval_eval.py        # 検索だけの評価（LLMなし）
 python -m pytest -q                  # テスト
