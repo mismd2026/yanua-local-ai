@@ -1,4 +1,5 @@
 // API の呼び出し。エラーはすべて {"error": {"code", "message"}} の形で返ってくる（docs/screens.md「エラーの形」）。
+// 入力の誤りには details（[{where, message}]）が付くことがある。画面は where の項目の横に出す
 
 export const CLIENT_HEADER = "X-Yanua-Client";
 
@@ -7,6 +8,7 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
+    public details: { where: string; message: string }[] = [],
   ) {
     super(message);
   }
@@ -41,6 +43,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
       res.status,
       err?.code ?? "error",
       err?.message ?? "処理できませんでした。しばらくしてからやり直してください",
+      Array.isArray(err?.details) ? err.details : [],
     );
     if (res.status === 401 && e.code === "not_logged_in") onLoggedOut();
     throw e;
@@ -376,4 +379,28 @@ export interface Meeting extends MeetingListItem {
 
 export const MEETING_TOOLS: [string, string][] = [
   ["zoom", "Zoom"], ["teams", "Teams"], ["meet", "Google Meet"], ["none", "録画の画面から読まない（録音など）"],
+];
+
+// 仕分けルールの下書き（yanua/paper/rules.py の draft_rule が作る形）。画面で直してから保存する
+export interface RuleDraft {
+  name: string;
+  keywords: { any: string[]; all: string[]; none: string[] };
+  fields: Record<string, string>;
+  filename: string;
+  folder: string;
+  priority: number;
+}
+
+export interface RuleVersion {
+  version: number;
+  saved_at: string;
+  saved_by: string;
+  saved_by_name: string;
+  action: string;
+}
+
+// ファイル名と保存先で使える項目（yanua/paper/rules.py の BASE_FIELDS）
+export const RULE_FIELDS: [string, string][] = [
+  ["date", "日付（YYYYMMDD）"], ["yyyy", "年"], ["mm", "月"], ["dd", "日"], ["amount", "金額（数字だけ）"],
+  ["company", "相手先"], ["to", "宛先（御中）"], ["rule", "ルール名"], ["original", "元のファイル名"],
 ];

@@ -74,7 +74,7 @@ from ..answer import answer_question
 from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
-from . import auth, desk, errors, files, kiosk, meetings, paperjobs
+from . import auth, confighist, desk, errors, files, kiosk, meetings, paperjobs
 from .auth import User
 from .chat import ChatDB, HelpdeskSessions, ReceptionSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
@@ -165,6 +165,18 @@ class PaperExecute(BaseModel):
     move: bool = False                                              # 既定は受信箱に残す（コピー）
 
 
+class PaperRuleDraft(BaseModel):
+    plan_id: str | None = Field(default=None, max_length=64)        # 予定の1件から（予定を作ったときの文字を使う）
+    index: int | None = Field(default=None, ge=0)
+    inbox: str | None = Field(default=None, max_length=255)         # 受信箱の PDF から（読み直す。スキャンは OCR）
+    name: str | None = Field(default=None, max_length=60)           # 書類の種類の名前（なければ書類から推測）
+    use_llm: bool = False                                           # 見分ける言葉を、社内の LLM にも挙げさせる
+
+
+class PaperRuleSave(BaseModel):
+    rule: dict                                                      # 足すルール（下書きを直したもの）
+
+
 class PaperConvert(BaseModel):
     file_id: str | None = Field(default=None, max_length=64)        # アップロードした PDF
     inbox: str | None = Field(default=None, max_length=255)         # 受信箱の PDF
@@ -229,6 +241,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         visits.ensure_schema(db)
         files.ensure_schema(db)
         paperjobs.ensure_schema(db)
+        confighist.ensure_schema(db)
         meetings.ensure_schema(db)
         files.cleanup(db, settings.work_dir)
     limiter = kiosk.FailureLimiter(settings.kiosk_max_failures)
@@ -306,6 +319,32 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     jobs.register("paper-plan", paper_plan_job)
     jobs.register("paper-convert", paper_convert_job)
     jobs.register("meeting", meeting_job)
+
+    def paper_rule_draft_job(ctx: JobContext, params: dict) -> dict:
+        # pdf-rule-draft と同じ処理（yanua/paper/rules.py の draft_rule）。予定の1件からなら、予定を作ったときの文字を使う
+        from ..paper import rules as paper_rule_file
+        from ..paper.extract import read_pdf
+
+        ctx.progress(10, "PDF の文字を読んでいます")
+        if params.get("plan_id"):
+            with closing(connect()) as db:
+                text = paperjobs.plan_text(db, params["plan_id"], params["index"])
+            source = params["source"]
+        else:
+            src = paperjobs.inbox_path(settings.paper_inbox, params["inbox"])
+            if not src:
+                raise JobFailed("受信箱のファイルが見つかりません（ほかの人が仕分けて移した可能性があります）")
+            try:
+                text = read_pdf(src).text
+            except OCRUnavailable as e:
+                raise JobFailed(paperjobs.OCR_MISSING, str(e)) from e
+            source = src.name
+        ctx.progress(60, "下書きを作っています")
+        draft = paper_rule_file.draft_rule(text, params.get("name") or None, llm if params.get("use_llm") else None)
+        ctx.progress(100, "完了")
+        return {"draft": draft, "source": source, "excerpt": paper_rule_file.norm(text)[:1500]}
+
+    jobs.register("paper-rule-draft", paper_rule_draft_job)
 
     def paper_rules():
         from ..paper import rules as paper_rule_file
@@ -995,6 +1034,116 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.get("/api/paper/history")
     def paper_history(limit: int = 200, user: User = Depends(require("paper"))):
         return {"records": paperjobs.history(settings.paper_out, max(1, min(limit, 1000)))}
+
+    # ------------------------------------------------ 仕分けルールの下書き・保存・前の版（K-047）
+
+    RULE_KEYS = {"name", "keywords", "fields", "filename", "folder", "priority"}   # 画面から書けるところ（様式は書けない）
+
+    @app.post("/api/paper/rule-drafts", status_code=202)
+    def paper_rule_draft(req: PaperRuleDraft, user: User = Depends(require("paper.rules"))):
+        if bool(req.plan_id) == bool(req.inbox):
+            raise ApiError(400, "invalid_source", "予定の1件か、受信箱の PDF のどちらか1つを選んでください")
+        params = {"owner": user.employee_no, "name": (req.name or "").strip(), "use_llm": req.use_llm}
+        if req.plan_id:
+            with closing(connect()) as db:
+                plan = my_plan(db, req.plan_id, user)
+            if req.index is None or not 0 <= req.index < len(plan["items"]):
+                raise not_found("予定の項目")
+            item = plan["items"][req.index]
+            if item["error"]:
+                raise ApiError(409, "unreadable", "読めなかったファイルからは、下書きを作れません")
+            params.update(plan_id=req.plan_id, index=req.index, source=item["file"])
+        else:
+            if not paperjobs.inbox_path(settings.paper_inbox, req.inbox or ""):
+                raise ApiError(400, "not_in_inbox", "受信箱にないファイルです")
+            params["inbox"] = req.inbox
+        return jobs.submit("paper-rule-draft", user.employee_no, params)
+
+    def rules_with(rule: dict):
+        """今のルールのファイルに rule を足した中身を、読み込みと同じ検証にかける。誤りは位置つきで 400。"""
+        from ..paper import rules as paper_rule_file
+
+        unknown = sorted(set(rule) - RULE_KEYS)
+        if unknown:
+            raise ApiError(400, "invalid_rule", "ルールに書けない項目があります",
+                           [{"where": k, "message": "画面からは書けない項目です（様式はルールのファイルで設定します）"} for k in unknown])
+
+        def build(current: str | None) -> str:
+            try:
+                data = json.loads(current) if current else {"rules": []}
+            except ValueError as e:
+                raise ApiError(409, "rules_broken", "今のルールのファイルが読めません。管理者に連絡してください") from e
+            data.setdefault("rules", [])
+            if not isinstance(data["rules"], list):
+                raise ApiError(409, "rules_broken", "今のルールのファイルが読めません。管理者に連絡してください")
+            data["rules"].append(rule)
+            at = f"rules[{len(data['rules'])}]"
+            try:
+                paper_rule_file.parse_rules(data, settings.paper_rules.parent, settings.paper_rules.name)
+            except paper_rule_file.RuleError as e:
+                # 足すルールの誤りは、ルールの中の位置（例：fields.invoice_no）で返す。今のルールの誤りはそのまま
+                details = [{"where": (w[len(at) + 1:] if w.startswith(at + ".") else ("" if w == at else w)), "message": m}
+                           for w, m in e.problems]
+                raise ApiError(400, "invalid_rule", "ルールに直すところがあります", details) from e
+            return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+        return build
+
+    @app.post("/api/paper/rules/validate")
+    def paper_rule_validate(req: PaperRuleSave, user: User = Depends(require("paper.rules"))):
+        path = settings.paper_rules
+        rules_with(req.rule)(path.read_text(encoding="utf-8") if path.is_file() else None)
+        return {"ok": True}
+
+    @app.post("/api/paper/rules", status_code=201)
+    def paper_rule_save(req: PaperRuleSave, user: User = Depends(require("paper.rules"))):
+        name = str(req.rule.get("name", "")).strip()
+        with closing(connect()) as db:
+            version = confighist.save(db, "paper_rules", settings.paper_rules, rules_with(req.rule), user.employee_no,
+                                      f"ルール「{name}」を足した")
+        log.info("仕分けルール「%s」を足しました（版 %s、%s）", name, version, user.employee_no)
+        return {"version": version, "rules": paper_rule_list(user)["rules"]}
+
+    @app.get("/api/paper/rules/history")
+    def paper_rule_history(user: User = Depends(require("paper.rules"))):
+        with closing(connect()) as db:
+            versions = confighist.history(db, "paper_rules")
+            current = confighist.current_version(db, "paper_rules", settings.paper_rules)
+            names = {no: ((hr.lookup(db, no) or {}).get("name") or no) for no in {v["saved_by"] for v in versions}
+                     if no != confighist.FILE_EDIT}
+        # 保存した人は名前で出す（総務の人どうしで、だれが直したかを見るため）
+        return {"versions": [{**v, "saved_by_name": names.get(v["saved_by"], v["saved_by"])} for v in versions], "current": current}
+
+    @app.get("/api/paper/rules/history/{version}")
+    def paper_rule_version(version: int, user: User = Depends(require("paper.rules"))):
+        with closing(connect()) as db:
+            body_text = confighist.get(db, "paper_rules", version)
+        if body_text is None:
+            raise not_found("ルールの版")
+        try:
+            data = json.loads(body_text)
+            names = [r.get("name", "") for r in data.get("rules", []) if isinstance(r, dict)]
+        except (ValueError, AttributeError):
+            names = []
+        return {"version": version, "rules": names, "body": body_text}
+
+    @app.post("/api/paper/rules/history/{version}/restore")
+    def paper_rule_restore(version: int, user: User = Depends(require("paper.rules"))):
+        from ..paper import rules as paper_rule_file
+
+        with closing(connect()) as db:
+            body_text = confighist.get(db, "paper_rules", version)
+            if body_text is None:
+                raise not_found("ルールの版")
+            try:
+                paper_rule_file.parse_rules(json.loads(body_text), settings.paper_rules.parent, settings.paper_rules.name)
+            except (ValueError, paper_rule_file.RuleError) as e:
+                problems = getattr(e, "problems", [("", "JSON として読めません")])
+                raise ApiError(409, "invalid_version", "この版は、今の検証を通らないので戻せません",
+                               [{"where": w, "message": m} for w, m in problems]) from e
+            new = confighist.save(db, "paper_rules", settings.paper_rules, body_text, user.employee_no, f"版 {version} に戻した")
+        log.info("仕分けルールを版 %s に戻しました（新しい版 %s、%s）", version, new, user.employee_no)
+        return {"version": new, "rules": paper_rule_list(user)["rules"]}
 
     @app.post("/api/paper/convert", status_code=202)
     def paper_convert(req: PaperConvert, user: User = Depends(require("paper"))):

@@ -20,11 +20,12 @@ log = logging.getLogger("yanua.api")
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str):
+    def __init__(self, status: int, code: str, message: str, details: list[dict] | None = None):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.details = details   # 入力の誤りの一覧（[{"where": 位置, "message": 理由}]）。画面が項目の横に出す
 
 
 def not_logged_in() -> ApiError:
@@ -39,8 +40,11 @@ def not_found(what: str = "") -> ApiError:
     return ApiError(404, "not_found", f"{what}が見つかりません" if what else "見つかりません")
 
 
-def body(code: str, message: str) -> dict:
-    return {"error": {"code": code, "message": message}}
+def body(code: str, message: str, details: list[dict] | None = None) -> dict:
+    err: dict = {"code": code, "message": message}
+    if details:
+        err["details"] = details
+    return {"error": err}
 
 
 _HTTP_CODES = {
@@ -52,7 +56,7 @@ _HTTP_CODES = {
 def install(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, e: ApiError):
-        return JSONResponse(body(e.code, e.message), status_code=e.status)
+        return JSONResponse(body(e.code, e.message, e.details), status_code=e.status)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, e: StarletteHTTPException):

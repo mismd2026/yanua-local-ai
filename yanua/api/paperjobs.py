@@ -113,6 +113,11 @@ def get_plan(db: sqlite3.Connection, plan_id: str, owner: str) -> dict | None:
             "result": json.loads(r[5]) if r[5] else None}
 
 
+def plan_text(db: sqlite3.Connection, plan_id: str, index: int) -> str:
+    """予定を作ったときに取り出した文字（ルールの下書きに使う。PDF を読み直さない）。"""
+    return json.loads(db.execute("SELECT texts FROM paper_plans WHERE plan_id = ?", (plan_id,)).fetchone()[0])[index]
+
+
 def rechoose(db: sqlite3.Connection, plan_id: str, index: int, rule: str | None, inbox: Path, rs: rules.RuleSet) -> dict:
     """1件のルールを選び直す（rule が空なら、ルールで自動に決め直す）。PDF は読み直さない。"""
     items, texts = map(json.loads, db.execute("SELECT items, texts FROM paper_plans WHERE plan_id = ?", (plan_id,)).fetchone())
