@@ -71,14 +71,15 @@ from pydantic import BaseModel, Field
 
 from .. import hr, models, visits
 from ..answer import answer_question
-from ..llm import ChatModel, LLMError
+from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
 from ..store import Store
 from . import auth, desk, errors, files, kiosk, meetings, paperjobs
 from .auth import User
 from .chat import ChatDB, HelpdeskSessions, ReceptionSessions
 from .errors import ApiError, forbidden, not_found, not_logged_in
-from .jobs import FINISHED, JobContext, JobQueue
+from ..paper.extract import OCRUnavailable
+from .jobs import FINISHED, JobContext, JobFailed, JobQueue
 from ..identity import load_policy
 from .roles import allowed, load_roles, permissions_of
 from .settings import Settings
@@ -201,7 +202,10 @@ VISIT_CSV_COLUMNS = ("date", "time", "company", "visitor", "host_employee_no", "
 # ------------------------------------------------------------ 本体
 
 
-def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> FastAPI:
+def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, summary_llm: ChatModel | None = None) -> FastAPI:
+    """summary_llm は議事録の要約に使うモデル。渡さないとき、llm が Ollama なら settings.summary_model を同じ Ollama で使う。"""
+    if summary_llm is None:
+        summary_llm = OllamaChat(settings.summary_model, llm.base_url) if isinstance(llm, OllamaChat) else llm
     """transcriber_factory：文字起こしを作る関数（テストでは偽のものを渡す）。既定は社内の faster-whisper。"""
     settings.check()
     roles = load_roles(settings.roles_path)
@@ -252,7 +256,9 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         try:
             return WhisperTranscriber(models.verify(settings.whisper_model, settings.models_dir))
         except models.ModelError as e:
-            raise RuntimeError(f"文字起こしのモデルが使えません（管理者が models pull {settings.whisper_model} で入手してください）：{e}") from e
+            # 社員の画面には連絡のお願いだけを出す。入手のコマンドと理由は、管理者がログで見る
+            raise JobFailed("文字起こしのモデルが準備されていません。管理者に連絡してください",
+                            f"python -m yanua models pull {settings.whisper_model} で入手してください（{e}）") from e
 
     def paper_plan_job(ctx: JobContext, params: dict) -> dict:
         with closing(connect()) as db:
@@ -265,7 +271,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         with closing(connect()) as db:
             f = files.get(db, file_id, owner, kind)
         if not f:
-            raise RuntimeError("アップロードしたファイルが見つかりません（期限が過ぎて消えた可能性があります）。もう一度アップロードしてください")
+            raise JobFailed("アップロードしたファイルが見つかりません（期限が過ぎて消えた可能性があります）。もう一度アップロードしてください")
         return f
 
     def paper_convert_job(ctx: JobContext, params: dict) -> dict:
@@ -274,10 +280,13 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         else:
             src = paperjobs.inbox_path(settings.paper_inbox, params["inbox"])
             if not src:
-                raise RuntimeError("受信箱のファイルが見つかりません（ほかの人が仕分けて移した可能性があります）")
+                raise JobFailed("受信箱のファイルが見つかりません（ほかの人が仕分けて移した可能性があります）")
         out_dir = settings.work_dir / "results" / ctx.job_id
-        out, note = paperjobs.convert_pdf(src, out_dir, params["to"], paper_rules() if params["form"] else None,
-                                          params.get("rule"), progress=ctx.progress)
+        try:
+            out, note = paperjobs.convert_pdf(src, out_dir, params["to"], paper_rules() if params["form"] else None,
+                                              params.get("rule"), progress=ctx.progress)
+        except OCRUnavailable as e:
+            raise JobFailed(paperjobs.OCR_MISSING, str(e)) from e
         name = f"{Path(params['source_name']).stem}{''.join(out.suffixes[-1:])}"
         with closing(connect()) as db:
             f = files.add(db, file_id=files.new_id(), owner=params["owner"], kind="result", perm="paper", name=name,
@@ -291,8 +300,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         seg_path = Path(job_file(params["owner"], seg, "segments")["path"]) if seg else None
         with closing(connect()) as db:
             return meetings.process(db, params["meeting_id"], media=media, segments_file=seg_path,
-                                    transcriber_factory=transcriber_factory or whisper, llm=llm,
-                                    use_summary=params["summary"], progress=ctx.progress)
+                                    transcriber_factory=transcriber_factory or whisper, llm=summary_llm,
+                                    use_summary=params["summary"], progress=ctx.progress, job_id=ctx.job_id)
 
     jobs.register("paper-plan", paper_plan_job)
     jobs.register("paper-convert", paper_convert_job)
@@ -304,7 +313,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None) -> 
         try:
             return paper_rule_file.load_rules(settings.paper_rules)
         except (OSError, ValueError) as e:
-            raise ApiError(500, "paper_rules", f"仕分けルールを読めません：{e}") from e
+            log.error("仕分けルール %s を読めません：%s", settings.paper_rules, e)
+            raise ApiError(500, "paper_rules", "仕分けルールを読めません。管理者に連絡してください") from e
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

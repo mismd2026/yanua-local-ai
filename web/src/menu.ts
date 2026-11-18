@@ -39,6 +39,13 @@ export const MENU: MenuItem[] = [
     needs: ["visits.own"],
   },
   {
+    id: "S-13",
+    path: "/meetings",
+    label: "議事録",
+    description: "会議の録画から議事録を作れます。話し手・決まったこと・宿題を直して、Word で出せます。",
+    needs: ["meetings"],
+  },
+  {
     id: "S-22",
     path: "/visits/all",
     label: "全社の来訪予定",
@@ -58,6 +65,20 @@ export const MENU: MenuItem[] = [
     label: "問い合わせ票",
     description: "ヘルプデスクから引き継がれた問い合わせ票を、優先度・状態で絞り込んで対応できます。",
     needs: ["tickets"],
+  },
+  {
+    id: "S-20",
+    path: "/paper/sort",
+    label: "PDF の仕分け",
+    description: "受信箱のスキャンした PDF を、ルールに沿って名前を付けてフォルダに分けます。実行の前に予定を確かめられます。",
+    needs: ["paper"],
+  },
+  {
+    id: "S-21",
+    path: "/paper/convert",
+    label: "PDF の変換",
+    description: "PDF を Word・Excel や、会社の様式にします。",
+    needs: ["paper"],
   },
 ];
 

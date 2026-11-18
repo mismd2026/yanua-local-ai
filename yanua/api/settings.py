@@ -55,6 +55,7 @@ class Settings:
     # 議事録
     meeting_template: Path = Path("demo/company/meeting/templates/議事録.docx")   # 議事録の様式（Word）
     whisper_model: str = "whisper-small"         # 文字起こしのモデル（models pull で入手したもの）
+    summary_model: str = "qwen2.5:7b"            # 議事録の要約に使う Ollama のモデル。3b では要約・要点が空になりやすいので分ける
     models_dir: Path = Path("data/models")
     # 組み立てた Web画面（cd web && npm run build）。なければ API だけを動かす
     web_dist: Path | None = WEB_DIST

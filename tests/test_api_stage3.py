@@ -361,10 +361,25 @@ def test_meeting_transcribes_without_segments(client):
     assert "工事は土曜日に行う" in "".join(m["summary"]["decisions"])
 
 
+def test_meeting_without_model_shows_only_a_plain_message(settings, tmp_path, caplog):
+    # 文字起こしのモデルがないとき：社員の画面には連絡のお願いだけ。入手のコマンドはサーバーのログに残す
+    settings.models_dir = tmp_path / "no-models"
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        login(c, "10004")
+        media = upload(c, "recording", "m.mp4", b"0000").json()
+        r = c.post("/api/meetings", json={"upload_id": media["file_id"], "title": "t", "tool": "none"}, headers=H).json()
+        job = wait_job(c, r["job_id"])
+        m = c.get(f"/api/meetings/{r['meeting_id']}").json()
+    shown = "文字起こしのモデルが準備されていません。管理者に連絡してください"
+    assert job["status"] == "失敗" and job["error"] == shown
+    assert m["status"] == "失敗" and m["error"] == shown
+    assert "models pull whisper-small" in caplog.text
+
+
 def test_meeting_failure_is_recorded(settings):
     class Broken:
         def transcribe(self, media, prompt):
-            raise RuntimeError("文字起こしのモデルが使えません")
+            raise RuntimeError("/srv/secret/whisper の読み込みに失敗")
 
     with TestClient(create_app(settings, FakeLLM(), transcriber_factory=Broken)) as c:
         login(c, "10004")
@@ -372,5 +387,98 @@ def test_meeting_failure_is_recorded(settings):
         r = c.post("/api/meetings", json={"upload_id": media["file_id"], "title": "t", "tool": "none"}, headers=H).json()
         assert wait_job(c, r["job_id"])["status"] == "失敗"
         m = c.get(f"/api/meetings/{r['meeting_id']}").json()
-        assert m["status"] == "失敗" and "モデル" in m["error"]
+        # 思わぬ失敗の中身（置き場所など）は画面に出さず、ジョブ番号つきの決まった文にする
+        assert m["status"] == "失敗" and "secret" not in m["error"] and r["job_id"] in m["error"]
         assert c.get(f"/api/meetings/{r['meeting_id']}/minutes.docx").status_code == 409
+
+
+def test_paper_unknown_fields_are_flagged_and_same_names_do_not_overwrite(client, settings):
+    # 読み取れる項目のない同じような PDF を2つ「見積書」にすると、置き先の名前に「不明」が入り、同じ名前になる
+    for name in TEXT_PDFS:
+        (settings.paper_inbox / name).unlink()
+    for name in ("a.pdf", "b.pdf"):
+        shutil.copy2(PAPER / "inbox" / "scan_0005.pdf", settings.paper_inbox / name)
+    login(client, "10002")
+    done = wait_job(client, client.post("/api/paper/plans", json={}, headers=H).json()["job_id"])
+    plan_id = done["result"]["plan_id"]
+    items = [client.put(f"/api/paper/plans/{plan_id}/items/{i}", json={"rule": "見積書"}, headers=H).json() for i in (0, 1)]
+    assert items[0]["dest"] == items[1]["dest"] and "不明" in items[0]["dest"]
+    assert items[0]["missing"], items[0]            # 「不明」にした項目を返す（画面が注意を出す）
+    # すでに同じ名前のファイルがあっても上書きしない
+    dest = settings.paper_out / items[0]["dest"]
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"before")
+    result = client.post(f"/api/paper/plans/{plan_id}/execute", json={}, headers=H).json()
+    assert dest.read_bytes() == b"before"
+    assert len(result["placed"]) == 2 and len(set(result["placed"])) == 2
+    assert [r["placed"].rsplit(".", 1)[0][-2:] for r in result["renamed"]] == ["_2", "_3"]
+    assert all((settings.paper_out / p).read_bytes()[:5] == b"%PDF-" for p in result["placed"])
+
+
+class CountingLLM:
+    """要約のモデルとして呼ばれた回数を数え、JSON にならない答えを返す（3b で要約が空になった形）。"""
+
+    name = "small-model"
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages):
+        self.calls += 1
+        return "すみません、うまくまとめられませんでした。"
+
+
+def test_summary_uses_its_own_model_and_empty_summary_is_flagged(settings, caplog):
+    main, summary_llm = CountingLLM(), CountingLLM()
+    with TestClient(create_app(settings, main, summary_llm=summary_llm)) as c:
+        meeting_id, done = make_meeting(c)
+        m = c.get(f"/api/meetings/{meeting_id}").json()
+        assert done["status"] == "完了" and m["status"] == "確認待ち"
+        assert summary_llm.calls > 0 and main.calls == 0, "要約は要約のモデルで作る"
+        # 要約が空のとき：画面には決まった文、理由はログに
+        assert m["summary"]["summary"] == "" and m["summary_note"] == "要約を作れませんでした。録画と照らして書いてください"
+        assert "要約が空になりました（モデル small-model）" in caplog.text and "JSON" in caplog.text
+        assert m["summary"]["decisions"], "決まった言い方の発言から拾った分は残る"
+
+
+def test_default_summary_model_is_7b(settings):
+    from yanua.llm import OllamaChat
+
+    assert settings.summary_model == "qwen2.5:7b"
+    seen = {}
+
+    def fake_process(db, meeting_id, **kw):
+        seen["llm"] = kw["llm"]
+        return {}
+
+    app = create_app(settings, OllamaChat("qwen2.5:3b-instruct", "http://127.0.0.1:11434"))
+    from yanua.api import meetings as mod
+
+    orig, mod.process = mod.process, fake_process
+    try:
+        with TestClient(app) as c:
+            meeting_id, _ = make_meeting(c)
+    finally:
+        mod.process = orig
+    assert seen["llm"].name == "qwen2.5:7b" and seen["llm"].base_url == "http://127.0.0.1:11434"
+
+
+def test_attendees_are_screen_names_and_can_be_edited(client):
+    # 会議ツールの画面に出た名前（会議室のアカウント名も）を、そのまま出席者に使う
+    meeting_id, _ = make_meeting(client, participants=["本社5F会議室", "佐藤 花子"])
+    m = client.get(f"/api/meetings/{meeting_id}").json()
+    assert m["attendees"] == ["本社5F会議室", "佐藤 花子"], m["attendees"]
+    segs = [{**s, "speaker": "本社5F会議室"} for s in m["segments"]]
+    m = client.put(f"/api/meetings/{meeting_id}", json={"segments": segs}, headers=H).json()
+    assert m["segments"][0]["speaker"] == "本社5F会議室" and "本社5F会議室" in m["attendees"]
+    # 出席者を画面で直す。Word にも直した出席者が入る
+    m = client.put(f"/api/meetings/{meeting_id}", json={"attendees": ["佐藤 花子", " 高橋 美咲 ", ""]}, headers=H).json()
+    assert m["attendees"] == ["佐藤 花子", "高橋 美咲"]
+    assert client.get(f"/api/meetings/{meeting_id}").json()["attendees"] == ["佐藤 花子", "高橋 美咲"]
+    from docx import Document
+    import io
+
+    doc = Document(io.BytesIO(client.get(f"/api/meetings/{meeting_id}/minutes.docx").content))
+    text = "\n".join(p.text for p in doc.paragraphs) + "\n".join(c.text for t in doc.tables for r in t.rows for c in r.cells)
+    assert "佐藤 花子、高橋 美咲" in text, text[:300]
+    assert client.put(f"/api/meetings/{meeting_id}", json={"attendees": "佐藤"}, headers=H).status_code == 400

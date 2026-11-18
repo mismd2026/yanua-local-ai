@@ -10,6 +10,9 @@ import Reception from "./pages/Reception";
 import Tickets from "./pages/Tickets";
 import Visits from "./pages/Visits";
 import VisitsAll from "./pages/VisitsAll";
+import Meetings from "./pages/Meetings";
+import PaperConvert from "./pages/PaperConvert";
+import PaperSort from "./pages/PaperSort";
 
 type State = { kind: "loading" } | { kind: "out"; notice?: string } | { kind: "in"; me: Me } | { kind: "error"; message: string };
 
@@ -94,6 +97,12 @@ function Page({ path, me }: { path: string; me: Me }) {
       return can("reception.records") ? <Reception /> : <NoPermission />;
     case "/tickets":
       return can("tickets") ? <Tickets /> : <NoPermission />;
+    case "/meetings":
+      return can("meetings") ? <Meetings /> : <NoPermission />;
+    case "/paper/sort":
+      return can("paper") ? <PaperSort /> : <NoPermission />;
+    case "/paper/convert":
+      return can("paper") ? <PaperConvert /> : <NoPermission />;
     default:
       return <NotFound />;
   }

@@ -17,7 +17,10 @@ NOTE = "この議事録は Yanua が録画・録音から作った下書きで�
 
 
 def attendees(segments: list[Segment], extra: list[str] | None = None) -> list[str]:
-    """話し手として読み取れた名前（発言の多い順）と、指定された出席者。"""
+    """話し手として読み取れた名前（発言の多い順）と、指定された出席者。
+
+    名前は会議ツールの画面に出たもの（ログインした人の名前か、会議室のアカウント名）をそのまま使う。
+    「本社5F会議室」のような会議室のアカウント名も、話し手・出席者として残す。"""
     counted = Counter(s.speaker for s in segments if s.speaker and s.speaker != "不明")
     names = [n for n, _ in counted.most_common()]
     return names + [n for n in (extra or []) if n not in names]

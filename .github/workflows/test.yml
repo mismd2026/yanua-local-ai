@@ -38,8 +38,18 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      - name: 依存ライブラリの脆弱性検査
+      # 依存ライブラリの脆弱性検査は2段にする（README「依存ライブラリと…」）
+      # 1段目：配る画面に入るもの（dependencies）。指摘があれば止める
+      - name: 依存ライブラリの脆弱性検査（配る画面に入るもの）
+        run: npm audit --omit=dev
+      # 2段目：組み立て・テストの道具（devDependencies）も含めた全部。指摘があっても止めず、警告として出す
+      - name: 依存ライブラリの脆弱性検査（開発用の道具を含む全部。止めない）
+        id: audit_all
+        continue-on-error: true
         run: npm audit
+      - name: 全部の検査の指摘を警告として出す
+        if: steps.audit_all.outcome == 'failure'
+        run: echo "::warning title=npm audit（開発用の道具を含む）::開発用の道具に既知の脆弱性の指摘があります。配る画面には入りませんが、直った版が出たら上げてください。中身は前のステップのログを見てください。"
       - name: 画面のテスト
         run: npm test
       - name: 型の確認と組み立て

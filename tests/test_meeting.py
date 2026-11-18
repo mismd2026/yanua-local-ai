@@ -271,3 +271,12 @@ def test_transcriber_receives_company_words(tmp_path):
     meeting_run.run(VIDEO, title="t", out_dir=tmp_path, transcriber=t, tool="none", names=["高橋 美咲"], depts=["営業部"],
                     glossary=["稟議"])
     assert t.prompt == "稟議、営業部、高橋 美咲"
+
+
+def test_decode_audio_reads_mp4_without_the_removed_pyav_argument():
+    # faster-whisper 1.2.1 の取り出しは PyAV 19 で止まるので、自分で取り出す（16kHz・1チャンネル）
+    from yanua.meeting.transcribe import SAMPLE_RATE, decode_audio
+
+    audio = decode_audio(ROOT / "demo" / "company" / "meeting" / "demo_zoom.mp4")
+    assert audio.dtype.name == "float32" and 43 < len(audio) / SAMPLE_RATE < 45
+

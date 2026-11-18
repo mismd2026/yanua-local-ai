@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import csv
+import os
+import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,8 @@ class Plan:
     ocr: bool
     error: str = ""
     text: str = ""      # 取り出した文字（--text で .txt に残すとき、読み直さずに使う）
+    missing: list[str] = field(default_factory=list)  # 名前に使う項目のうち、読み取れずに「不明」にしたもの
+    error_kind: str = ""  # 読めなかった理由の種類（ocr：OCR の仕組みがない / read：PDF を読めない）。画面の文を決めるのに使う
 
 
 def plan(pdfs: list[Path], rs: RuleSet, llm: ChatModel | None = None, forced: str | None = None,
@@ -38,10 +42,10 @@ def plan(pdfs: list[Path], rs: RuleSet, llm: ChatModel | None = None, forced: st
         try:
             doc = read_pdf(pdf, ocr=ocr)
         except OCRUnavailable as e:
-            plans.append(Plan(pdf, "", "none", {}, None, False, str(e)))
+            plans.append(Plan(pdf, "", "none", {}, None, False, str(e), error_kind="ocr"))
             continue
         except Exception as e:  # noqa: BLE001  壊れたPDFなどは、その1件だけ飛ばす
-            plans.append(Plan(pdf, "", "none", {}, None, False, f"読めませんでした: {e}"))
+            plans.append(Plan(pdf, "", "none", {}, None, False, f"読めませんでした: {e}", error_kind="read"))
             continue
         plans.append(plan_from_text(pdf, doc.text, doc.used_ocr, rs, llm, forced))
     return plans
@@ -53,22 +57,30 @@ def plan_from_text(pdf: Path, text: str, used_ocr: bool, rs: RuleSet, llm: ChatM
     m = choose(rs, text, llm, forced)
     values = find_fields(text, m.rule, rs.self_names)
     values.update(rule=m.rule.name if m.rule else "未分類", original=pdf.stem)
+    templates = (m.rule.folder + m.rule.filename) if m.rule else (rs.unmatched_folder + rs.unmatched_filename)
+    missing = list(dict.fromkeys(k for k in re.findall(r"\{(\w+)\}", templates) if not values.get(k)))
     folder = render(m.rule.folder if m.rule else rs.unmatched_folder, values)
     # ファイル名にフォルダの区切りが入らないようにする（保存先の外へ出ないように）
     name = render(m.rule.filename if m.rule else rs.unmatched_filename, values).replace("/", "_").replace("\\", "_")
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     dest = Path(*[p for p in Path(folder).parts if p not in ("..", ".", "/", "\\")]) / name
-    return Plan(pdf, m.rule.name if m.rule else "", m.by, values, dest, used_ocr, text=text)
+    return Plan(pdf, m.rule.name if m.rule else "", m.by, values, dest, used_ocr, text=text, missing=missing)
 
 
 def _free_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for i in range(2, 1000):
-        p = path.with_name(f"{path.stem}_{i}{path.suffix}")
-        if not p.exists():
+    """同じ名前がなければその名前、あれば _2, _3 … を付けた名前を、空のファイルを作って押さえてから返す。
+
+    確かめてから置くまでの間に、ほかの人の実行が同じ名前に置いて上書きすることがないように、
+    「なければ作る」を1回の操作（O_EXCL）で行う。押さえた空のファイルに、このあとコピー（移動）する。
+    """
+    for i in range(1, 1000):
+        p = path if i == 1 else path.with_name(f"{path.stem}_{i}{path.suffix}")
+        try:
+            os.close(os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
             return p
+        except FileExistsError:
+            continue
     raise FileExistsError(path)
 
 
@@ -95,7 +107,11 @@ def execute(plans: list[Plan], out_dir: Path, move: bool = False, text: bool = F
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target = _free_path(target)
-            (shutil.move if move else shutil.copy2)(str(p.source), str(target))
+            try:
+                (shutil.move if move else shutil.copy2)(str(p.source), str(target))
+            except BaseException:
+                target.unlink(missing_ok=True)   # 押さえた空のファイルを残さない
+                raise
             if text:
                 target.with_suffix(".txt").write_text(p.text, encoding="utf-8")
             if form and rules and p.rule:

@@ -271,3 +271,11 @@ def test_template_format_must_be_known(tmp_path):
     bad.write_text(json.dumps({"rules": [{"name": "x", "templates": {"pdf": "a.pdf"}}]}), encoding="utf-8")
     with pytest.raises(rules.RuleError, match="xlsx か docx"):
         rules.load_rules(bad)
+
+
+def test_free_path_reserves_the_name(tmp_path):
+    from yanua.paper.sort import _free_path
+
+    first = _free_path(tmp_path / "x.pdf")
+    second = _free_path(tmp_path / "x.pdf")      # 1つ目を置く前でも、同じ名前は返さない
+    assert first.name == "x.pdf" and second.name == "x_2.pdf" and first.exists() and second.exists()
