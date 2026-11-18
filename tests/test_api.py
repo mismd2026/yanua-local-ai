@@ -57,7 +57,7 @@ def settings(tmp_path):
     s.close()
     return Settings(db_path=db, chat_db_path=tmp_path / "chat.db", helpdesk_data=DEMO / "flows" / "helpdesk",
                     roles_path=ROOT / "config" / "roles.json", dev_login=True, ingest_roots=[DEMO],
-                    web_dist=None)
+                    web_dist=None, settings_dir=tmp_path / "settings")   # 画面で変えた設定は作業用の場所に
 
 
 @pytest.fixture

@@ -32,6 +32,7 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "kiosk.devices": frozenset({"管理者"}),           # 受付端末の登録・取り消し
     # 段階3（K-046・K-047）
     "paper": frozenset({"総務"}),                     # PDF の仕分け・変換（受信箱・予定・実行・記録・変換・結果のダウンロード）
+    "paper.rules": frozenset({"総務"}),               # 仕分けルールの下書き・保存・前の版に戻す
     "meetings": frozenset({EMPLOYEE}),                # 議事録（自分が作ったものだけ。総務も社員なので使える）
 }
 # 受付端末は人の役割ではない。端末トークンで受付の API（/api/kiosk/...）だけを使える（yanua/api/kiosk.py）

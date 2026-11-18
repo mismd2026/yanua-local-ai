@@ -288,3 +288,154 @@ describe("S-13 議事録", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("見つかりません");
   });
 });
+
+describe("K-047 仕分けルールの下書き・保存・前の版", () => {
+  const draft = { name: "案内", keywords: { any: ["案内"], all: [], none: [] }, fields: {}, filename: "{date}_案内_{company}.pdf", folder: "案内/{yyyy}/{mm}", priority: 0 };
+  const planRoutes = (items: object[]) => ({
+    "GET /api/paper/rules": RULES, "GET /api/paper/history?limit=100": { records: [] },
+    "GET /api/paper/plans/p1": { plan_id: "p1", created_at: "2026-11-18T10:00:00+09:00", items, executed_at: null, result: null },
+  });
+
+  it("未分類の行から下書きを作り、誤りを項目の横に出し、直して保存し、予定を作り直す", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    const unsorted = item({ index: 0, file: "scan_0005.pdf", rule: "", by: "none", fields: {}, dest: "未分類/scan_0005.pdf" });
+    let saves = 0;
+    const { calls } = fakeApi({
+      ...planRoutes([unsorted]),
+      "GET /api/paper/rules/history": { versions: [], current: null },
+      "POST /api/paper/rule-drafts": job({ job_id: "d1", kind: "paper-rule-draft", status: "待ち" }),
+      "GET /api/jobs/d1": job({ job_id: "d1", kind: "paper-rule-draft", result: { draft, source: "scan_0005.pdf", excerpt: "会社案内のお知らせ", text: "会社案内のお知らせ" } }),
+      "POST /api/paper/rules/validate": { ok: true, warnings: [{ where: "filename", message: "{date} は、この PDF からは読み取れませんでした" }] },
+      "POST /api/paper/rules": (body: { rule: { filename: string } }) => {
+        saves += 1;
+        if (body.rule.filename.includes("{nothing}"))
+          return { status: 400, json: { error: { code: "invalid_rule", message: "ルールに直すところがあります",
+            details: [{ where: "filename", message: "{nothing} という項目はありません" }] } } };
+        return { status: 201, json: { version: 2, rules: [...RULES.rules, { name: "案内", templates: [] }] } };
+      },
+      "POST /api/paper/plans": job({ job_id: "j9", status: "待ち" }),
+      "GET /api/jobs/j9": job({ job_id: "j9", result: { plan_id: "p2", count: 1, errors: 0 } }),
+      "GET /api/paper/plans/p2": { plan_id: "p2", created_at: "2026-11-18T10:05:00+09:00", items: [{ ...unsorted, rule: "案内", by: "rule", dest: "案内/2026/11/x.pdf" }], executed_at: null, result: null },
+    });
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    const user = userEvent.setup();
+    render(<PaperSort canRules />);
+    await user.click(await screen.findByRole("button", { name: "scan_0005.pdf からルールの下書きを作る" }));
+    // 開いた下書きの欄まで、画面を動かす
+    expect(scroll).toHaveBeenCalled();
+    expect(scroll.mock.contexts[0]).toBe(screen.getByRole("region", { name: "ルールの下書き" }));
+    await user.click(screen.getByRole("button", { name: "下書きを作る" }));
+    expect(calls.find((c) => c.path === "/api/paper/rule-drafts")?.body).toEqual({ plan_id: "p1", index: 0, name: null, use_llm: false });
+
+    const filename = await screen.findByLabelText("ファイル名");
+    expect(screen.getByLabelText("ルールの名前（書類の種類）")).toHaveValue("案内");
+    await user.clear(filename);
+    await user.type(filename, "{{date}_{{nothing}.pdf");
+    await user.click(screen.getByRole("button", { name: "保存する" }));
+    expect(await screen.findByText("{nothing} という項目はありません")).toBeInTheDocument();
+    expect(screen.getByText("ルールに直すところがあります（1件）")).toBeInTheDocument();
+
+    await user.clear(filename);
+    await user.type(filename, "{{date}_案内.pdf");
+    // 確かめると、PDF から読み取れない項目に注意を出す（誤りではないので保存はできる）
+    await user.click(screen.getByRole("button", { name: "確かめる" }));
+    expect(await screen.findByText(/{date} は、この PDF からは読み取れませんでした/)).toBeInTheDocument();
+    expect(screen.getByText("誤りはありません。注意を見てから保存してください。")).toBeInTheDocument();
+    expect(calls.find((c) => c.path === "/api/paper/rules/validate")?.body.sample_text).toBe("会社案内のお知らせ");
+    await user.click(screen.getByRole("button", { name: "保存する" }));
+    expect(await screen.findByText(/ルールを保存しました（版 2）/)).toBeInTheDocument();
+    expect(saves).toBe(2);
+    expect(calls.filter((c) => c.path === "/api/paper/rules" && c.method === "POST").pop()?.body.rule).toMatchObject({ name: "案内", filename: "{date}_案内.pdf", keywords: { any: ["案内"] } });
+
+    // 保存したルールを、予定を作り直して使う
+    await user.click(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" }));
+    expect(calls.find((c) => c.path === "/api/paper/plans" && c.method === "POST")?.body).toEqual({ files: ["scan_0005.pdf"], use_llm: false });
+    expect(await screen.findByText("案内/2026/11/x.pdf")).toBeInTheDocument();
+    expect(window.location.search).toBe("?plan=p2");
+  });
+
+  it("前の版に、確かめてから戻す", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    let current = 3;
+    const { calls } = fakeApi({
+      ...planRoutes([item()]),
+      "GET /api/paper/rules/history": () => ({ json: { current, versions: [
+        { version: 3, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "10002", saved_by_name: "佐藤 花子", action: "ルール「案内」を足した" },
+        { version: 2, saved_at: "2026-11-18T09:00:00+09:00", saved_by: "（ファイル）", saved_by_name: "（ファイル）", action: "保存の前の中身（ファイルの版）" },
+      ] } }),
+      "POST /api/paper/rules/history/2/restore": () => {
+        current = 4;
+        return { json: { version: 4, rules: RULES.rules } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<PaperSort canRules />);
+    expect(await screen.findByText("ルール「案内」を足した")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "版 3 に戻す" })).not.toBeInTheDocument();   // 今の版には戻せない
+    await user.click(screen.getByRole("button", { name: "版 2 に戻す" }));
+    expect(calls.some((c) => c.path.endsWith("/restore"))).toBe(false);
+    await user.click(screen.getByRole("button", { name: "はい、戻す" }));
+    expect(await screen.findByText("版 2 の中身に戻しました（新しい版 4）。")).toBeInTheDocument();
+    // 保存のときと同じく、作り直しの知らせとボタンを出す
+    expect(screen.getByText(/ルールを版 2 の中身に戻しました（新しい版 4）。予定を作り直すと、新しいルールが使われます。/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
+  });
+
+  it("画面で保存したあとに既定のルールが更新されたら知らせ、確かめてから既定に戻す", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    let using: "saved" | "default" = "saved";
+    const status = () => ({ using, default_changed: using === "saved", current_version: using === "saved" ? 2 : 3, default_updated_at: "2026-11-18T12:00:00+09:00" });
+    const { calls } = fakeApi({
+      ...planRoutes([item()]),
+      "GET /api/paper/rules/status": () => ({ json: status() }),
+      "GET /api/paper/rules/history": () => ({ json: { current: status().current_version, status: status(), versions: [
+        { version: 2, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "10002", saved_by_name: "佐藤 花子", action: "ルール「案内」を足した" },
+        { version: 1, saved_at: "2026-11-18T10:00:00+09:00", saved_by: "（既定）", saved_by_name: "（既定）", action: "保存の前の中身（既定）" },
+      ] } }),
+      "POST /api/paper/rules/reset": () => {
+        using = "default";
+        return { json: { version: 3, rules: RULES.rules } };
+      },
+    });
+    const user = userEvent.setup();
+    render(<PaperSort canRules />);
+    expect(await screen.findByText(/既定のルールが更新されています/)).toBeInTheDocument();
+    expect(await screen.findByText("画面で保存したもの")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "既定に戻す" }));
+    expect(calls.some((c) => c.path === "/api/paper/rules/reset")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "はい、既定に戻す" }));
+    expect(await screen.findByText(/既定のルールに戻しました（版 3）/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/既定のルールが更新されています/)).not.toBeInTheDocument());
+    expect(screen.getByText("既定")).toBeInTheDocument();
+    expect(screen.getByText(/ルールを既定に戻しました（版 3）。予定を作り直すと、新しいルールが使われます。/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
+  });
+
+  it("予定のあとに使ったルールがなくなっていたら、実行を止めて作り直しを促す", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    fakeApi({
+      ...planRoutes([item({ rule: "案内", dest: "案内/2026/11/x.pdf" })]),
+      "POST /api/paper/plans/p1/execute": () => ({ status: 409, json: { error: { code: "rules_gone",
+        message: "予定を作ったあとに、使ったルールがなくなりました。予定を作り直してから実行してください",
+        details: [{ where: "scan_0001.pdf", message: "ルール「案内」は今のルールにありません" }] } } }),
+    });
+    const user = userEvent.setup();
+    render(<PaperSort />);
+    expect(screen.queryByRole("button", { name: "この予定のファイルで、予定を作り直す" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "実行する" }));
+    await user.click(screen.getByRole("button", { name: "はい、実行する" }));
+    expect(await screen.findByText(/使ったルールがなくなりました/)).toBeInTheDocument();
+    expect(screen.getByText("scan_0001.pdf：ルール「案内」は今のルールにありません")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
+  });
+
+  it("ルールの権限がなければ、下書きのボタンと版を出さない", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    const { calls } = fakeApi(planRoutes([item({ rule: "", by: "none" })]));
+    render(<PaperSort />);
+    expect(await screen.findByText(item().dest)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /ルールの下書き/ })).not.toBeInTheDocument();
+    expect(calls.some((c) => c.path.includes("/rules/history"))).toBe(false);
+  });
+});

@@ -56,7 +56,18 @@ BAD_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
 
 class RuleError(ValueError):
-    pass
+    """ルールのファイルの誤り。problems には (位置, 理由) を、見つけた順にすべて入れる。
+
+    位置は画面で直す場所が分かる書き方にする（例：「rules[2].fields.invoice_no」「rules[1].filename」）。
+    """
+
+    def __init__(self, message: str, problems: list[tuple[str, str]] | None = None):
+        super().__init__(message)
+        self.problems = problems or [("", message)]
+
+
+# ファイル名と保存先で使える項目（fields に書いた独自の項目も使える）
+BASE_FIELDS = ("date", "yyyy", "mm", "dd", "amount", "company", "to", "rule", "original")
 
 
 @dataclass
@@ -89,31 +100,155 @@ class RuleSet:
         raise RuleError(f"ルール「{name}」はありません（ある: {'、'.join(self.names())}）")
 
 
-def load_rules(path: Path) -> RuleSet:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    rules = []
-    for i, r in enumerate(data.get("rules", []), start=1):
-        if not r.get("name"):
-            raise RuleError(f"{path.name}: {i}番目のルールに name がありません")
+def load_rules(path: Path, base_dir: Path | None = None) -> RuleSet:
+    """ルールのファイルを読む。様式のファイルは base_dir（省略時はルールのファイルのフォルダ）からの相対パス。"""
+    return parse_rules_text(path.read_text(encoding="utf-8"), base_dir or path.parent, path.name)
+
+
+def parse_rules_text(text: str, base_dir: Path, label: str = "rules.json") -> RuleSet:
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        where = f"{getattr(e, 'lineno', '?')}行目 {getattr(e, 'colno', '?')}文字目"
+        raise RuleError(f"{label}: JSON として読めません（{where}）: {e}", [(where, f"JSON として読めません: {getattr(e, 'msg', e)}")]) from e
+    return parse_rules(data, base_dir, label)
+
+
+def rule_problems(text: str, base_dir: Path) -> list[tuple[str, str]]:
+    """設定の部品（yanua/settingfiles.py）の検証として使う。誤りがなければ空。"""
+    try:
+        parse_rules_text(text, base_dir)
+    except RuleError as e:
+        return e.problems
+    return []
+
+
+def _strs(v) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def parse_rules(data, base_dir: Path, label: str = "rules.json") -> RuleSet:
+    """ルールの中身（JSON を読んだもの）を確かめて RuleSet にする。ファイルを読むときも、画面から保存するときも、これを通す。
+
+    誤りは1つ目で止めず、すべて集めて RuleError にする（位置つき）。
+    """
+    problems: list[tuple[str, str]] = []
+
+    def bad(where: str, why: str) -> None:
+        problems.append((where, why))
+
+    if not isinstance(data, dict):
+        raise RuleError(f"{label}: いちばん外側は {{...}}（オブジェクト）にしてください", [("", "いちばん外側は {...}（オブジェクト）にしてください")])
+    raw = data.get("rules", [])
+    if not isinstance(raw, list):
+        bad("rules", "ルールの一覧は [...]（配列）にしてください")
+        raw = []
+    if "self_names" in data and not _strs(data["self_names"]):
+        bad("self_names", "自社の名前は、文字の一覧にしてください")
+    rules, seen = [], {}
+    for i, r in enumerate(raw, start=1):
+        at = f"rules[{i}]"
+        if not isinstance(r, dict):
+            bad(at, "ルールは {...}（オブジェクト）にしてください")
+            continue
+        name = r.get("name")
+        if not isinstance(name, str) or not name.strip():
+            bad(f"{at}.name", "ルールの名前がありません")
+            name = ""
+        elif name in seen:
+            bad(f"{at}.name", f"同じ名前のルール「{name}」が {seen[name]} にもあります")
+        else:
+            seen[name] = at
         kw = r.get("keywords", {})
-        templates = {}
-        for fmt, t in r.get("templates", {}).items():
-            if fmt not in ("xlsx", "docx"):
-                raise RuleError(f"{path.name}: ルール「{r['name']}」の様式は xlsx か docx にしてください（{fmt}）")
-            templates[fmt] = (path.parent / t).resolve()   # ルールのファイルからの相対パス
-        rule = Rule(r["name"], kw.get("any", []), kw.get("all", []), kw.get("none", []), r.get("fields", {}),
-                    r.get("filename", Rule.filename), r.get("folder", Rule.folder), int(r.get("priority", 0)), templates)
-        for key, pattern in rule.fields.items():
+        if not isinstance(kw, dict):
+            bad(f"{at}.keywords", "見分ける言葉は {\"any\": [...], \"all\": [...], \"none\": [...]} の形にしてください")
+            kw = {}
+        for k in ("any", "all", "none"):
+            if k in kw and not _strs(kw[k]):
+                bad(f"{at}.keywords.{k}", "言葉の一覧（文字の配列）にしてください")
+        if not any(_strs(kw.get(k, [])) and kw.get(k) for k in ("any", "all")):
+            bad(f"{at}.keywords", "見分ける言葉（any か all）を1つ以上書いてください。言葉がないと、どの書類にも当たってしまいます")
+        fields = r.get("fields", {})
+        if not isinstance(fields, dict):
+            bad(f"{at}.fields", "独自の項目は {\"項目名\": \"正規表現\"} の形にしてください")
+            fields = {}
+        for key, pattern in fields.items():
+            where = f"{at}.fields.{key}"
+            if not re.fullmatch(r"\w+", key):
+                bad(where, "項目名は、英数字と _ だけにしてください")
+            if not isinstance(pattern, str):
+                bad(where, "正規表現は文字で書いてください")
+                continue
             try:
                 if re.compile(pattern).groups < 1:
-                    raise RuleError(f"{path.name}: ルール「{rule.name}」の {key} の正規表現に、かっこ（取り出す部分）がありません")
+                    bad(where, "正規表現に、かっこ（取り出す部分）がありません")
             except re.error as e:
-                raise RuleError(f"{path.name}: ルール「{rule.name}」の {key} の正規表現が正しくありません: {e}") from e
-        rules.append(rule)
-    if len({r.name for r in rules}) != len(rules):
-        raise RuleError(f"{path.name}: 同じ名前のルールがあります")
+                bad(where, regex_message(e))
+        known = set(BASE_FIELDS) | {k for k in fields if isinstance(k, str)}
+        for part, default in (("filename", Rule.filename), ("folder", Rule.folder)):
+            v = r.get(part, default)
+            where = f"{at}.{part}"
+            if not isinstance(v, str) or not v.strip():
+                bad(where, "空にできません")
+                continue
+            for key in re.findall(r"\{(\w*)\}", v):
+                if key not in known:
+                    bad(where, f"{{{key}}} という項目はありません（使える項目：{'・'.join('{' + k + '}' for k in sorted(known))}）")
+            if ".." in v.replace("\\", "/").split("/"):
+                bad(where, "「..」は使えません")
+        priority = r.get("priority", 0)
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            bad(f"{at}.priority", "優先度は整数にしてください")
+            priority = 0
+        templates = {}
+        tpl = r.get("templates", {})
+        if not isinstance(tpl, dict):
+            bad(f"{at}.templates", "様式は {\"xlsx\": \"ファイル\"} の形にしてください")
+            tpl = {}
+        for fmt, t in tpl.items():
+            where = f"{at}.templates.{fmt}"
+            if fmt not in ("xlsx", "docx"):
+                bad(where, "様式は xlsx か docx にしてください")
+                continue
+            if not isinstance(t, str) or not t:
+                bad(where, "様式のファイルを書いてください")
+                continue
+            templates[fmt] = (base_dir / t).resolve()   # ルールのファイルからの相対パス（ファイルがあるかは差し込むときに確かめる）
+        rules.append(Rule(name, kw.get("any", []) if _strs(kw.get("any", [])) else [],
+                          kw.get("all", []) if _strs(kw.get("all", [])) else [],
+                          kw.get("none", []) if _strs(kw.get("none", [])) else [],
+                          {k: v for k, v in fields.items() if isinstance(v, str)},
+                          r.get("filename", Rule.filename), r.get("folder", Rule.folder), priority, templates))
     un = data.get("unmatched", {})
+    if not isinstance(un, dict):
+        bad("unmatched", "どれにも当たらないときの置き先は {\"folder\": ..., \"filename\": ...} の形にしてください")
+        un = {}
+    if problems:
+        first = "、".join(f"{w}: {m}" if w else m for w, m in problems[:3])
+        raise RuleError(f"{label}: {first}" + (f" ほか {len(problems) - 3} 件" if len(problems) > 3 else ""), problems)
     return RuleSet(rules, data.get("self_names", []), un.get("folder", "未分類"), un.get("filename", "{original}"))
+
+
+# 正規表現の誤り（Python の英語の文）のうち、よくあるものを日本語にする。ほかは原文を添える
+REGEX_MESSAGES = [
+    ("missing ), unterminated subpattern", "かっこ「(」が閉じていません"),
+    ("unbalanced parenthesis", "閉じかっこ「)」に合う「(」がありません"),
+    ("unterminated character set", "「[」が閉じていません"),
+    ("nothing to repeat", "繰り返しの記号（* + ? {}）の前に、繰り返すものがありません"),
+    ("multiple repeat", "繰り返しの記号（* + ?）が続いています"),
+    ("bad escape (end of pattern)", "最後の「\\」のあとに文字がありません"),
+    ("bad escape", "「\\」のあとの文字が使えません（記号そのものを探すときは「\\.」のように書きます）"),
+    ("bad character range", "[ ] の中の範囲の順番が逆です（例：[0-9] のように小さいほうから書きます）"),
+    ("min repeat greater than max repeat", "{ } の回数が、小さいほうと大きいほうで逆です"),
+]
+
+
+def regex_message(e: re.error) -> str:
+    at = f"（{e.pos + 1}文字目）" if e.pos is not None else ""
+    for en, ja in REGEX_MESSAGES:
+        if e.msg.startswith(en):
+            return f"正規表現の誤り：{ja}{at}"
+    return f"正規表現が正しくありません{at}（原文：{e.msg}）"
 
 
 def norm(text: str) -> str:
@@ -226,8 +361,9 @@ def choose(rs: RuleSet, text: str, llm: ChatModel | None = None, forced: str | N
 # ------------------------------------------------------------------ ルールの下書き
 
 
-def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None) -> dict:
-    """見本のPDFの文字から、ルールの下書きを作る。下書きは人が確かめてからルールのファイルに足す。"""
+def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None, self_names: list[str] | None = None) -> dict:
+    """見本のPDFの文字から、ルールの下書きを作る。下書きは人が確かめてからルールのファイルに足す。
+    ファイル名と保存先の案は、この PDF から読み取れた項目（日付・相手先）だけで作る（読み取れない項目は「不明」になるため）。"""
     t = norm(text)
     head = "\n".join(t.splitlines()[:6])
     kind = name or next((k for k in KNOWN_TYPES if k in head), None) or next((k for k in KNOWN_TYPES if k in t), None)
@@ -243,11 +379,33 @@ def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None)
         except Exception:  # noqa: BLE001
             pass
     kind = kind or "（種類の名前）"
+    found = find_fields(t, None, self_names or [])
+    has_date, has_company = "date" in found, "company" in found
+    parts = (["{date}"] if has_date else []) + [kind] + (["{company}"] if has_company else [])
+    if not (has_date or has_company):
+        parts.append("{original}")    # 日付も相手先もないときは、元のファイル名で分ける（同じ名前にならないように）
     return {
         "name": kind,
         "keywords": {"any": keywords[:4], "all": [], "none": []},
         "fields": {},
-        "filename": "{date}_" + kind + "_{company}.pdf",
-        "folder": kind + "/{yyyy}/{mm}",
+        "filename": "_".join(parts) + ".pdf",
+        "folder": kind + ("/{yyyy}/{mm}" if has_date else ""),
         "priority": 0,
     }
+
+
+ALWAYS_FIELDS = {"rule", "original"}   # どの PDF でも決まる項目
+
+
+def unread_fields(rule: dict, text: str, self_names: list[str]) -> list[tuple[str, str]]:
+    """見本の PDF から読み取れない項目を、ファイル名・保存先で使っていないかを見る（誤りではなく注意。保存はできる）。
+    rule は検証を通った形（fields は {名前: 正規表現}）であること。"""
+    fields = rule.get("fields") or {}
+    found = set(find_fields(text, Rule(name="", fields=fields), self_names)) | ALWAYS_FIELDS
+    out = []
+    for part in ("filename", "folder"):
+        missing = [k for k in dict.fromkeys(re.findall(r"\{(\w+)\}", str(rule.get(part, "")))) if k not in found]
+        if missing:
+            out.append((part, f"{'・'.join('{' + k + '}' for k in missing)} は、この PDF からは読み取れませんでした。"
+                              "このままだと、同じ種類の書類で「不明」になります（保存はできます）"))
+    return out

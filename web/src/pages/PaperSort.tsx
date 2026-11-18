@@ -1,19 +1,28 @@
 // S-20 PDF の仕分け（総務）。受信箱の PDF → 仕分けの予定（ジョブ）→ ルールを選び直す → 実行 → 記録
 // - 予定は作った人だけが見られる（API の側で守る）。仕分けの記録は総務の全員が見られる
 // - ルールを選び直すときは、サーバーが予定を作ったときの文字を使う（OCR をし直さないので速い）
+// - 未分類の PDF（または選んだ PDF）から、ルールの下書きを作って保存できる（PaperRules.tsx。K-047）
 import { useCallback, useEffect, useState } from "react";
-import { api, InboxFile, Job, Plan, PlanItem, PaperRule, SortRecord } from "../api";
+import { api, ApiError, InboxFile, Job, Plan, PlanItem, PaperRule, SortRecord } from "../api";
 import { useJob } from "../useJob";
+import { DefaultRulesNotice, DraftSource, RuleDraftPanel, RuleHistory } from "./PaperRules";
 import { bytes, errorText, JobProgress, queryParam, setQuery, Status, time } from "../ui";
 
 const BY: Record<string, string> = { rule: "ルール", forced: "選び直し", llm: "LLM", none: "当たらない" };
 const FIELD_LABELS: Record<string, string> = { date: "日付", company: "相手先", amount: "金額", to: "宛先", yyyy: "年", mm: "月", dd: "日" };
 const label = (k: string) => FIELD_LABELS[k] ?? k;
 
-export default function PaperSort() {
+export default function PaperSort({ canRules = false }: { canRules?: boolean }) {
   const [planId, setPlanId] = useState<string | null>(() => queryParam("plan"));
   const [jobId, setJobId] = useState<string | null>(null);
   const [historyTick, setHistoryTick] = useState(0);
+  const [draft, setDraft] = useState<DraftSource | null>(null);
+  const [rulesTick, setRulesTick] = useState(0);     // ルールを保存した・戻したときに、ルールの一覧を読み直す
+  const [changed, setChanged] = useState<string | null>(null);   // ルールを保存した・版に戻した・既定に戻したときの知らせ
+  const rulesChanged = (message: string) => {
+    setChanged(message);
+    setRulesTick((t) => t + 1);
+  };
 
   const open = (id: string | null) => {
     setPlanId(id);
@@ -30,21 +39,36 @@ export default function PaperSort() {
     <>
       <h1 className="page-title">PDF の仕分け</h1>
       <div className="jobs-page">
-        {!planId && <Inbox busy={!!jobId} onStarted={setJobId} />}
+        <DefaultRulesNotice tick={rulesTick} />
+        {changed !== null && (
+          <p className="notice" role="status">
+            {changed}予定を作り直すと、新しいルールが使われます。
+            <button className="link" onClick={() => setChanged(null)}>閉じる</button>
+          </p>
+        )}
+        {draft && (
+          <RuleDraftPanel key={JSON.stringify(draft)} source={draft} onClose={() => setDraft(null)}
+            onSaved={(v) => { setDraft(null); rulesChanged(`ルールを保存しました（版 ${v}）。`); }} />
+        )}
+        {!planId && <Inbox busy={!!jobId} onStarted={setJobId} onDraft={canRules ? setDraft : undefined} />}
         {jobId && (
           <section className="card" aria-label="予定作りの進み具合">
             {jobError ? <p className="error" role="alert">{jobError}</p> : <JobProgress job={job} label="仕分けの予定作り" />}
             {job && !["待ち", "実行中", "完了"].includes(job.status) && <button onClick={() => setJobId(null)}>受信箱に戻る</button>}
           </section>
         )}
-        {planId && <PlanView planId={planId} onBack={() => open(null)} onExecuted={() => setHistoryTick((t) => t + 1)} />}
+        {planId && (
+          <PlanView planId={planId} onBack={() => open(null)} onExecuted={() => setHistoryTick((t) => t + 1)} rulesTick={rulesTick}
+            onDraft={canRules ? setDraft : undefined} replan={changed !== null} onReplan={(id) => { setChanged(null); setJobId(id); }} />
+        )}
         <History tick={historyTick} />
+        {canRules && <RuleHistory tick={rulesTick} onRestored={rulesChanged} />}
       </div>
     </>
   );
 }
 
-function Inbox({ busy, onStarted }: { busy: boolean; onStarted: (jobId: string) => void }) {
+function Inbox({ busy, onStarted, onDraft }: { busy: boolean; onStarted: (jobId: string) => void; onDraft?: (s: DraftSource) => void }) {
   const [files, setFiles] = useState<InboxFile[] | null>(null);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [useLlm, setUseLlm] = useState(false);
@@ -126,13 +150,22 @@ function Inbox({ busy, onStarted }: { busy: boolean; onStarted: (jobId: string) 
           <button className="primary" disabled={busy || sending || chosen.size === 0} onClick={() => void start()}>
             {chosen.size}件の仕分けの予定を作る
           </button>
+          {onDraft && chosen.size === 1 && (
+            <button className="spaced-left" onClick={() => { const f = [...chosen][0]; onDraft({ inbox: f, file: f }); }}>
+              選んだ1件からルールの下書きを作る
+            </button>
+          )}
         </>
       )}
     </section>
   );
 }
 
-function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () => void; onExecuted: () => void }) {
+function PlanView({ planId, onBack, onExecuted, rulesTick, onDraft, replan, onReplan }: {
+  planId: string; onBack: () => void; onExecuted: () => void; rulesTick: number;
+  onDraft?: (s: DraftSource) => void; replan: boolean; onReplan: (jobId: string) => void;
+}) {
+  const [replanning, setReplanning] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [rules, setRules] = useState<PaperRule[]>([]);
   const [error, setError] = useState("");
@@ -141,9 +174,11 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
   const [move, setMove] = useState(false);
   const [asking, setAsking] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [gone, setGone] = useState<{ where: string; message: string }[]>([]);   // 予定のあとに消えたルール（実行の前に止めた）
 
   useEffect(() => {
     setPlan(null);
+    setGone([]);
     Promise.all([api<Plan>("GET", `/api/paper/plans/${encodeURIComponent(planId)}`), api<{ rules: PaperRule[] }>("GET", "/api/paper/rules")])
       .then(([p, r]) => {
         setPlan(p);
@@ -152,6 +187,27 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
       })
       .catch((e) => setError(errorText(e, "仕分けの予定を読み込めませんでした")));
   }, [planId]);
+
+  // ルールを保存した・戻したときは、選べるルールを読み直す
+  useEffect(() => {
+    if (rulesTick === 0) return;
+    api<{ rules: PaperRule[] }>("GET", "/api/paper/rules").then((r) => setRules(r.rules)).catch(() => {});
+  }, [rulesTick]);
+
+  // 同じファイルで予定を作り直す（保存した新しいルールを使う）
+  const remake = async () => {
+    if (!plan) return;
+    setReplanning(true);
+    setError("");
+    try {
+      const j = await api<Job>("POST", "/api/paper/plans", { files: plan.items.map((x) => x.file), use_llm: false });
+      onReplan(j.job_id);
+    } catch (e) {
+      setError(errorText(e, "予定を作り直せませんでした"));
+    } finally {
+      setReplanning(false);
+    }
+  };
 
   const rechoose = async (item: PlanItem, rule: string) => {
     setSaving(item.index);
@@ -169,12 +225,14 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
   const execute = async () => {
     setExecuting(true);
     setError("");
+    setGone([]);
     try {
       const result = await api<Plan["result"]>("POST", `/api/paper/plans/${encodeURIComponent(planId)}/execute`, { move });
       setPlan((p) => p && { ...p, executed_at: new Date().toISOString(), result });
       onExecuted();
     } catch (e) {
       setError(errorText(e, "実行できませんでした"));
+      if (e instanceof ApiError && e.code === "rules_gone") setGone(e.details);
     } finally {
       setExecuting(false);
       setAsking(false);
@@ -200,6 +258,12 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
         <>
           {!done && <p className="small muted">置く先を確かめてください。ルールが違うものは、選び直せます（PDF は読み直しません）。</p>}
           {!done && warned > 0 && <p className="warn" role="status">⚠ 注意がある行が{warned}件あります（表の「置く先」を見てください）。</p>}
+          {gone.length > 0 && !done && (
+            <ul className="small error">{gone.map((g) => <li key={g.where}>{g.where}：{g.message}</li>)}</ul>
+          )}
+          {(replan || gone.length > 0) && !done && (
+            <p><button className="primary" disabled={replanning} onClick={() => void remake()}>この予定のファイルで、予定を作り直す</button></p>
+          )}
           <div className="table-wrap">
             <table className="table">
               <thead><tr><th>ファイル</th><th>ルール</th><th>読み取った内容</th><th>置く先</th></tr></thead>
@@ -225,6 +289,14 @@ function PlanView({ planId, onBack, onExecuted }: { planId: string; onBack: () =
                       <div className="small muted">{x.error ? "" : `決め方：${BY[x.by] ?? x.by}`}</div>
                       {saving === x.index && <div className="small muted">選び直しています…</div>}
                       {rowError[x.index] && <div className="small error" role="alert">{rowError[x.index]}</div>}
+                      {onDraft && !x.error && (
+                        <div>
+                          <button className="link small" onClick={() => onDraft({ plan_id: planId, index: x.index, file: x.file })}
+                            aria-label={`${x.file} からルールの下書きを作る`}>
+                            {x.rule ? "ルールの下書きを作る" : "未分類：ルールの下書きを作る"}
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="small">
                       {Object.entries(x.fields).length === 0 && "—"}

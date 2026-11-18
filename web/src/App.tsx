@@ -100,7 +100,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case "/meetings":
       return can("meetings") ? <Meetings /> : <NoPermission />;
     case "/paper/sort":
-      return can("paper") ? <PaperSort /> : <NoPermission />;
+      return can("paper") ? <PaperSort canRules={can("paper.rules")} /> : <NoPermission />;
     case "/paper/convert":
       return can("paper") ? <PaperConvert /> : <NoPermission />;
     default:
