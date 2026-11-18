@@ -13,6 +13,7 @@ import VisitsAll from "./pages/VisitsAll";
 import Meetings from "./pages/Meetings";
 import PaperConvert from "./pages/PaperConvert";
 import PaperSort from "./pages/PaperSort";
+import Audit from "./pages/Audit";
 
 type State = { kind: "loading" } | { kind: "out"; notice?: string } | { kind: "in"; me: Me } | { kind: "error"; message: string };
 
@@ -103,6 +104,8 @@ function Page({ path, me }: { path: string; me: Me }) {
       return can("paper") ? <PaperSort canRules={can("paper.rules")} /> : <NoPermission />;
     case "/paper/convert":
       return can("paper") ? <PaperConvert /> : <NoPermission />;
+    case "/admin/audit":
+      return can("audit.view") ? <Audit /> : <NoPermission />;
     default:
       return <NotFound />;
   }

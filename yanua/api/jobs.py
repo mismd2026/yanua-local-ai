@@ -80,6 +80,8 @@ class JobContext:
 
 
 JobFn = Callable[[JobContext, dict], dict]
+# ジョブの出来事を知らせる関数（監査ログに残すため）：(出来事, ジョブ)。出来事は start・done・failed・cancelled・interrupted
+JobListener = Callable[[str, dict], None]
 
 
 def _now() -> str:
@@ -87,8 +89,9 @@ def _now() -> str:
 
 
 class JobQueue:
-    def __init__(self, db_path: Path | str, workers: int = 1):
+    def __init__(self, db_path: Path | str, workers: int = 1, listener: JobListener | None = None):
         self.db_path = str(db_path)
+        self.listener = listener
         self.workers = workers
         self._kinds: dict[str, JobFn] = {}
         self._queue: queue.Queue[str | None] = queue.Queue()
@@ -97,8 +100,21 @@ class JobQueue:
         with self._connect() as db:
             db.executescript(SCHEMA)
             # 前回の起動で終わらなかったジョブ
+            stopped = [r[0] for r in db.execute("SELECT job_id FROM jobs WHERE status IN (?, ?)", (QUEUED, RUNNING))]
             db.execute("UPDATE jobs SET status = ?, error = ?, finished_at = ? WHERE status IN (?, ?)",
                        (FAILED, "サーバーの再起動で中断しました", _now(), QUEUED, RUNNING))
+        for job_id in stopped:
+            self._notify("interrupted", job_id)
+
+    def _notify(self, event: str, job_id: str) -> None:
+        if not self.listener:
+            return
+        try:
+            job = self.get(job_id)
+            if job:
+                self.listener(event, job)
+        except Exception:  # noqa: BLE001  知らせられなくても、ジョブは止めない
+            log.exception("ジョブ %s の出来事（%s）を知らせられませんでした", job_id, event)
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, timeout=10)
@@ -144,8 +160,10 @@ class JobQueue:
     def cancel(self, job_id: str) -> dict | None:
         """待ちのジョブは取り消す。実行中のジョブは、次に進み具合を知らせたところで止まる。"""
         with self._lock, self._connect() as db:
-            db.execute("UPDATE jobs SET status = ?, finished_at = ? WHERE job_id = ? AND status IN (?, ?)",
-                       (CANCELLED, _now(), job_id, QUEUED, RUNNING))
+            cur = db.execute("UPDATE jobs SET status = ?, finished_at = ? WHERE job_id = ? AND status IN (?, ?)",
+                             (CANCELLED, _now(), job_id, QUEUED, RUNNING))
+        if cur.rowcount:
+            self._notify("cancelled", job_id)
         return self.get(job_id)
 
     @staticmethod
@@ -186,6 +204,7 @@ class JobQueue:
             if not row or row[2] != QUEUED:
                 return
             db.execute("UPDATE jobs SET status = ?, started_at = ? WHERE job_id = ?", (RUNNING, _now(), job_id))
+        self._notify("start", job_id)
         kind, params = row[0], json.loads(row[1])
         try:
             result = self._kinds[kind](JobContext(self, job_id), params)
@@ -196,15 +215,18 @@ class JobQueue:
             log.warning("ジョブ %s（%s）が失敗しました：%s", job_id, kind, e.detail or e.message, exc_info=e.__cause__ is not None)
             if self.status_of(job_id) != CANCELLED:
                 self._update(job_id, status=FAILED, error=e.message, finished_at=_now())
+                self._notify("failed", job_id)
             return
         except Exception:  # ジョブの失敗はジョブの結果として残し、ワーカーは止めない。中身はログにだけ残す
             log.exception("ジョブ %s（%s）が失敗しました", job_id, kind)
             if self.status_of(job_id) != CANCELLED:
                 self._update(job_id, status=FAILED, error=failure_text(job_id), finished_at=_now())
+                self._notify("failed", job_id)
             return
         if self.status_of(job_id) != CANCELLED:
             self._update(job_id, status=DONE, progress=100, result=json.dumps(result, ensure_ascii=False),
                          finished_at=_now())
+            self._notify("done", job_id)
 
     def _work(self) -> None:
         while True:

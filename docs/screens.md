@@ -106,7 +106,7 @@
 | S-52 | 設定 | 管理者（種類によって総務・情シス・人事も） | 設定の種類を選ぶ→今の中身→編集→検証（エラーの表示）→保存。変更の履歴と前の版への戻し | `GET /api/settings`、`GET /api/settings/{kind}`、`POST /api/settings/{kind}/validate`、`PUT /api/settings/{kind}`、`GET /api/settings/{kind}/history` | K-042, K-009 | 4 |
 | S-53 | 通信とモデル | 管理者 | 許可リストの宛先、モデルの一覧・版・ハッシュ、入手（pull）・照合（verify） | `GET /api/models`、`POST /api/models/{name}/pull`（ジョブ）、`POST /api/models/{name}/verify`、設定の `network` | K-023, K-011 | 4 |
 | S-54 | 役割の割り当て | 管理者 | 人ごとの役割、SSO のグループとの対応、受付端末の登録・取り消し | `GET /api/roles`、`PUT /api/roles/{employee_no}`、`POST /api/admin/kiosk-devices`、`DELETE /api/admin/kiosk-devices/{id}` | K-049 | 4 |
-| S-55 | 監査ログ | 管理者 | 誰が・いつ・何をしたか（質問・出典・設定変更・ログイン）の検索 | `GET /api/audit` | K-009 | 4 |
+| S-55 | 監査ログ | 管理者（`audit.view`） | 誰が・いつ・何をしたかを、期間・した人（社員番号・名前の一部・端末）・操作の種類（`auth` のような頭か、名前そのもの）・結果（成功・失敗・拒否）で絞り込む。新しい順・ページ送り。見たことも記録する。消す・書き換える操作はない。CSV の書き出しはまだ作らない（K-042 と一緒に考える） | `GET /api/audit` | K-009 | 4 |
 | S-56 | 評価 | 管理者 | 質問セットでの採点の実行、モデルごとの比較 | `POST /api/eval/runs`（ジョブ）、`GET /api/eval/runs` | K-005, K-006 | 5 |
 
 ### S-52 で扱う設定の種類
@@ -150,7 +150,7 @@
 | `GET /api/models`、`POST .../pull`、`POST .../verify` | `models list / pull / verify` | 管理者 | pull は○ |
 | `GET/PUT /api/settings/{kind}`、`.../validate`、`.../history` | （新規。今はファイルを直接編集） | 種類による | |
 | `GET /api/roles`、`PUT /api/roles/{employee_no}` | （新規） | 管理者 | |
-| `GET /api/audit` | （新規） | 管理者 | |
+| `GET /api/audit`（`since`・`until`：YYYY-MM-DD か ISO の時刻、`actor`、`action`、`result`、`page`、`per_page`（200まで））。返すのは `entries`・`total`・`actions`（記録にある操作の名前）・`keep_days`・`keep_body`。消す・書き換える API はない | （新規） | 管理者（`audit.view`。ほかは 403） | |
 | `POST /api/eval/runs` | `eval/run_eval.py` | 管理者 | ○ |
 | `GET /api/jobs`、`GET/DELETE /api/jobs/{id}` | （新規） | 本人・管理者 | |
 | `GET /api/me`、`/api/auth/*` | （新規） | 全員 | |
@@ -229,9 +229,26 @@
 
 `message` はそのまま画面に出せる日本語にします。中の詳しい理由（どの権限が足りないかなど）は監査ログにだけ残し、受付端末には出しません。
 
-### 監査ログに残すもの
+### 監査ログに残すもの（K-009）
 
-ログイン・ログアウト、質問と出典の文書番号（本文は残すかどうかを設定で選ぶ）、設定の変更、文書の変更、役割の変更、ジョブの実行、モデルの入手、受付端末の登録。
+置き場所は `data/audit.db`（SQLite。`serve --audit-db` で変えられる）。1件の形：時刻・した人（社員番号と名前。受付端末なら端末番号と端末名。ログイン前は「なし」、サーバー自身は「システム」）・操作の名前・対象・結果（成功・失敗・拒否）・接続元の IP・短い説明。
+
+| 操作の名前 | いつ | 対象 |
+|---|---|---|
+| `auth.login`・`auth.logout` | ログイン（開発用ログインを含む）・ログアウト・ログインの失敗（結果「失敗」、した人は「なし」） | 社員番号 |
+| `access.denied` | 役割の確かめで断った（403）。説明に断った操作の名前（例 `audit.view`） | メソッドとパス |
+| `api.bearer`・`api.csrf` | 入口で断った（端末トークンで受付以外の API を呼んだ・`X-Yanua-Client` がない） | メソッドとパス |
+| `job.start`・`job.done`・`job.failed`・`job.cancel`・`job.interrupted` | ジョブの開始・終わり・失敗・取り消し・再起動での中断（文書の取り込み・議事録・仕分けの予定・変換・ルールの下書き） | ジョブ番号 |
+| `kiosk.register`・`kiosk.revoke`・`kiosk.locked` | 受付端末の登録・取り消し、コードを続けて間違えた端末の照合を止めた | 端末番号 |
+| `paper.rules.save`・`.restore`・`.reset` | 設定の保存・版に戻す・既定に戻す（`yanua/settingfiles.py` を通るものはすべて。成功も失敗も） | 設定の名前 |
+| `paper.execute` | PDF の仕分けの実行（何件・移したか写したか・置いた先のフォルダ）。消えたルールで止めたときは「失敗」 | 予定の番号 |
+| `file.download`・`meeting.download` | ファイル（変換の結果など）・議事録の Word のダウンロード | ファイル番号・議事録の番号 |
+| `audit.view` | 監査ログを見た（どんな条件で見たか） | |
+| `audit.purge` | 保存期間を過ぎた記録を消した（何件、いつより前） | |
+
+残さないもの：パスワード・端末トークン・セッションのトークン・受付端末で入力されたコードは、どの設定でも残さない。質問・会話の本文、文書や PDF の中身は、既定では残さない（`--audit-keep-body` のときだけ `body` に残す。今はまだ本文を渡す操作はない）。仕分けの実行は、書類の中身から作るファイル名を残さず、フォルダだけを残す。
+
+これから足すもの：質問と出典の文書番号（`ask`）、文書の変更（K-010）、役割の変更（S-54）、モデルの入手（S-53）、設定の画面の変更（K-042）、SSO のログイン（K-008）。
 
 ## 7. 作る順番
 

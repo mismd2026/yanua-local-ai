@@ -10,6 +10,7 @@
   写しを使っている間は、既定の更新は反映されないため。写しから保存し直しても知らせは消えず、「既定に戻す」で消える
 - 保存・戻すの前に、その設定の読み込みと同じ検証（validate）をかける。誤りがあれば何も書かない
 - ファイルは同じフォルダの一時ファイルに書いてから置き換える。同じサーバーの中では、ロックの中で今の中身を読んでから作る
+- 保存・版に戻す・既定に戻すは、成功も失敗も監査ログに残す（audit を渡したとき。操作の名前は <audit_action>.save など）
 
 版の記録の形（history/<名前>/）：
     index.jsonl   1行に1つの版（version・saved_at・saved_by・action・sha256・default_sha256・kind）
@@ -31,6 +32,8 @@ FILE_EDIT = "（ファイル）"     # 写しを直接直していた中身の�
 DEFAULT = "（既定）"           # 既定の中身の版の「保存した人」
 
 Validator = Callable[[str], list[tuple[str, str]]]   # 中身 → [(位置, 理由)]。空なら正しい
+# 監査ログに残す関数：(操作の名前, した人, 結果「成功」「失敗」, 短い説明)。yanua/audit.py の Auditor.record につなぐ
+AuditFn = Callable[[str, str, str, str], None]
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -65,8 +68,10 @@ def _write(path: Path, body: str) -> None:
 
 
 class SettingFile:
-    def __init__(self, name: str, default: Path, settings_dir: Path, validate: Validator | None = None):
-        """name は写しのファイル名（例：rules.json）。同じ settings_dir の中で重ならない名前にする。"""
+    def __init__(self, name: str, default: Path, settings_dir: Path, validate: Validator | None = None,
+                 audit: AuditFn | None = None, audit_action: str | None = None):
+        """name は写しのファイル名（例：rules.json）。同じ settings_dir の中で重ならない名前にする。
+        audit_action は監査ログの操作の名前の頭（例：paper.rules → paper.rules.save）。なければ settings.<name>。"""
         if "/" in name or "\\" in name or name.startswith("."):
             raise ValueError(f"設定の名前が正しくありません: {name}")
         self.name = name
@@ -74,6 +79,8 @@ class SettingFile:
         self.saved = Path(settings_dir) / name
         self.history_dir = Path(settings_dir) / "history" / name
         self.validate = validate or (lambda text: [])
+        self._audit = audit
+        self.audit_action = audit_action or f"settings.{name}"
         with _locks_guard:
             self._lock = _locks.setdefault(str(self.saved.resolve()), threading.Lock())
 
@@ -148,8 +155,31 @@ class SettingFile:
         if problems:
             raise SettingError("設定に直すところがあります", problems)
 
+    def _log(self, op: str, by: str, ok: bool, detail: str) -> None:
+        if self._audit:
+            try:
+                self._audit(f"{self.audit_action}.{op}", by, "成功" if ok else "失敗", f"{self.name}：{detail}")
+            except Exception:  # noqa: BLE001  記録できなくても、設定の保存は止めない
+                pass
+
+    def _logged(self, op: str, by: str, what: str, fn: Callable[[], int]) -> int:
+        try:
+            version = fn()
+        except SettingError as e:
+            self._log(op, by, False, f"{what}（保存しませんでした：検証を通らないところが {len(e.problems)}件）")
+            raise
+        except Exception as e:
+            reason = getattr(e, "message", None) or type(e).__name__     # 使う側の検証の断り（例：ApiError）は、その文
+            self._log(op, by, False, f"{what}（保存しませんでした：{reason}）")
+            raise
+        self._log(op, by, True, f"{what}（版 {version}）")
+        return version
+
     def save(self, new_body: str | Callable[[str], str], by: str, action: str) -> int:
         """写しに保存して、新しい版の番号を返す。new_body は文字か、今の中身を受け取って新しい中身を返す関数。"""
+        return self._logged("save", by, action, lambda: self._save(new_body, by, action))
+
+    def _save(self, new_body: str | Callable[[str], str], by: str, action: str) -> int:
         with self._lock:
             body = new_body(self.read_text()) if callable(new_body) else new_body
             self._check(body)
@@ -173,13 +203,18 @@ class SettingFile:
 
     def restore(self, version: int, by: str) -> int:
         """前の版の中身を、新しい版として写しに保存する。今の検証に通らない版には戻さない。"""
-        body = self.get(version)
-        if body is None:
-            raise KeyError(version)
-        return self.save(body, by, f"版 {version} に戻した")
+        def run() -> int:
+            body = self.get(version)
+            if body is None:
+                raise KeyError(version)
+            return self._save(body, by, f"版 {version} に戻した")
+        return self._logged("restore", by, f"版 {version} に戻した", run)
 
     def reset_to_default(self, by: str) -> int:
         """写しを消して、既定を使う（新しい既定も、ここから使われる）。消す前の写しは版として残る。"""
+        return self._logged("reset", by, "既定に戻した", lambda: self._reset(by))
+
+    def _reset(self, by: str) -> int:
         with self._lock:
             default_text = self._default_text()
             if default_text is None:

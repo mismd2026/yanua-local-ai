@@ -189,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="仕分けルールの既定のファイル（画面からは書き換えない）")
     s.add_argument("--settings-dir", type=Path, default=Path("data/settings"),
                    help="画面で変えた設定の写しと版の記録の置き場所（あればこちらを使う）")
+    s.add_argument("--audit-db", type=Path, default=None, help="監査ログの保存先（既定: --db と同じフォルダの audit.db）")
+    s.add_argument("--audit-keep-days", type=int, default=365, help="監査ログを残す日数（既定: 365）")
+    s.add_argument("--audit-keep-body", action="store_true",
+                   help="監査ログに質問・会話の本文なども残す（既定は残さない。パスワード・トークン・コードはどの設定でも残さない）")
     llm_options(s)
 
     s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")
@@ -572,7 +576,8 @@ def _serve(args) -> int:
     settings = Settings(db_path=args.db, chat_db_path=args.chat_db, helpdesk_data=args.helpdesk_data,
                         roles_path=args.roles, identity_path=args.identity, top_k=args.top_k, host=args.host,
                         dev_login=args.dev_login, summary_model=args.summary_model, paper_rules=args.paper_rules,
-                        settings_dir=args.settings_dir)
+                        settings_dir=args.settings_dir, audit_db_path=args.audit_db, audit_keep_days=args.audit_keep_days,
+                        audit_keep_body=args.audit_keep_body)
     try:
         settings.check()
         load_roles(settings.roles_path)
