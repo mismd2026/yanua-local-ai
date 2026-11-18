@@ -326,7 +326,7 @@ function Review({ m, saved, onEdit, onSaved }: { m: Meeting; saved: boolean; onE
       <div className="form-row">
         <label htmlFor="r-people">出席者（1行に1人）</label>
         <textarea id="r-people" rows={3} value={people} onChange={(e) => change(setPeople)(e.target.value)} />
-        <span className="small muted">話し手として読み取れた名前と、指定した出席者です。会議室・Room などの機器の名前は除いています。足りない人・違う人は直してください。</span>
+        <span className="small muted">話し手として読み取れた名前と、指定した出席者です。足りない人・違う人は直してください。</span>
       </div>
 
       <h3>要約</h3>

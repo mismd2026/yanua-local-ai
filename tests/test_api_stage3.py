@@ -463,14 +463,14 @@ def test_default_summary_model_is_7b(settings):
     assert seen["llm"].name == "qwen2.5:7b" and seen["llm"].base_url == "http://127.0.0.1:11434"
 
 
-def test_room_devices_are_not_attendees_and_attendees_can_be_edited(client):
-    meeting_id, _ = make_meeting(client, participants=["本社5F会議室", "Tokyo-Room-3", "佐藤 花子"])
+def test_attendees_are_screen_names_and_can_be_edited(client):
+    # 会議ツールの画面に出た名前（会議室のアカウント名も）を、そのまま出席者に使う
+    meeting_id, _ = make_meeting(client, participants=["本社5F会議室", "佐藤 花子"])
     m = client.get(f"/api/meetings/{meeting_id}").json()
-    assert m["attendees"] == ["佐藤 花子"], m["attendees"]
-    # 機器の名前でも、話し手としては残す（誰の発言かの手がかり）
+    assert m["attendees"] == ["本社5F会議室", "佐藤 花子"], m["attendees"]
     segs = [{**s, "speaker": "本社5F会議室"} for s in m["segments"]]
     m = client.put(f"/api/meetings/{meeting_id}", json={"segments": segs}, headers=H).json()
-    assert m["segments"][0]["speaker"] == "本社5F会議室" and "本社5F会議室" not in m["attendees"]
+    assert m["segments"][0]["speaker"] == "本社5F会議室" and "本社5F会議室" in m["attendees"]
     # 出席者を画面で直す。Word にも直した出席者が入る
     m = client.put(f"/api/meetings/{meeting_id}", json={"attendees": ["佐藤 花子", " 高橋 美咲 ", ""]}, headers=H).json()
     assert m["attendees"] == ["佐藤 花子", "高橋 美咲"]

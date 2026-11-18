@@ -370,7 +370,7 @@ export interface Meeting extends MeetingListItem {
   summary: MeetingSummary | null;
   media_name: string;
   unknown_speakers: number;
-  attendees: string[]; // 出席者（会議室などの機器の名前は除いたもの。画面で直したらその内容）
+  attendees: string[]; // 出席者（会議ツールの画面に出た名前と指定の出席者。画面で直したらその内容）
   summary_note: string | null; // 要約を作れなかったときの文
 }
 

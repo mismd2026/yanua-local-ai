@@ -251,8 +251,7 @@ def test_meeting_end_to_end_with_template(store, tmp_path):
         VIDEO, title="本社移転の定例会", out_dir=tmp_path, llm=FakeLLM(), segments=meeting_run.load_segments(SEGMENTS),
         tool="zoom", names=meeting_run.company_words(store.db)[0], participants=["本社5F会議室"], template=TEMPLATE)
     md = next(f for f in result.files if f.suffix == ".md").read_text(encoding="utf-8")
-    assert "出席者（発言者）：佐藤 花子、田中 健、山田 太郎\n" in md   # 人事データの表記にそろう（発言の多い順）。会議室の機器は入れない
-    assert "本社5F会議室：会議室から失礼します" in md                  # 話し手としては残す
+    assert "佐藤 花子、田中 健、山田 太郎、本社5F会議室" in md        # 人事データの表記にそろう（発言の多い順）
     assert "[00:06] 田中 健：ネットワーク工事" in md
     doc = Document(next(f for f in result.files if f.suffix == ".docx"))
     tables = [[[c.text for c in r.cells] for r in t.rows] for t in doc.tables]
@@ -281,14 +280,3 @@ def test_decode_audio_reads_mp4_without_the_removed_pyav_argument():
     audio = decode_audio(ROOT / "demo" / "company" / "meeting" / "demo_zoom.mp4")
     assert audio.dtype.name == "float32" and 43 < len(audio) / SAMPLE_RATE < 45
 
-
-def test_device_names_are_not_attendees():
-    from yanua.meeting.minutes import attendees, is_device
-    from yanua.meeting.transcribe import Segment
-
-    for name in ("本社5F会議室", "Tokyo-Room-3", "Zoom Rooms 7F", "第2応接室", "大ホール", "Conference A"):
-        assert is_device(name), name
-    for name in ("佐藤 花子", "田中 健", "Tanaka Ken", "室井 一郎"):
-        assert not is_device(name), name
-    segs = [Segment(0, 1, "a", "本社5F会議室"), Segment(1, 2, "b", "佐藤 花子"), Segment(2, 3, "c", "不明")]
-    assert attendees(segs, ["本社5F会議室", "田中 健"]) == ["佐藤 花子", "田中 健"]
