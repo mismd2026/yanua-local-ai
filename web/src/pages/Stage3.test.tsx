@@ -304,7 +304,8 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
       ...planRoutes([unsorted]),
       "GET /api/paper/rules/history": { versions: [], current: null },
       "POST /api/paper/rule-drafts": job({ job_id: "d1", kind: "paper-rule-draft", status: "待ち" }),
-      "GET /api/jobs/d1": job({ job_id: "d1", kind: "paper-rule-draft", result: { draft, source: "scan_0005.pdf", excerpt: "会社案内のお知らせ" } }),
+      "GET /api/jobs/d1": job({ job_id: "d1", kind: "paper-rule-draft", result: { draft, source: "scan_0005.pdf", excerpt: "会社案内のお知らせ", text: "会社案内のお知らせ" } }),
+      "POST /api/paper/rules/validate": { ok: true, warnings: [{ where: "filename", message: "{date} は、この PDF からは読み取れませんでした" }] },
       "POST /api/paper/rules": (body: { rule: { filename: string } }) => {
         saves += 1;
         if (body.rule.filename.includes("{nothing}"))
@@ -316,9 +317,14 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
       "GET /api/jobs/j9": job({ job_id: "j9", result: { plan_id: "p2", count: 1, errors: 0 } }),
       "GET /api/paper/plans/p2": { plan_id: "p2", created_at: "2026-11-18T10:05:00+09:00", items: [{ ...unsorted, rule: "案内", by: "rule", dest: "案内/2026/11/x.pdf" }], executed_at: null, result: null },
     });
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
     const user = userEvent.setup();
     render(<PaperSort canRules />);
     await user.click(await screen.findByRole("button", { name: "scan_0005.pdf からルールの下書きを作る" }));
+    // 開いた下書きの欄まで、画面を動かす
+    expect(scroll).toHaveBeenCalled();
+    expect(scroll.mock.contexts[0]).toBe(screen.getByRole("region", { name: "ルールの下書き" }));
     await user.click(screen.getByRole("button", { name: "下書きを作る" }));
     expect(calls.find((c) => c.path === "/api/paper/rule-drafts")?.body).toEqual({ plan_id: "p1", index: 0, name: null, use_llm: false });
 
@@ -332,6 +338,11 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
 
     await user.clear(filename);
     await user.type(filename, "{{date}_案内.pdf");
+    // 確かめると、PDF から読み取れない項目に注意を出す（誤りではないので保存はできる）
+    await user.click(screen.getByRole("button", { name: "確かめる" }));
+    expect(await screen.findByText(/{date} は、この PDF からは読み取れませんでした/)).toBeInTheDocument();
+    expect(screen.getByText("誤りはありません。注意を見てから保存してください。")).toBeInTheDocument();
+    expect(calls.find((c) => c.path === "/api/paper/rules/validate")?.body.sample_text).toBe("会社案内のお知らせ");
     await user.click(screen.getByRole("button", { name: "保存する" }));
     expect(await screen.findByText(/ルールを保存しました（版 2）/)).toBeInTheDocument();
     expect(saves).toBe(2);
@@ -366,6 +377,9 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
     expect(calls.some((c) => c.path.endsWith("/restore"))).toBe(false);
     await user.click(screen.getByRole("button", { name: "はい、戻す" }));
     expect(await screen.findByText("版 2 の中身に戻しました（新しい版 4）。")).toBeInTheDocument();
+    // 保存のときと同じく、作り直しの知らせとボタンを出す
+    expect(screen.getByText(/ルールを版 2 の中身に戻しました（新しい版 4）。予定を作り直すと、新しいルールが使われます。/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
   });
 
   it("画面で保存したあとに既定のルールが更新されたら知らせ、確かめてから既定に戻す", async () => {
@@ -394,6 +408,26 @@ describe("K-047 仕分けルールの下書き・保存・前の版", () => {
     expect(await screen.findByText(/既定のルールに戻しました（版 3）/)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText(/既定のルールが更新されています/)).not.toBeInTheDocument());
     expect(screen.getByText("既定")).toBeInTheDocument();
+    expect(screen.getByText(/ルールを既定に戻しました（版 3）。予定を作り直すと、新しいルールが使われます。/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
+  });
+
+  it("予定のあとに使ったルールがなくなっていたら、実行を止めて作り直しを促す", async () => {
+    window.history.replaceState(null, "", "/paper/sort?plan=p1");
+    fakeApi({
+      ...planRoutes([item({ rule: "案内", dest: "案内/2026/11/x.pdf" })]),
+      "POST /api/paper/plans/p1/execute": () => ({ status: 409, json: { error: { code: "rules_gone",
+        message: "予定を作ったあとに、使ったルールがなくなりました。予定を作り直してから実行してください",
+        details: [{ where: "scan_0001.pdf", message: "ルール「案内」は今のルールにありません" }] } } }),
+    });
+    const user = userEvent.setup();
+    render(<PaperSort />);
+    expect(screen.queryByRole("button", { name: "この予定のファイルで、予定を作り直す" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "実行する" }));
+    await user.click(screen.getByRole("button", { name: "はい、実行する" }));
+    expect(await screen.findByText(/使ったルールがなくなりました/)).toBeInTheDocument();
+    expect(screen.getByText("scan_0001.pdf：ルール「案内」は今のルールにありません")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "この予定のファイルで、予定を作り直す" })).toBeInTheDocument();
   });
 
   it("ルールの権限がなければ、下書きのボタンと版を出さない", async () => {

@@ -144,6 +144,35 @@ def test_draft_rule_from_sample():
     # LLMが挙げた言葉でも、書類に出てこない言葉は採らない
     draft = rules.draft_rule(text, llm=PickLLM("1. 休業日\n2. 夏季休暇\n3. 年末年始"))
     assert draft["keywords"]["any"] == ["案内", "休業日", "年末年始"]
+    # 日付・相手先のない案内状では、ファイル名と保存先に {date}・{company} を入れない（「不明」だらけにしない）
+    assert draft["filename"] == "案内_{original}.pdf" and draft["folder"] == "案内"
+    # 読み取れる書類では、読み取れた項目だけを使う
+    assert rules.draft_rule(read_pdf(INBOX / "scan_0001.pdf").text)["filename"] == "{date}_請求書_{company}.pdf"
+    minutes = rules.draft_rule(read_pdf(INBOX / "scan_0003.pdf").text)
+    assert minutes["filename"] == "{date}_議事録.pdf" and minutes["folder"] == "議事録/{yyyy}/{mm}"
+
+
+def test_unread_fields_are_warned_not_rejected():
+    text = read_pdf(INBOX / "scan_0005.pdf").text
+    rule = {"filename": "{date}_案内_{company}_{period}.pdf", "folder": "案内/{rule}", "fields": {"period": r"休業期間[:：]?\s*(\S+)"}}
+    warned = dict(rules.unread_fields(rule, text, []))
+    assert set(warned) == {"filename"}                      # {rule} はいつも決まる
+    assert "{date}・{company}" in warned["filename"] and "保存はできます" in warned["filename"]
+    assert rules.unread_fields({"filename": "{original}.pdf", "folder": "案内"}, text, []) == []
+
+
+@pytest.mark.parametrize("pattern, message", [
+    (r"番号(\d+", "正規表現の誤り：かっこ「(」が閉じていません（3文字目）"),
+    (r"番号\d+)", "正規表現の誤り：閉じかっこ「)」に合う「(」がありません（6文字目）"),
+    (r"([0-9", "正規表現の誤り：「[」が閉じていません（2文字目）"),
+    (r"(*番号)", "正規表現の誤り：繰り返しの記号（* + ? {}）の前に、繰り返すものがありません（2文字目）"),
+    (r"(?x", "正規表現が正しくありません（4文字目）（原文：missing -, : or )）"),     # よくないものは原文を添える
+])
+def test_regex_errors_are_in_japanese(pattern, message):
+    data = {"rules": [{"name": "x", "keywords": {"any": ["x"]}, "fields": {"no": pattern}, "filename": "{no}.pdf"}]}
+    with pytest.raises(rules.RuleError) as e:
+        rules.parse_rules(data, INBOX)
+    assert e.value.problems == [("rules[1].fields.no", message)]
 
 
 def test_draft_can_be_added_and_used(tmp_path, rs):

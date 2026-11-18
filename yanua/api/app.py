@@ -176,6 +176,7 @@ class PaperRuleDraft(BaseModel):
 
 class PaperRuleSave(BaseModel):
     rule: dict                                                      # 足すルール（下書きを直したもの）
+    sample_text: str | None = Field(default=None, max_length=200_000)  # 下書きのもとの PDF の文字（読み取れない項目の注意に使う）
 
 
 class PaperConvert(BaseModel):
@@ -343,9 +344,15 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 raise JobFailed(paperjobs.OCR_MISSING, str(e)) from e
             source = src.name
         ctx.progress(60, "下書きを作っています")
-        draft = paper_rule_file.draft_rule(text, params.get("name") or None, llm if params.get("use_llm") else None)
+        try:
+            self_names = paper_rules().self_names   # 自社の名前は相手先にしない
+        except ApiError:
+            self_names = []
+        draft = paper_rule_file.draft_rule(text, params.get("name") or None, llm if params.get("use_llm") else None, self_names)
         ctx.progress(100, "完了")
-        return {"draft": draft, "source": source, "excerpt": paper_rule_file.norm(text)[:1500]}
+        # text は「確かめる」で、ファイル名・保存先の項目がこの PDF から読み取れるかを見るのに使う
+        return {"draft": draft, "source": source, "excerpt": paper_rule_file.norm(text)[:1500],
+                "text": paper_rule_file.norm(text)[:200_000]}
 
     jobs.register("paper-rule-draft", paper_rule_draft_job)
 
@@ -1038,6 +1045,13 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             plan = my_plan(db, plan_id, user)
             if plan["executed_at"]:
                 raise ApiError(409, "executed", "この予定は実行済みです")
+            # 予定を作ったあとにルールが消えた（版に戻した・既定に戻した）ときは、置かずに作り直しを促す
+            names = set(paper_rules().names())
+            gone = [x for x in plan["items"] if not x["error"] and x["rule"] and x["rule"] not in names]
+            if gone:
+                raise ApiError(409, "rules_gone",
+                               "予定を作ったあとに、使ったルールがなくなりました。予定を作り直してから実行してください",
+                               [{"where": x["file"], "message": f"ルール「{x['rule']}」は今のルールにありません"} for x in gone])
             return paperjobs.execute(db, plan_id, settings.paper_inbox, settings.paper_out, move=req.move)
 
     @app.get("/api/paper/history")
@@ -1102,8 +1116,15 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.post("/api/paper/rules/validate")
     def paper_rule_validate(req: PaperRuleSave, user: User = Depends(require("paper.rules"))):
+        from ..paper import rules as paper_rule_file
+
         rules_with(req.rule)(rule_store().read_text())
-        return {"ok": True}
+        # 誤りではない注意：ファイル名・保存先に、下書きのもとの PDF から読み取れない項目を使っている（保存はできる）
+        warnings = []
+        if req.sample_text is not None:
+            warnings = [{"where": w, "message": m}
+                        for w, m in paper_rule_file.unread_fields(req.rule, req.sample_text, paper_rules().self_names)]
+        return {"ok": True, "warnings": warnings}
 
     @app.post("/api/paper/rules", status_code=201)
     def paper_rule_save(req: PaperRuleSave, user: User = Depends(require("paper.rules"))):

@@ -527,7 +527,14 @@ def test_rule_draft_save_replan_history_and_restore(client, settings, own_rules)
     assert not saved_copy.exists()
 
     # 正しいものだけを保存する。写しは data/settings/rules.json（ここでは作業用の場所）に書き、既定は書き換えない
-    assert client.post("/api/paper/rules/validate", json={"rule": draft}, headers=H).json() == {"ok": True}
+    assert draft["filename"] == "案内_{original}.pdf"     # この PDF から読み取れた項目だけで作る
+    assert client.post("/api/paper/rules/validate", json={"rule": draft}, headers=H).json() == {"ok": True, "warnings": []}
+    # 読み取れない項目を使うと「確かめる」で注意を出す（誤りではないので、保存はできる）
+    text = done["result"]["text"]
+    warned = client.post("/api/paper/rules/validate", json={"rule": {**draft, "filename": "{date}_案内.pdf"}, "sample_text": text}, headers=H)
+    assert warned.status_code == 200 and [w["where"] for w in warned.json()["warnings"]] == ["filename"]
+    assert "{date}" in warned.json()["warnings"][0]["message"]
+    assert client.post("/api/paper/rules/validate", json={"rule": draft, "sample_text": text}, headers=H).json()["warnings"] == []
     saved = client.post("/api/paper/rules", json={"rule": draft}, headers=H)
     assert saved.status_code == 201 and "案内" in [x["name"] for x in saved.json()["rules"]]
     assert own_rules.read_text(encoding="utf-8") == original
@@ -539,6 +546,7 @@ def test_rule_draft_save_replan_history_and_restore(client, settings, own_rules)
     again = wait_job(client, client.post("/api/paper/plans", json={"files": ["scan_0005.pdf"]}, headers=H).json()["job_id"])
     new_plan = client.get(f"/api/paper/plans/{again['result']['plan_id']}").json()
     assert new_plan["items"][0]["rule"] == "案内"
+    inbox_before = sorted(p.name for p in settings.paper_inbox.iterdir())
 
     # 版の記録も data/settings/ の下。前の版に戻せる（戻したことも1つの版になる）
     assert (settings.settings_dir / "history" / "rules.json" / "index.jsonl").is_file()
@@ -551,6 +559,18 @@ def test_rule_draft_save_replan_history_and_restore(client, settings, own_rules)
     assert restored["version"] == 3 and "案内" not in [x["name"] for x in restored["rules"]]
     assert saved_copy.read_text(encoding="utf-8") == original and own_rules.read_text(encoding="utf-8") == original
     assert client.get("/api/paper/rules/history").json()["current"] == 3
+
+    # 戻したあとは「案内」がないので、その前に作った予定は実行の前に止める（作り直しを促す）。ファイルは動かさない
+    gone = client.post(f"/api/paper/plans/{new_plan['plan_id']}/execute", json={"move": True}, headers=H)
+    assert gone.status_code == 409 and gone.json()["error"]["code"] == "rules_gone"
+    assert gone.json()["error"]["details"] == [{"where": "scan_0005.pdf", "message": "ルール「案内」は今のルールにありません"}]
+    assert sorted(p.name for p in settings.paper_inbox.iterdir()) == inbox_before
+    assert not client.get(f"/api/paper/plans/{new_plan['plan_id']}").json()["executed_at"]
+    # 作り直した予定は、今のルールで当て直されるので実行できる
+    remade = wait_job(client, client.post("/api/paper/plans", json={"files": ["scan_0005.pdf"]}, headers=H).json()["job_id"])
+    remade_id = remade["result"]["plan_id"]
+    assert client.get(f"/api/paper/plans/{remade_id}").json()["items"][0]["rule"] == ""
+    assert client.post(f"/api/paper/plans/{remade_id}/execute", json={"move": False}, headers=H).status_code == 200
     assert client.post("/api/paper/rules/history/99/restore", json={}, headers=H).status_code == 404
 
 

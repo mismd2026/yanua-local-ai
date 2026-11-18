@@ -183,7 +183,7 @@ def parse_rules(data, base_dir: Path, label: str = "rules.json") -> RuleSet:
                 if re.compile(pattern).groups < 1:
                     bad(where, "正規表現に、かっこ（取り出す部分）がありません")
             except re.error as e:
-                bad(where, f"正規表現が正しくありません: {e}")
+                bad(where, regex_message(e))
         known = set(BASE_FIELDS) | {k for k in fields if isinstance(k, str)}
         for part, default in (("filename", Rule.filename), ("folder", Rule.folder)):
             v = r.get(part, default)
@@ -227,6 +227,28 @@ def parse_rules(data, base_dir: Path, label: str = "rules.json") -> RuleSet:
         first = "、".join(f"{w}: {m}" if w else m for w, m in problems[:3])
         raise RuleError(f"{label}: {first}" + (f" ほか {len(problems) - 3} 件" if len(problems) > 3 else ""), problems)
     return RuleSet(rules, data.get("self_names", []), un.get("folder", "未分類"), un.get("filename", "{original}"))
+
+
+# 正規表現の誤り（Python の英語の文）のうち、よくあるものを日本語にする。ほかは原文を添える
+REGEX_MESSAGES = [
+    ("missing ), unterminated subpattern", "かっこ「(」が閉じていません"),
+    ("unbalanced parenthesis", "閉じかっこ「)」に合う「(」がありません"),
+    ("unterminated character set", "「[」が閉じていません"),
+    ("nothing to repeat", "繰り返しの記号（* + ? {}）の前に、繰り返すものがありません"),
+    ("multiple repeat", "繰り返しの記号（* + ?）が続いています"),
+    ("bad escape (end of pattern)", "最後の「\\」のあとに文字がありません"),
+    ("bad escape", "「\\」のあとの文字が使えません（記号そのものを探すときは「\\.」のように書きます）"),
+    ("bad character range", "[ ] の中の範囲の順番が逆です（例：[0-9] のように小さいほうから書きます）"),
+    ("min repeat greater than max repeat", "{ } の回数が、小さいほうと大きいほうで逆です"),
+]
+
+
+def regex_message(e: re.error) -> str:
+    at = f"（{e.pos + 1}文字目）" if e.pos is not None else ""
+    for en, ja in REGEX_MESSAGES:
+        if e.msg.startswith(en):
+            return f"正規表現の誤り：{ja}{at}"
+    return f"正規表現が正しくありません{at}（原文：{e.msg}）"
 
 
 def norm(text: str) -> str:
@@ -339,8 +361,9 @@ def choose(rs: RuleSet, text: str, llm: ChatModel | None = None, forced: str | N
 # ------------------------------------------------------------------ ルールの下書き
 
 
-def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None) -> dict:
-    """見本のPDFの文字から、ルールの下書きを作る。下書きは人が確かめてからルールのファイルに足す。"""
+def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None, self_names: list[str] | None = None) -> dict:
+    """見本のPDFの文字から、ルールの下書きを作る。下書きは人が確かめてからルールのファイルに足す。
+    ファイル名と保存先の案は、この PDF から読み取れた項目（日付・相手先）だけで作る（読み取れない項目は「不明」になるため）。"""
     t = norm(text)
     head = "\n".join(t.splitlines()[:6])
     kind = name or next((k for k in KNOWN_TYPES if k in head), None) or next((k for k in KNOWN_TYPES if k in t), None)
@@ -356,11 +379,33 @@ def draft_rule(text: str, name: str | None = None, llm: ChatModel | None = None)
         except Exception:  # noqa: BLE001
             pass
     kind = kind or "（種類の名前）"
+    found = find_fields(t, None, self_names or [])
+    has_date, has_company = "date" in found, "company" in found
+    parts = (["{date}"] if has_date else []) + [kind] + (["{company}"] if has_company else [])
+    if not (has_date or has_company):
+        parts.append("{original}")    # 日付も相手先もないときは、元のファイル名で分ける（同じ名前にならないように）
     return {
         "name": kind,
         "keywords": {"any": keywords[:4], "all": [], "none": []},
         "fields": {},
-        "filename": "{date}_" + kind + "_{company}.pdf",
-        "folder": kind + "/{yyyy}/{mm}",
+        "filename": "_".join(parts) + ".pdf",
+        "folder": kind + ("/{yyyy}/{mm}" if has_date else ""),
         "priority": 0,
     }
+
+
+ALWAYS_FIELDS = {"rule", "original"}   # どの PDF でも決まる項目
+
+
+def unread_fields(rule: dict, text: str, self_names: list[str]) -> list[tuple[str, str]]:
+    """見本の PDF から読み取れない項目を、ファイル名・保存先で使っていないかを見る（誤りではなく注意。保存はできる）。
+    rule は検証を通った形（fields は {名前: 正規表現}）であること。"""
+    fields = rule.get("fields") or {}
+    found = set(find_fields(text, Rule(name="", fields=fields), self_names)) | ALWAYS_FIELDS
+    out = []
+    for part in ("filename", "folder"):
+        missing = [k for k in dict.fromkeys(re.findall(r"\{(\w+)\}", str(rule.get(part, "")))) if k not in found]
+        if missing:
+            out.append((part, f"{'・'.join('{' + k + '}' for k in missing)} は、この PDF からは読み取れませんでした。"
+                              "このままだと、同じ種類の書類で「不明」になります（保存はできます）"))
+    return out

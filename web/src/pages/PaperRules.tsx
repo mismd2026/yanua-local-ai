@@ -2,7 +2,7 @@
 // - 下書きは pdf-rule-draft と同じ処理（ジョブ）で作り、画面で直してから保存する
 // - 保存の前に、サーバーがルールの読み込みと同じ検証をかける。誤りは項目の横に出す（where の位置）
 // - 保存するたびに前の版が残り、元に戻せる（段階4の設定の画面 S-52 と同じ考え方）
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError, Job, RULE_FIELDS, RuleDraft, RuleVersion, SettingStatus } from "../api";
 import { useJob } from "../useJob";
 import { errorText, JobProgress, time } from "../ui";
@@ -10,6 +10,7 @@ import { errorText, JobProgress, time } from "../ui";
 export type DraftSource = { plan_id: string; index: number; file: string } | { inbox: string; file: string };
 
 type Problems = Record<string, string[]>;
+type DraftResult = { draft: RuleDraft; source: string; excerpt: string; text?: string };
 
 const lines = (s: string) => s.split("\n").map((x) => x.trim()).filter(Boolean);
 
@@ -35,10 +36,16 @@ export function RuleDraftPanel({ source, onClose, onSaved }: { source: DraftSour
   const [useLlm, setUseLlm] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [result, setResult] = useState<{ draft: RuleDraft; source: string; excerpt: string } | null>(null);
+  const [result, setResult] = useState<DraftResult | null>(null);
   const { job } = useJob(jobId, (j) => {
-    if (j.status === "完了" && j.result) setResult(j.result as unknown as { draft: RuleDraft; source: string; excerpt: string });
+    if (j.status === "完了" && j.result) setResult(j.result as unknown as DraftResult);
   });
+  // 表の下のほうから開いたときも分かるように、開いた欄まで画面を動かす
+  const panel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    panel.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    panel.current?.focus({ preventScroll: true });
+  }, []);
 
   const start = async () => {
     setError("");
@@ -53,7 +60,7 @@ export function RuleDraftPanel({ source, onClose, onSaved }: { source: DraftSour
   };
 
   return (
-    <section className="card" aria-label="ルールの下書き">
+    <section className="card" aria-label="ルールの下書き" ref={panel} tabIndex={-1}>
       <div className="row-between">
         <h2>ルールの下書き：{source.file}</h2>
         <button className="link" onClick={onClose}>閉じる</button>
@@ -78,12 +85,14 @@ export function RuleDraftPanel({ source, onClose, onSaved }: { source: DraftSour
           {jobId && <JobProgress job={job} label="ルールの下書き作り" />}
         </>
       )}
-      {result && <RuleEditor draft={result.draft} excerpt={result.excerpt} onSaved={onSaved} />}
+      {result && <RuleEditor draft={result.draft} excerpt={result.excerpt} sampleText={result.text} onSaved={onSaved} />}
     </section>
   );
 }
 
-function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: string; onSaved: (version: number) => void }) {
+function RuleEditor({ draft, excerpt, sampleText, onSaved }: {
+  draft: RuleDraft; excerpt: string; sampleText?: string; onSaved: (version: number) => void;
+}) {
   const [name, setName] = useState(draft.name);
   const [any, setAny] = useState(draft.keywords.any.join("\n"));
   const [all, setAll] = useState(draft.keywords.all.join("\n"));
@@ -93,6 +102,7 @@ function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: st
   const [priority, setPriority] = useState(String(draft.priority));
   const [fields, setFields] = useState<[string, string][]>(Object.entries(draft.fields));
   const [problems, setProblems] = useState<Problems>({});
+  const [warnings, setWarnings] = useState<Problems>({});
   const [general, setGeneral] = useState("");
   const [checked, setChecked] = useState("");
   const [busy, setBusy] = useState(false);
@@ -110,10 +120,15 @@ function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: st
   const send = async (path: string) => {
     setBusy(true);
     setProblems({});
+    setWarnings({});
     setGeneral("");
     setChecked("");
     try {
-      const r = await api<{ ok?: boolean; version?: number }>("POST", path, { rule: rule() });
+      const r = await api<{ ok?: boolean; version?: number; warnings?: { where: string; message: string }[] }>(
+        "POST", path, { rule: rule(), sample_text: sampleText ?? null });
+      const w: Problems = {};
+      for (const d of r.warnings ?? []) (w[d.where] ??= []).push(d.message);
+      setWarnings(w);
       return r;
     } catch (e) {
       if (e instanceof ApiError && e.details.length) {
@@ -133,12 +148,20 @@ function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: st
   const changed = <T,>(set: (v: T) => void) => (v: T) => {
     set(v);
     setChecked("");
+    setWarnings({});
   };
 
   // where（例：keywords.any、fields.invoice_no）に当たる誤りを、その項目の下に出す
   const Err = ({ at }: { at: string }) => {
     const msgs = Object.entries(problems).filter(([w]) => w === at || w.startsWith(`${at}.`)).flatMap(([, m]) => m);
-    return msgs.length ? <>{msgs.map((m, i) => <div key={i} className="small error" role="alert">{m}</div>)}</> : null;
+    const notes = warnings[at] ?? [];
+    if (!msgs.length && !notes.length) return null;
+    return (
+      <>
+        {msgs.map((m, i) => <div key={i} className="small error" role="alert">{m}</div>)}
+        {notes.map((m, i) => <div key={`w${i}`} className="small warn" role="note">⚠ {m}</div>)}
+      </>
+    );
   };
 
   return (
@@ -216,7 +239,8 @@ function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: st
       </div>
       {problems[""] && <div className="small error" role="alert">{problems[""].join("　")}</div>}
       <div className="toolbar">
-        <button type="button" disabled={busy} onClick={async () => { if (await send("/api/paper/rules/validate")) setChecked("問題はありません。保存できます。"); }}>
+        <button type="button" disabled={busy} onClick={async () => { const r = await send("/api/paper/rules/validate");
+          if (r) setChecked(r.warnings?.length ? "誤りはありません。注意を見てから保存してください。" : "問題はありません。保存できます。"); }}>
           確かめる
         </button>
         <button type="button" className="primary" disabled={busy} onClick={async () => {
@@ -234,7 +258,7 @@ function RuleEditor({ draft, excerpt, onSaved }: { draft: RuleDraft; excerpt: st
 }
 
 // ルールの版の一覧と、元に戻す
-export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: () => void }) {
+export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: (message: string) => void }) {
   const [versions, setVersions] = useState<RuleVersion[] | null>(null);
   const [current, setCurrent] = useState<number | null>(null);
   const [status, setStatus] = useState<SettingStatus | null>(null);
@@ -263,7 +287,7 @@ export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: ()
       const r = await api<{ version: number }>("POST", `/api/paper/rules/history/${v}/restore`, {});
       setMessage(`版 ${v} の中身に戻しました（新しい版 ${r.version}）。`);
       setReload((n) => n + 1);
-      onRestored();
+      onRestored(`ルールを版 ${v} の中身に戻しました（新しい版 ${r.version}）。`);
     } catch (e) {
       setError(errorText(e, "元に戻せませんでした"));
     } finally {
@@ -279,7 +303,7 @@ export function RuleHistory({ tick, onRestored }: { tick: number; onRestored: ()
       const r = await api<{ version: number }>("POST", "/api/paper/rules/reset", {});
       setMessage(`既定のルールに戻しました（版 ${r.version}）。画面で足したルールは、版として残っています。`);
       setReload((n) => n + 1);
-      onRestored();
+      onRestored(`ルールを既定に戻しました（版 ${r.version}）。`);
     } catch (e) {
       setError(errorText(e, "既定に戻せませんでした"));
     } finally {

@@ -3,7 +3,7 @@
 // - ルールを選び直すときは、サーバーが予定を作ったときの文字を使う（OCR をし直さないので速い）
 // - 未分類の PDF（または選んだ PDF）から、ルールの下書きを作って保存できる（PaperRules.tsx。K-047）
 import { useCallback, useEffect, useState } from "react";
-import { api, InboxFile, Job, Plan, PlanItem, PaperRule, SortRecord } from "../api";
+import { api, ApiError, InboxFile, Job, Plan, PlanItem, PaperRule, SortRecord } from "../api";
 import { useJob } from "../useJob";
 import { DefaultRulesNotice, DraftSource, RuleDraftPanel, RuleHistory } from "./PaperRules";
 import { bytes, errorText, JobProgress, queryParam, setQuery, Status, time } from "../ui";
@@ -18,7 +18,11 @@ export default function PaperSort({ canRules = false }: { canRules?: boolean }) 
   const [historyTick, setHistoryTick] = useState(0);
   const [draft, setDraft] = useState<DraftSource | null>(null);
   const [rulesTick, setRulesTick] = useState(0);     // ルールを保存した・戻したときに、ルールの一覧を読み直す
-  const [saved, setSaved] = useState<number | null>(null);
+  const [changed, setChanged] = useState<string | null>(null);   // ルールを保存した・版に戻した・既定に戻したときの知らせ
+  const rulesChanged = (message: string) => {
+    setChanged(message);
+    setRulesTick((t) => t + 1);
+  };
 
   const open = (id: string | null) => {
     setPlanId(id);
@@ -36,15 +40,15 @@ export default function PaperSort({ canRules = false }: { canRules?: boolean }) 
       <h1 className="page-title">PDF の仕分け</h1>
       <div className="jobs-page">
         <DefaultRulesNotice tick={rulesTick} />
-        {saved !== null && (
+        {changed !== null && (
           <p className="notice" role="status">
-            ルールを保存しました（版 {saved}）。予定を作り直すと、新しいルールが使われます。
-            <button className="link" onClick={() => setSaved(null)}>閉じる</button>
+            {changed}予定を作り直すと、新しいルールが使われます。
+            <button className="link" onClick={() => setChanged(null)}>閉じる</button>
           </p>
         )}
         {draft && (
           <RuleDraftPanel key={JSON.stringify(draft)} source={draft} onClose={() => setDraft(null)}
-            onSaved={(v) => { setSaved(v); setDraft(null); setRulesTick((t) => t + 1); }} />
+            onSaved={(v) => { setDraft(null); rulesChanged(`ルールを保存しました（版 ${v}）。`); }} />
         )}
         {!planId && <Inbox busy={!!jobId} onStarted={setJobId} onDraft={canRules ? setDraft : undefined} />}
         {jobId && (
@@ -55,10 +59,10 @@ export default function PaperSort({ canRules = false }: { canRules?: boolean }) 
         )}
         {planId && (
           <PlanView planId={planId} onBack={() => open(null)} onExecuted={() => setHistoryTick((t) => t + 1)} rulesTick={rulesTick}
-            onDraft={canRules ? setDraft : undefined} replan={saved !== null} onReplan={(id) => { setSaved(null); setJobId(id); }} />
+            onDraft={canRules ? setDraft : undefined} replan={changed !== null} onReplan={(id) => { setChanged(null); setJobId(id); }} />
         )}
         <History tick={historyTick} />
-        {canRules && <RuleHistory tick={rulesTick} onRestored={() => setRulesTick((t) => t + 1)} />}
+        {canRules && <RuleHistory tick={rulesTick} onRestored={rulesChanged} />}
       </div>
     </>
   );
@@ -170,9 +174,11 @@ function PlanView({ planId, onBack, onExecuted, rulesTick, onDraft, replan, onRe
   const [move, setMove] = useState(false);
   const [asking, setAsking] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [gone, setGone] = useState<{ where: string; message: string }[]>([]);   // 予定のあとに消えたルール（実行の前に止めた）
 
   useEffect(() => {
     setPlan(null);
+    setGone([]);
     Promise.all([api<Plan>("GET", `/api/paper/plans/${encodeURIComponent(planId)}`), api<{ rules: PaperRule[] }>("GET", "/api/paper/rules")])
       .then(([p, r]) => {
         setPlan(p);
@@ -219,12 +225,14 @@ function PlanView({ planId, onBack, onExecuted, rulesTick, onDraft, replan, onRe
   const execute = async () => {
     setExecuting(true);
     setError("");
+    setGone([]);
     try {
       const result = await api<Plan["result"]>("POST", `/api/paper/plans/${encodeURIComponent(planId)}/execute`, { move });
       setPlan((p) => p && { ...p, executed_at: new Date().toISOString(), result });
       onExecuted();
     } catch (e) {
       setError(errorText(e, "実行できませんでした"));
+      if (e instanceof ApiError && e.code === "rules_gone") setGone(e.details);
     } finally {
       setExecuting(false);
       setAsking(false);
@@ -250,7 +258,10 @@ function PlanView({ planId, onBack, onExecuted, rulesTick, onDraft, replan, onRe
         <>
           {!done && <p className="small muted">置く先を確かめてください。ルールが違うものは、選び直せます（PDF は読み直しません）。</p>}
           {!done && warned > 0 && <p className="warn" role="status">⚠ 注意がある行が{warned}件あります（表の「置く先」を見てください）。</p>}
-          {replan && !done && (
+          {gone.length > 0 && !done && (
+            <ul className="small error">{gone.map((g) => <li key={g.where}>{g.where}：{g.message}</li>)}</ul>
+          )}
+          {(replan || gone.length > 0) && !done && (
             <p><button className="primary" disabled={replanning} onClick={() => void remake()}>この予定のファイルで、予定を作り直す</button></p>
           )}
           <div className="table-wrap">
