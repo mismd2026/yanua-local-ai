@@ -517,7 +517,12 @@ def _effective_network(settings_dir: Path):
         state = netsettings.read_state_text((state_file if state_file.is_file() else default_state).read_text(encoding="utf-8"))
     except (OSError, ValueError, KeyError, _json.JSONDecodeError):
         state = netsettings.read_state_text(default_state.read_text(encoding="utf-8"))
-    return netsettings.effective(defaults, state), error
+    known = None
+    try:
+        known = _json.loads((settings_dir / netsettings.KNOWN_NAME).read_text(encoding="utf-8")).get("hosts")
+    except (OSError, ValueError, AttributeError):
+        pass
+    return netsettings.effective(defaults, state, known), error
 
 
 def _models(args) -> int:

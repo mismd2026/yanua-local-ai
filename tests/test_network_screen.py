@@ -152,8 +152,12 @@ def test_first_start_turns_all_defaults_on(client, settings):
     assert v["new_defaults"] == [] and v["removed_defaults"] == [] and v["error"] == ""
     assert hosts(v)["huggingface.co"]["purpose"].startswith("モデルの入手")
     assert v["update_check"]["mode"] == "manual" and v["schedule"] == "手動だけ"
-    assert (settings.settings_dir / "network_state.json").is_file()
-    init = audit_rows(client, "network.init")
+    # 初めての起動では版を増やさず、「既定」を使っている。今の既定の宛先は、版にしないファイルに覚える
+    assert v["status"]["using"] == "default" and v["versions"] == []
+    assert not (settings.settings_dir / "network_state.json").exists()
+    known = json.loads((settings.settings_dir / "network_known_defaults.json").read_text(encoding="utf-8"))
+    assert known["hosts"] == ["huggingface.co", "*.huggingface.co", "*.hf.co"]
+    init = audit_rows(client, "settings.network.init")
     assert len(init) == 1 and init[0]["actor"] == "システム"
 
 
@@ -181,7 +185,8 @@ def test_added_host_validation(client):
     assert hosts(v)["registry.ollama.ai"] == {"host": "registry.ollama.ai", "kind": "added", "purpose": "Ollama の入手元との照合",
                                               "new": False, "on": True}
     assert v["versions"][0]["action"] == "通信の設定を保存した（*.hf.co を OFF、registry.ollama.ai を追加）"
-    assert any(e["detail"].endswith("（*.hf.co を OFF、registry.ollama.ai を追加）（版 3）") for e in audit_rows(client, "network.save"))
+    # 監査ログの操作の名前は、ほかの設定とそろえる（settings.network.save）
+    assert any(e["detail"].endswith("（*.hf.co を OFF、registry.ollama.ai を追加）（版 2）") for e in audit_rows(client, "settings.network.save"))
     # 追加の宛先は消せる
     r = put(client, added=[])
     assert "registry.ollama.ai を消した" in r.json()["versions"][0]["action"]
@@ -216,7 +221,8 @@ def test_new_default_hosts_start_off_and_are_announced_removed_ones_are_not_used
     assert v["new_defaults"] == [{"host": "cdn.example.org", "purpose": "新しい配信元"}]
     assert hosts(v)["cdn.example.org"]["on"] is False and hosts(v)["cdn.example.org"]["new"] is True
     assert v["removed_defaults"] == ["*.hf.co"] and "*.hf.co" not in hosts(v)
-    app_policy = netsettings.effective(cfg, netsettings.read_state_text((settings.settings_dir / "network_state.json").read_text()))
+    known = json.loads((settings.settings_dir / "network_known_defaults.json").read_text(encoding="utf-8"))["hosts"]
+    app_policy = netsettings.effective(cfg, netsettings.read_state_text((ROOT / "config" / "network_state.json").read_text()), known)
     assert not app_policy.allows("https://cdn.example.org/") and not app_policy.allows("https://x.hf.co/")
     # ON にするかは管理者が決める
     r = put(client, defaults={"huggingface.co": True, "*.huggingface.co": True, "cdn.example.org": True})
@@ -224,15 +230,25 @@ def test_new_default_hosts_start_off_and_are_announced_removed_ones_are_not_used
     assert "cdn.example.org を ON" in r.json()["versions"][0]["action"]
 
 
-def test_reset_turns_defaults_on_and_removes_added(client):
+def test_reset_turns_defaults_on_and_removes_added_in_one_version(client, settings):
     put(client, defaults={"huggingface.co": False, "*.huggingface.co": True, "*.hf.co": True},
         added=[{"host": "registry.ollama.ai", "on": True}], update_check={"mode": "daily", "time": "04:00", "weekday": 0})
+    before = len(get(client)["versions"])
     r = client.post("/api/admin/network/reset", json={}, headers=H).json()
     assert all(h["on"] for h in r["hosts"]) and [h["kind"] for h in r["hosts"]] == ["default"] * 3
     assert r["update_check"]["mode"] == "manual"
-    actions = [v["action"] for v in r["versions"]]
-    assert actions[0] == "既定に戻した：今の既定の宛先を覚えた"
-    assert actions[1].startswith("既定に戻した（画面で保存した写しを消した。huggingface.co を ON、registry.ollama.ai を消した、更新の確認 毎日 04:00→手動だけ")
+    assert len(r["versions"]) == before + 1                             # 版は1つだけ増える
+    assert r["status"]["using"] == "default"                            # 戻したあとは「既定」
+    assert r["versions"][0]["action"].startswith(
+        "既定に戻した（画面で保存した写しを消した。huggingface.co を ON、registry.ollama.ai を消した、更新の確認 毎日 04:00→手動だけ")
+    assert [e["action"] for e in audit_rows(client, "settings.network")][:2] == ["settings.network.reset", "settings.network.save"]
+    # 戻したあとに増えた既定は、OFF で加わる（同じ操作の中で、今の既定を覚え直している）
+    cfg = json.loads(settings.network_config.read_text(encoding="utf-8"))
+    cfg["allowed_hosts"].append("cdn.example.org")
+    settings.network_config.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    v = get(client)
+    assert hosts(v)["cdn.example.org"]["on"] is False and v["new_defaults"][0]["host"] == "cdn.example.org"
+    assert client.post("/api/admin/network/reset", json={}, headers=H).json()["already_default"] is True
 
 
 def test_broken_network_json_keeps_server_running(settings, fake_net):
