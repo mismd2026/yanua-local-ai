@@ -3,6 +3,7 @@
 // - 変える前に、試しに当てるだけの API（/api/admin/access/preview）で「だれのどの権限が増える・減るか」を出す。保存はしない
 // - 自分の権限が減る変更は「外すと、あなた自身では戻せません」と出して、もう一度押させる
 // - 断られる変更（自分の権限が増える・決まりのグループに手で入れる・最後の roles.assign 保持者を外す）は、理由を欄の近くに出す
+// - 対象の選び肢は「種類：名前」で出す（グループ：人事・機能：人事 を見分けるため）
 // - 変更はすべて今の API を通す（画面専用の抜け道はない）。守りは API の側
 import { ReactNode, useCallback, useEffect, useState } from "react";
 import {
@@ -366,12 +367,12 @@ function TargetSelect({ view, value, onChange, label }: { view: AccessView; valu
         <option value="">選んでください</option>
         {kinds.map((k) => (
           <optgroup key={k} label={k}>
-            {view.targets.filter((t) => t.kind_name === k).map((t) => <option key={t.target_id} value={`t:${t.target_id}`}>{t.name}</option>)}
+            {view.targets.filter((t) => t.kind_name === k).map((t) => <option key={t.target_id} value={`t:${t.target_id}`}>{t.kind_name}：{t.name}</option>)}
           </optgroup>
         ))}
         {view.target_sets.length > 0 && (
           <optgroup label="対象のまとまり">
-            {view.target_sets.map((s) => <option key={s.set_id} value={`s:${s.set_id}`}>{s.name}</option>)}
+            {view.target_sets.map((s) => <option key={s.set_id} value={`s:${s.set_id}`}>まとまり：{s.name}</option>)}
           </optgroup>
         )}
       </select>
@@ -737,7 +738,8 @@ function Who({ view }: { view: AccessView }) {
       {res && (
         <>
           <p><strong>{res.name}</strong>（{res.account_id}{res.dept ? `・${res.dept}` : ""}）　入っているグループ：{res.groups.join("、") || "なし"}</p>
-          {res.permissions.length === 0 ? <p className="muted">権限はありません。</p> : (
+          {res.note && <p className="notice" role="note">{res.note}</p>}
+          {res.permissions.length === 0 ? <p className="muted">この仕組みで与えている権限はありません。</p> : (
             <div className="table-wrap">
               <table className="table" aria-label="持っている権限">
                 <thead><tr><th>権限</th><th>できること</th><th>グループ</th><th>役割</th><th>対象</th><th>期限</th></tr></thead>

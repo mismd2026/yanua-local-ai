@@ -35,6 +35,8 @@ SPECIAL_NAMES = {SELF_DEPT: "メンバー自身の部署", ALL: "全社"}
 TARGET_KINDS = ("department", "group", "feature", "system", "server", "special")
 EVERYONE = "全員"     # 決まりの中身：在籍している人の全員
 MIGRATED_BY = "（移し替え）"
+# システムアカウントの今の使い方（「この人は何ができるか」に出す）。受付端末は、この仕組みへの移し替えがまだ
+SYSTEM_NOTES = {"sys:kiosk": "今は端末トークンで /api/kiosk/ だけを使えます（この仕組みへの移し替えはまだ）"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (

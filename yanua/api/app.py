@@ -2215,7 +2215,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         result = None
         if len(candidates) == 1:
             who = candidates[0]
-            result = {**who, "groups": engine.groups_of(who["account_id"], who["dept"]),
+            result = {**who, "note": access.SYSTEM_NOTES.get(who["account_id"], ""),
+                      "groups": engine.groups_of(who["account_id"], who["dept"]),
                       "permissions": access.explain(engine, who["account_id"], who["dept"])}
         return {"q": q, "candidates": candidates, "result": result}
 

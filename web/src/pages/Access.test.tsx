@@ -39,6 +39,10 @@ const VIEW = {
       auto: true, used: false, stale: false },
     { target_id: "system:ab12", kind: "system", name: "本番の AWS", ref: "system:ab12", description: "読み取りだけ", host: "huggingface.co",
       secret_ref: "AWS_READONLY_KEY", kind_name: "システム", auto: false, used: false, stale: false },
+    { target_id: "group:G-hr", kind: "group", name: "人事", ref: "G-hr", description: "", host: "", secret_ref: "", kind_name: "グループ",
+      auto: true, used: false, stale: false },
+    { target_id: "feature:人事", kind: "feature", name: "人事", ref: "人事", description: "", host: "", secret_ref: "", kind_name: "機能",
+      auto: true, used: false, stale: false },
   ],
   target_sets: [],
   accounts: [{ account_id: "sys:kiosk", kind: "system", name: "受付端末" }, { account_id: "sys:update-check", kind: "system", name: "更新の確認（S-53）" }],
@@ -146,7 +150,9 @@ describe("S-54 権限", () => {
     await user.click(within(await screen.findByRole("region", { name: "グループの一覧" })).getByRole("button", { name: "監査" }));
     const audit = screen.getByRole("region", { name: "グループ「監査」" });
     await user.selectOptions(within(audit).getByLabelText("役割"), "R-社員");
-    await user.selectOptions(within(audit).getByLabelText("対象"), "t:special:all");
+    const options = within(within(audit).getByLabelText("対象")).getAllByRole("option").map((o) => o.textContent);
+    expect(options).toEqual(["選んでください", "特別：全社", "部署：営業部", "システム：本番の AWS", "グループ：人事", "機能：人事"]);
+    await user.selectOptions(within(audit).getByLabelText("対象"), "特別：全社");
     await user.click(within(audit).getByRole("button", { name: "与える" }));
     expect(await within(audit).findByRole("alert", { name: "変えられない理由" })).toHaveTextContent("自分の権限が増える変更はできません（増える権限：audit.view）");
     expect(within(audit).queryByRole("button", { name: /保存する/ })).toBeNull();
@@ -193,14 +199,14 @@ describe("S-54 権限", () => {
   });
 
   it("この人は何ができるか：権限ごとに、グループ・役割・対象・期限を出す。システムアカウントも選べる", async () => {
-    const result = { account_id: "10001", name: "山田 太郎", dept: "経理部", kind: "person", groups: ["社員", "監査"],
+    const result = { account_id: "10001", name: "山田 太郎", dept: "経理部", kind: "person", note: "", groups: ["社員", "監査"],
       permissions: [{ permission: "audit.view", feature: "監査", does: "監査ログを見る（S-55）",
         from: [{ group: "監査", role: "監査", target: "全社", via: "手で入れた", expires_at: "2026-12-31", reason: "" }] }] };
     const { calls } = fakeApi({
       "GET /api/admin/access": VIEW,
       "GET /api/admin/access/explain?q=%E5%B1%B1%E7%94%B0": { q: "山田", candidates: [result], result },
       "GET /api/admin/access/explain?q=sys%3Akiosk": { q: "sys:kiosk", candidates: [], result: { account_id: "sys:kiosk", name: "受付端末",
-        dept: "", kind: "system", groups: [], permissions: [] } },
+        dept: "", kind: "system", note: "今は端末トークンで /api/kiosk/ だけを使えます（この仕組みへの移し替えはまだ）", groups: [], permissions: [] } },
     });
     const user = userEvent.setup();
     render(<AccessPage />);
@@ -209,8 +215,10 @@ describe("S-54 権限", () => {
     await user.click(screen.getByRole("button", { name: "調べる" }));
     const table = await screen.findByRole("table", { name: "持っている権限" });
     expect(within(table).getAllByRole("row")[1]).toHaveTextContent("audit.view監査：監査ログを見る（S-55）監査（手で入れた）監査全社2026-12-31");
+    expect(screen.queryByRole("note")).toBeNull();
     await user.click(screen.getByRole("button", { name: "受付端末" }));
-    expect(await screen.findByText("権限はありません。")).toBeInTheDocument();
+    expect(await screen.findByRole("note")).toHaveTextContent("今は端末トークンで /api/kiosk/ だけを使えます（この仕組みへの移し替えはまだ）");
+    expect(screen.getByText("この仕組みで与えている権限はありません。")).toBeInTheDocument();
     expect(calls.map((c) => c.path)).toContain("/api/admin/access/explain?q=sys%3Akiosk");
   });
 });
