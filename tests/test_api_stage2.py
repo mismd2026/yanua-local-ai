@@ -106,10 +106,10 @@ def test_needs_login(client, method, path):
 def test_me_lists_stage2_permissions(client):
     login(client, "10002")
     p = client.get("/api/me").json()["permissions"]
-    assert {"notifications", "visits.own", "visits.all", "reception.records"} <= set(p) and "tickets" not in p
+    assert {"notifications", "visits.own", "visits.all", "reception.records"} <= set(p) and "helpdesk.handle" not in p
     login(client, "10005")
     p = client.get("/api/me").json()["permissions"]
-    assert {"tickets", "kiosk.devices"} <= set(p) and "visits.all" not in p
+    assert {"helpdesk.handle", "kiosk.devices"} <= set(p) and "visits.all" not in p   # 前の tickets は helpdesk.handle
 
 
 # ---------------------------------------------------------------- お知らせ

@@ -116,7 +116,7 @@ export const ME_EMPLOYEE = {
   name: "高橋 美咲",
   dept: "営業部",
   roles: ["社員"],
-  permissions: ["ask", "documents.list", "helpdesk", "jobs.own", "notifications", "search", "visits.own"],
+  permissions: ["ask", "documents.view", "helpdesk", "jobs.own", "notifications", "search", "visits.own"],
 };
 
 export const NOT_LOGGED_IN = { status: 401, json: { error: { code: "not_logged_in", message: "ログインしてください" } } };

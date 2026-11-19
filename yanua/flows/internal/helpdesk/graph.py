@@ -234,6 +234,10 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
 
         # 1. 社内文書から出典つきで答える（照合できた人は部署の権限で、できない人は全社の文書だけ）
         dept = s["requester"]["dept"] if s["requester"]["verified"] != "照合できず" else ""
+        # ログインしている人は、権限の判定（yanua/access.py）で決めた「見てよい部署」を使う（API が doc_scope に入れる）
+        scope = s["requester"].get("doc_scope")
+        if scope is not None and s["requester"]["verified"] == "ログイン":
+            dept = scope if scope == "*" else set(scope)
         ans = answer_question(store, llm, s["problem"], dept, top_k)
         if observe:
             observe(s["problem"], ans, row["question"] if ans.refused and row else None)
@@ -281,7 +285,7 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
         t = {
             "ticket_id": tid,
             "created_at": now.isoformat(timespec="seconds"),
-            "requester": s["requester"],
+            "requester": {k: v for k, v in s["requester"].items() if k != "doc_scope"},   # 見てよい部署は票に残さない
             "contact": contact,
             "details": details,
             "category": s["kb"]["category"] if s.get("kb") else "その他",

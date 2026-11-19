@@ -71,7 +71,8 @@ def delete_session(db: sqlite3.Connection, token: str) -> None:
         db.execute("DELETE FROM web_sessions WHERE token_hash = ?", (_hash(token),))
 
 
-def user_for_token(db: sqlite3.Connection, token: str, roles: RoleConfig, idle_minutes: int) -> User | None:
+def user_for_token(db: sqlite3.Connection, token: str, roles, idle_minutes: int) -> User | None:
+    # roles は roles_for(社員番号, 部署) を持つもの（yanua/access.py の Engine。入っているグループの名前を返す）
     """トークンからログイン中の人を返す。期限切れ・操作のない時間が長すぎる・在籍でない人は None。"""
     if not token:
         return None

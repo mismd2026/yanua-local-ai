@@ -8,7 +8,7 @@ const POLL_MS = 3000;
 
 export default function Jobs({ me }: { me: Me }) {
   const canAll = me.permissions.includes("jobs.all");
-  const canIngest = me.permissions.includes("documents.ingest");
+  const canIngest = me.permissions.includes("documents.manage");
   const [all, setAll] = useState(false);
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [error, setError] = useState("");

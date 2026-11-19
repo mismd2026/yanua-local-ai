@@ -1,8 +1,7 @@
-"""役割と、役割ごとにできる操作（K-049）。
+"""前の役割の決め方（config/roles.json：部署か社員番号で役割を決める）を読む。
 
-- 部署はどの「文書」を見られるかを決める（K-003）。役割はどの「画面と操作」を使えるかを決める
-- ログインした人は全員「社員」。ほかの役割は config/roles.json で、部署か社員番号から決める
-- 操作は PERMISSIONS に書いたものだけを許す。書いていない操作はだれにも許さない
+S-54 の移し替えで、権限は「役割 × 対象 × グループ」（yanua/access.py・yanua/permissions.py・docs/access-model.md）になった。
+roles.json は、初めての起動で DB が空のときに、最初の役割・グループを作るためだけに使う（yanua/access.py の migrate_if_empty）。
 """
 
 from __future__ import annotations
@@ -14,35 +13,6 @@ from pathlib import Path
 EMPLOYEE = "社員"
 ROLES = (EMPLOYEE, "総務", "情シス", "人事", "管理者")
 
-# 操作 → その操作をしてよい役割
-PERMISSIONS: dict[str, frozenset[str]] = {
-    "ask": frozenset({EMPLOYEE}),
-    "search": frozenset({EMPLOYEE}),
-    "documents.list": frozenset({EMPLOYEE}),
-    "documents.ingest": frozenset({"管理者"}),
-    "helpdesk": frozenset({EMPLOYEE}),
-    "jobs.own": frozenset({EMPLOYEE}),
-    "jobs.all": frozenset({"管理者"}),
-    # 段階2（K-045・K-018・K-043）
-    "notifications": frozenset({EMPLOYEE}),           # 自分あて・自分の部署あてのお知らせだけ
-    "visits.own": frozenset({EMPLOYEE}),              # 自分が担当の来訪予定だけ
-    "visits.all": frozenset({"総務"}),                # 全社の来訪予定・取り込み・ほかの人の予定の登録と取り消し
-    "reception.records": frozenset({"総務"}),         # 受付の記録（電話・Web・来訪）
-    "tickets": frozenset({"情シス"}),                 # ヘルプデスクの問い合わせ票
-    "kiosk.devices": frozenset({"管理者"}),           # 受付端末の登録・取り消し
-    # 段階3（K-046・K-047）
-    "paper": frozenset({"総務"}),                     # PDF の仕分け・変換（受信箱・予定・実行・記録・変換・結果のダウンロード）
-    "paper.rules": frozenset({"総務"}),               # 仕分けルールの下書き・保存・前の版に戻す
-    "meetings": frozenset({EMPLOYEE}),                # 議事録（自分が作ったものだけ。総務も社員なので使える）
-    # 段階4（K-009）
-    "audit.view": frozenset({"管理者"}),              # 監査ログを見る（見たことも記録する）
-    # 段階4（K-042）設定の画面（S-52）
-    "settings.view": frozenset({"管理者"}),           # 設定と版を見る・本人確認の方針を試す
-    "settings.edit": frozenset({"管理者"}),           # 設定を保存する・版に戻す・既定に戻す
-    # 段階4（K-052）通信とモデル（S-53）
-    "network.view": frozenset({"管理者"}),            # 宛先・更新の確認・モデルの目録を見る
-    "network.edit": frozenset({"管理者"}),            # 宛先の ON/OFF・追加、更新の確認、照合、入れ替え
-}
 # 受付端末は人の役割ではない。端末トークンで受付の API（/api/kiosk/...）だけを使える（yanua/api/kiosk.py）
 KIOSK = "受付端末"
 
@@ -88,11 +58,3 @@ def load_roles(path: Path) -> RoleConfig:
                 raise RoleConfigError(f"{path}: {role} の {key} は文字列のリストにしてください")
             target[role] = {v.strip() for v in values if v.strip()}
     return cfg
-
-
-def allowed(roles: list[str], action: str) -> bool:
-    return bool(PERMISSIONS.get(action, frozenset()) & set(roles))
-
-
-def permissions_of(roles: list[str]) -> list[str]:
-    return sorted(a for a in PERMISSIONS if allowed(roles, a))

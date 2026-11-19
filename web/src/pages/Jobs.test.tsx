@@ -13,7 +13,7 @@ const ADMIN = {
   ...ME_EMPLOYEE,
   employee_no: "10005",
   roles: ["社員", "情シス", "管理者"],
-  permissions: [...ME_EMPLOYEE.permissions, "documents.ingest", "jobs.all"],
+  permissions: [...ME_EMPLOYEE.permissions, "documents.manage", "jobs.all"],
 };
 
 const job = (over: object) => ({
