@@ -199,6 +199,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="監査ログに質問の文も残す（既定は残さない。パスワード・トークン・コードはどの設定でも残さない）")
     llm_options(s)
 
+    s = sub.add_parser("access", help="権限の復旧用（サーバーに入れる人だけ。画面からは使えない）。README「戻せなくなったとき」")
+    s.add_argument("--audit-db", type=Path, default=None, help="監査ログの保存先（既定: --db と同じフォルダの audit.db）")
+    acc = s.add_subparsers(dest="access_command", required=True)
+    acc.add_parser("show", help="グループ・役割・メンバーを表で出す")
+    a = acc.add_parser("add-member", help="グループに人を入れる（手で入れるグループだけ）")
+    a.add_argument("group", help="グループの番号か名前（例 G-admin・管理者）")
+    a.add_argument("employee_no", help="社員番号（在籍している人）")
+    a.add_argument("--expires", default=None, help="期限（YYYY-MM-DD。その日の終わりまで）。付けなければ期限なし")
+    a = acc.add_parser("add-grant", help="グループに 役割 × 対象 を与える")
+    a.add_argument("group", help="グループの番号か名前")
+    a.add_argument("role", help="役割の番号か名前（例 管理者）")
+    a.add_argument("target", help="対象の番号か名前（例 special:all・全社・dept:総務部）")
+
     s = sub.add_parser("serve-legacy", help="前の HTTP API（POST /ask と GET /health だけ）。評価用に残している")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
@@ -211,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         return _paper(args)
     if args.command == "models":
         return _models(args)
+    if args.command == "access":
+        return _access(args)
 
     if args.command == "serve":
         args.given = list(argv if argv is not None else sys.argv[1:])   # 起動の指定で付けたもの（画面より勝つ）
@@ -607,6 +622,71 @@ def _meeting(args, store: Store) -> int:
     return 0
 
 
+def _access(args) -> int:
+    """権限の復旧用のコマンド。管理者が自分の権限を外して戻せなくなったときなどに、サーバーに入れる人が使う。
+    「自分」がいないので、自分の権限が増える決まりは当てない。実行したことは必ず監査ログに残す（記録できなければ変えない）。"""
+    import getpass
+    import sqlite3 as _sqlite3
+
+    from . import access, audit
+
+    db = _sqlite3.connect(str(args.db), timeout=10)
+    try:
+        access.ensure_schema(db)
+        data = access.load(db)
+        if not data["groups"]:
+            print(f"{args.db} に権限の設定がありません。先に serve で一度起動してください（roles.json から作ります）")
+            return 1
+        if args.access_command == "show":
+            print(access.show_text(db))
+            return 0
+        try:
+            os_user = getpass.getuser()
+        except (OSError, KeyError):
+            os_user = "（わからない）"
+        try:
+            auditor = audit.Auditor(args.audit_db or Path(args.db).parent / "audit.db")
+        except (OSError, _sqlite3.Error) as e:
+            print(f"監査ログを開けないので、変えませんでした：{e}")
+            return 1
+        by = f"{audit.SERVER_OP}（OS ユーザー {os_user}）"
+        try:
+            if args.access_command == "add-member":
+                gid = access.resolve(data["groups"], args.group)
+                change = access.member_add(db, data, by, gid, args.employee_no, args.expires)
+            else:
+                gid = access.resolve(data["groups"], args.group)
+                rid = access.resolve(data["roles"], args.role)
+                try:
+                    tid, sid = access.resolve(data["targets"], args.target), None
+                except KeyError:
+                    tid, sid = None, access.resolve(data["sets"], args.target)
+                change = access.grant_add(db, data, by, gid, rid, tid, sid)
+        except KeyError as e:
+            print(f"見つかりません（番号か名前を確かめてください。python -m yanua access show で一覧が出ます）：{e.args[0]}")
+            return 1
+        except access.AccessError as e:
+            auditor.record(_change_action(args), actor=audit.SERVER_OP, actor_name=f"OS ユーザー {os_user}", kind=audit.SERVER_OP,
+                           ip="", target=args.group, result=audit.FAILED, detail=f"復旧用のコマンド：変えませんでした：{e}")
+            print(f"変えませんでした：{e}")
+            return 1
+        try:
+            auditor.record(change.action, actor=audit.SERVER_OP, actor_name=f"OS ユーザー {os_user}", kind=audit.SERVER_OP,
+                           ip="", target=change.target, detail=f"復旧用のコマンド（OS ユーザー {os_user}）：{change.detail}", strict=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"監査ログに記録できないので、変えませんでした：{e}")
+            return 1
+        access.apply(db, None, None, "", data, change)       # 動いているサーバーにも、次の判定から効く（世代の番号）
+        print(change.detail)
+        return 0
+    finally:
+        db.close()
+
+
+def _change_action(args) -> str:
+    return "roles.member.add" if args.access_command == "add-member" else "roles.grant.add"
+
+
 def _serve(args) -> int:
     from .api import Settings, create_app
     from .api.roles import RoleConfigError, load_roles
@@ -649,6 +729,7 @@ def _serve(args) -> int:
     try:
         if access.migrate_if_empty(db, role_config):
             print("権限の仕組みを、roles.json から作りました（役割・グループ・対象。docs/access-model.md）")
+        access.sync_targets(db)
         found = access.problems(access.load(db))
     finally:
         db.close()

@@ -70,7 +70,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, Response as RawResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .. import audit, hr, models, visits
 from ..answer import ANSWERED, NO_PERMISSION, NOT_FOUND, Answer, answer_question
@@ -213,8 +213,49 @@ class GrantAdd(BaseModel):
     set_id: str | None = Field(default=None, max_length=128)
 
 
-class RolePermissions(BaseModel):
+class RoleUpdate(BaseModel):
     permissions: list[str] = Field(max_length=200)
+    description: str | None = Field(default=None, max_length=200)
+
+
+class RoleCreate(BaseModel):
+    name: str = Field(max_length=100)
+    description: str = Field(default="", max_length=200)
+    permissions: list[str] = Field(default_factory=list, max_length=200)
+
+
+class GroupCreate(BaseModel):
+    name: str = Field(max_length=100)
+    description: str = Field(default="", max_length=200)
+    rule: dict | None = None                                        # None：手で入れる。{"all": true}・{"departments": [...]}：決まり
+
+
+class GroupUpdate(BaseModel):
+    description: str = Field(default="", max_length=200)
+
+
+class TargetCreate(BaseModel):
+    kind: str = Field(max_length=20)                                # system / server（部署・グループ・機能は自動）
+    name: str = Field(max_length=100)
+    description: str = Field(default="", max_length=200)
+    host: str = Field(default="", max_length=255)                   # つながる宛先（S-53 の宛先から）
+    secret_ref: str = Field(default="", max_length=64)              # 接続情報の参照名（環境変数の名前だけ。値は持たない）
+
+
+class TargetUpdate(BaseModel):
+    description: str = Field(default="", max_length=200)
+    host: str = Field(default="", max_length=255)
+    secret_ref: str = Field(default="", max_length=64)
+
+
+class SetBody(BaseModel):
+    name: str = Field(default="", max_length=100)
+    members: list[str] = Field(max_length=500)
+
+
+class AccessPreview(BaseModel):
+    op: str = Field(max_length=40)                                  # member.add など（監査ログの roles.<op>）
+    args: dict = Field(default_factory=dict)
 
 
 class SettingValues(BaseModel):
@@ -307,6 +348,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     # 権限の設定に誤りがあれば起動しない（権限と本人確認は止める、の決まり）
     with closing(connect()) as db:
         access_migrated = access.migrate_if_empty(db, roles)
+        access.sync_targets(db)          # 部署・グループ・機能の対象をそろえる
         found = access.problems(access.load(db))
     if found:
         raise access.AccessError("権限の設定に誤りがあるので起動しません：" + "／".join(f"{w}: {m}" for w, m in found), found)
@@ -2004,99 +2046,263 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             raise ApiError(409, "no_new_version", "入れ替える新しい版がありません。先に「更新の確認」をしてください")
         return jobs.submit("model-replace", user.employee_no, {"owner": user.employee_no, "name": name, "revision": row["latest"]})
 
-    # ------------------------------------------------ 役割と権限（S-54。画面は次の PR。今は API だけ）
+    # ------------------------------------------------ 役割と権限（S-54。画面は /admin/access）
 
-    def access_change(user: User, action: str, target: str, run):
-        """権限の変更：roles.assign がそのグループに効くか確かめ、変えて、中身つきで監査ログに残す。"""
+    def need(args: dict, key: str) -> str:
+        v = args.get(key)
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+        if not isinstance(v, str) or not v.strip() or len(v) > 128:
+            raise ApiError(400, "invalid_request", f"{key} を指定してください")
+        return v.strip()
+
+    def body(model, args: dict):
         try:
-            with closing(connect()) as db:
-                detail = run(db)
+            return model.model_validate(args)
+        except ValidationError as e:
+            raise ApiError(400, "invalid_request", "リクエストの形が正しくありません") from e
+
+    def hosts_now() -> list[str]:
+        return [h["host"] for h in net_view()["hosts"]]
+
+    def b_member_add(db, data, by, a):
+        m = body(MemberAdd, a)
+        return access.member_add(db, data, by, need(a, "group_id"), m.account_id.strip(), (m.expires_at or "").strip() or None)
+
+    def b_grant_add(db, data, by, a):
+        g = body(GrantAdd, a)
+        return access.grant_add(db, data, by, need(a, "group_id"), g.role_id, g.target_id, g.set_id)
+
+    def b_role_update(db, data, by, a):
+        r = body(RoleUpdate, a)
+        return access.role_update(db, data, by, need(a, "role_id"), r.permissions, r.description)
+
+    def b_role_create(db, data, by, a):
+        r = body(RoleCreate, a)
+        return access.role_create(db, data, by, r.name, r.description, r.permissions)
+
+    def b_group_create(db, data, by, a):
+        g = body(GroupCreate, a)
+        return access.group_create(db, data, by, g.name, g.description, g.rule)
+
+    def b_group_update(db, data, by, a):
+        return access.group_update(db, data, by, need(a, "group_id"), body(GroupUpdate, a).description)
+
+    def b_target_create(db, data, by, a):
+        t = body(TargetCreate, a)
+        return access.target_create(db, data, by, t.kind, t.name, t.description, t.host, t.secret_ref, hosts_now())
+
+    def b_target_update(db, data, by, a):
+        t = body(TargetUpdate, a)
+        return access.target_update(db, data, by, need(a, "target_id"), t.description, t.host, t.secret_ref, hosts_now())
+
+    def b_set_create(db, data, by, a):
+        s = body(SetBody, a)
+        return access.set_create(db, data, by, s.name, s.members)
+
+    def b_set_update(db, data, by, a):
+        return access.set_update(db, data, by, need(a, "set_id"), body(SetBody, a).members)
+
+    # 操作の名前（監査ログは roles.<名前>）→ 変更の作り方。画面の「試しに当てる」も、保存も、同じものを使う
+    BUILDERS = {
+        "member.add": b_member_add,
+        "member.remove": lambda db, data, by, a: access.member_remove(db, data, by, need(a, "group_id"), need(a, "account_id")),
+        "grant.add": b_grant_add,
+        "grant.remove": lambda db, data, by, a: access.grant_remove(db, data, by, int(need(a, "grant_id"))),
+        "role.create": b_role_create,
+        "role.update": b_role_update,
+        "role.delete": lambda db, data, by, a: access.role_delete(db, data, by, need(a, "role_id")),
+        "group.create": b_group_create,
+        "group.update": b_group_update,
+        "group.delete": lambda db, data, by, a: access.group_delete(db, data, by, need(a, "group_id")),
+        "target.create": b_target_create,
+        "target.update": b_target_update,
+        "target.delete": lambda db, data, by, a: access.target_delete(db, data, by, need(a, "target_id")),
+        "set.create": b_set_create,
+        "set.update": b_set_update,
+        "set.delete": lambda db, data, by, a: access.set_delete(db, data, by, need(a, "set_id")),
+    }
+
+    def denied_groups(user: User, change: access.Change, data: dict) -> list[str]:
+        """roles.assign がそのグループに効いていないもの（グループ名）。"""
+        return [data["groups"].get(g, {}).get("name", g) for g in sorted(change.groups)
+                if not engine.can(user.employee_no, user.dept, "roles.assign", ("group", g)).allowed]
+
+    def audit_target(args: dict) -> str:
+        for key in ("group_id", "role_id", "target_id", "set_id", "grant_id", "name"):
+            if args.get(key) not in (None, ""):
+                return str(args[key])[:100]
+        return ""
+
+    def access_change(user: User, op: str, args: dict):
+        """権限の変更：変更を作り、roles.assign がそのグループに効くか確かめ、決まりに当てて保存し、中身つきで監査ログに残す。
+        画面専用の抜け道は作らない（画面もこの API を使う）。"""
+        action = f"roles.{op}"
+        try:
+            with access.CHANGE_LOCK, closing(connect()) as db:
+                data = access.load(db)
+                change = BUILDERS[op](db, data, user.employee_no, args)
+                missing = denied_groups(user, change, data)
+                if missing:
+                    raise deny(user, f"roles.assign（グループ {'・'.join(missing)}）")
+                detail = access.apply(db, engine, user.employee_no, user.dept, data, change)
         except KeyError as e:
             raise not_found("権限の設定") from e
         except access.AccessError as e:
-            auditor.record(action, actor=user.employee_no, actor_name=user.name, target=target, result=audit.DENIED,
+            auditor.record(action, actor=user.employee_no, actor_name=user.name, target=audit_target(args), result=audit.DENIED,
                            detail=f"変えませんでした：{e}")
             raise ApiError(e.status, "invalid_access", str(e),
                            [{"where": w, "message": m} for w, m in e.problems]) from e
-        audit_by(user, action, target=target, detail=detail)
+        audit_by(user, change.action, target=change.target, detail=detail)
         return {"ok": True, "detail": detail, **access_view()}
-
-    def need_group(user: User, group_id: str) -> None:
-        if not engine.can(user.employee_no, user.dept, "roles.assign", ("group", group_id)).allowed:
-            raise deny(user, f"roles.assign（グループ {group_id}）")
 
     def access_view() -> dict:
         from ..permissions import PERMISSIONS, TARGET_KINDS
 
         with closing(connect()) as db:
+            access.sync_targets(db)          # 部署（人事データ）・グループ・機能の対象を、自動でそろえる
             data = access.load(db)
             names = {m["account_id"]: (hr.lookup(db, m["account_id"]) or {}).get("name") for m in data["members"]}
+            counts = {gid: access._rule_count(db, g["rule"]) for gid, g in data["groups"].items()}
+            stale = access.stale_targets(db, data)
+            depts = access._hr_departments(db)
         today = datetime.now().astimezone().date().isoformat()
+        used = access._used_targets(data)
         groups = []
         for gid, g in data["groups"].items():
             members = [{**m, "name": names.get(m["account_id"]) or data["accounts"].get(m["account_id"], {}).get("name") or m["account_id"],
+                        "in_hr": bool(names.get(m["account_id"])) or m["account_id"].startswith("sys:"),
                         "expired": bool(m["expires_at"]) and m["expires_at"][:10] < today}
                        for m in data["members"] if m["group_id"] == gid]
             grants = [{**gr, "role": data["roles"][gr["role_id"]]["name"],
-                       "target": (data["targets"][gr["target_id"]]["name"] if gr["target_id"] else data["sets"][gr["set_id"]]["name"])}
+                       "target": (data["targets"][gr["target_id"]]["name"] if gr["target_id"] else data["sets"][gr["set_id"]]["name"]),
+                       "target_kind": data["targets"][gr["target_id"]]["kind"] if gr["target_id"] else "set"}
                       for gr in data["grants"] if gr["group_id"] == gid]
-            groups.append({**g, "members": members, "grants": grants})
+            groups.append({**g, "how": "rule" if g["rule"] else "manual", "rule_text": access._rule_text(g["rule"]),
+                           "rule_count": counts[gid], "member_count": counts[gid] + len(members),
+                           "members": members, "grants": grants})
+        roles = [{**r, "used_by": sorted({data["groups"][x["group_id"]]["name"] for x in data["grants"] if x["role_id"] == rid})}
+                 for rid, r in data["roles"].items()]
+        targets = [{**t, "kind_name": access.SPECIAL_NAMES.get(t["target_id"]) and "特別" or TARGET_KINDS.get(t["kind"], t["kind"]),
+                    "auto": t["kind"] in access.AUTO_KINDS or t["kind"] == "special", "used": tid in used, "stale": tid in stale}
+                   for tid, t in data["targets"].items()]
+        sets = [{**s, "used_by": sorted({data["groups"][x["group_id"]]["name"] for x in data["grants"] if x["set_id"] == sid})}
+                for sid, s in data["sets"].items()]
         return {"permissions": [{"name": p.name, "feature": p.feature, "does": p.does,
                                  "targets": [TARGET_KINDS[t] for t in p.targets]} for p in PERMISSIONS.values()],
-                "roles": list(data["roles"].values()), "groups": groups, "targets": list(data["targets"].values()),
-                "target_sets": list(data["sets"].values()), "accounts": list(data["accounts"].values())}
+                "roles": roles, "groups": groups, "targets": targets, "target_sets": sets,
+                "accounts": list(data["accounts"].values()), "departments": depts, "hosts": hosts_now()}
 
     @app.get("/api/admin/access")
     def access_get(user: User = Depends(require("roles.view"))):
         return access_view()
 
-    @app.get("/api/admin/access/explain")
-    def access_explain(account: str, user: User = Depends(require("roles.view"))):
-        # 「この人は何ができるか」：権限と、それがどこから来たか（期限の切れたものは数えない）
+    @app.get("/api/admin/access/people")
+    def access_people(q: str = "", user: User = Depends(require("roles.view"))):
+        # 社員番号か名前の一部で探す（メンバーを足すとき・「この人は何ができるか」）。システムアカウントも出す
         with closing(connect()) as db:
-            person = hr.lookup(db, account)
-        if not person and not account.startswith("sys:"):
-            raise not_found("アカウント")
-        dept = (person or {}).get("dept", "")
-        return {"account": account, "name": (person or {}).get("name", account), "dept": dept,
-                "groups": engine.groups_of(account, dept), "permissions": access.explain(engine, account, dept)}
+            return {"people": access.find_people(db, access.load(db), q)}
+
+    @app.get("/api/admin/access/explain")
+    def access_explain(q: str = "", user: User = Depends(require("roles.view"))):
+        """「この人は何ができるか」。q は画面の欄と同じ：社員番号・名前の一部・システムアカウント（sys:…）。
+        1人に決まれば result に権限と出どころ（どのグループのどの役割から・対象・期限）。決まらなければ候補だけ。"""
+        with closing(connect()) as db:
+            data = access.load(db)
+            q = q.strip()[:50]
+            exact = access.account_of(db, data, q) if q else None
+            candidates = [exact] if exact else access.find_people(db, data, q)
+        result = None
+        if len(candidates) == 1:
+            who = candidates[0]
+            result = {**who, "groups": engine.groups_of(who["account_id"], who["dept"]),
+                      "permissions": access.explain(engine, who["account_id"], who["dept"])}
+        return {"q": q, "candidates": candidates, "result": result}
+
+    @app.post("/api/admin/access/preview")
+    def access_preview(req: AccessPreview, user: User = Depends(require("roles.assign"))):
+        """変更を試しに当てて、だれのどの権限が増える・減るかを返す（保存しない。監査ログにも残さない）。
+        args は保存のときの API と同じ中身（パスの番号も入れる。例 {"group_id": "G-audit", "account_id": "10004"}）。"""
+        if req.op not in BUILDERS:
+            raise ApiError(400, "invalid_request", f"知らない操作です: {req.op}")
+        empty = {"self": {"gained": [], "lost": []}, "self_loss": False, "people": [], "checked": 0, "too_many": False, "groups": []}
+        with access.CHANGE_LOCK, closing(connect()) as db:
+            data = access.load(db)
+            try:
+                change = BUILDERS[req.op](db, data, user.employee_no, req.args)
+            except KeyError as e:
+                raise not_found("権限の設定") from e
+            except access.AccessError as e:
+                return {**empty, "detail": None, "refused": str(e), "problems": [{"where": w, "message": m} for w, m in e.problems]}
+            missing = denied_groups(user, change, data)
+            if missing:
+                return {**empty, "detail": change.detail, "problems": [],
+                        "refused": f"グループ「{'・'.join(missing)}」を変える権限（roles.assign）がありません"}
+            return {**access.preview(db, engine, user.employee_no, user.dept, data, change), "problems": []}
+
+    @app.post("/api/admin/access/groups", status_code=201)
+    def access_group_create(req: GroupCreate, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "group.create", req.model_dump())
+
+    @app.patch("/api/admin/access/groups/{group_id}")
+    def access_group_update(group_id: str, req: GroupUpdate, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "group.update", {**req.model_dump(), "group_id": group_id})
+
+    @app.delete("/api/admin/access/groups/{group_id}")
+    def access_group_delete(group_id: str, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "group.delete", {"group_id": group_id})
 
     @app.post("/api/admin/access/groups/{group_id}/members", status_code=201)
     def access_member_add(group_id: str, req: MemberAdd, user: User = Depends(require("roles.assign"))):
-        need_group(user, group_id)
-        return access_change(user, "roles.member.add", group_id, lambda db: access.add_member(
-            db, engine, user.employee_no, user.dept, group_id, req.account_id.strip(), (req.expires_at or "").strip() or None))
+        return access_change(user, "member.add", {**req.model_dump(), "group_id": group_id})
 
     @app.delete("/api/admin/access/groups/{group_id}/members/{account_id}")
     def access_member_remove(group_id: str, account_id: str, user: User = Depends(require("roles.assign"))):
-        need_group(user, group_id)
-        return access_change(user, "roles.member.remove", group_id, lambda db: access.remove_member(
-            db, engine, user.employee_no, user.dept, group_id, account_id))
+        return access_change(user, "member.remove", {"group_id": group_id, "account_id": account_id})
 
     @app.post("/api/admin/access/groups/{group_id}/grants", status_code=201)
     def access_grant_add(group_id: str, req: GrantAdd, user: User = Depends(require("roles.assign"))):
-        need_group(user, group_id)
-        return access_change(user, "roles.grant.add", group_id, lambda db: access.add_grant(
-            db, engine, user.employee_no, user.dept, group_id, req.role_id, req.target_id, req.set_id))
+        return access_change(user, "grant.add", {**req.model_dump(), "group_id": group_id})
 
     @app.delete("/api/admin/access/grants/{grant_id}")
     def access_grant_remove(grant_id: int, user: User = Depends(require("roles.assign"))):
-        with closing(connect()) as db:
-            gr = next((g for g in access.load(db)["grants"] if g["grant_id"] == grant_id), None)
-        if not gr:
-            raise not_found("役割の割り当て")
-        need_group(user, gr["group_id"])
-        return access_change(user, "roles.grant.remove", gr["group_id"], lambda db: access.remove_grant(
-            db, engine, user.employee_no, user.dept, grant_id))
+        return access_change(user, "grant.remove", {"grant_id": grant_id})
+
+    @app.post("/api/admin/access/roles", status_code=201)
+    def access_role_create(req: RoleCreate, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "role.create", req.model_dump())
 
     @app.put("/api/admin/access/roles/{role_id}")
-    def access_role_update(role_id: str, req: RolePermissions, user: User = Depends(require("roles.assign"))):
-        with closing(connect()) as db:
-            uses = {g["group_id"] for g in access.load(db)["grants"] if g["role_id"] == role_id}
-        for gid in uses:
-            need_group(user, gid)
-        return access_change(user, "roles.role.update", role_id, lambda db: access.set_role_permissions(
-            db, engine, user.employee_no, user.dept, role_id, req.permissions))
+    def access_role_update(role_id: str, req: RoleUpdate, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "role.update", {**req.model_dump(), "role_id": role_id})
+
+    @app.delete("/api/admin/access/roles/{role_id}")
+    def access_role_delete(role_id: str, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "role.delete", {"role_id": role_id})
+
+    @app.post("/api/admin/access/targets", status_code=201)
+    def access_target_create(req: TargetCreate, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "target.create", req.model_dump())
+
+    @app.patch("/api/admin/access/targets/{target_id}")
+    def access_target_update(target_id: str, req: TargetUpdate, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "target.update", {**req.model_dump(), "target_id": target_id})
+
+    @app.delete("/api/admin/access/targets/{target_id}")
+    def access_target_delete(target_id: str, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "target.delete", {"target_id": target_id})
+
+    @app.post("/api/admin/access/target-sets", status_code=201)
+    def access_set_create(req: SetBody, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "set.create", req.model_dump())
+
+    @app.put("/api/admin/access/target-sets/{set_id}")
+    def access_set_update(set_id: str, req: SetBody, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "set.update", {**req.model_dump(), "set_id": set_id})
+
+    @app.delete("/api/admin/access/target-sets/{set_id}")
+    def access_set_delete(set_id: str, user: User = Depends(require("roles.assign"))):
+        return access_change(user, "set.delete", {"set_id": set_id})
 
     # ------------------------------------------------ 監査ログ（S-55。管理者だけ）
 

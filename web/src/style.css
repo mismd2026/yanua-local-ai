@@ -182,3 +182,9 @@ main { padding: 1.2rem 1rem; max-width: 1200px; width: 100%; margin: 0 auto; fle
 .spaced-left { margin-left: 0.6rem; }
 .excerpt { max-height: 14rem; overflow: auto; background: var(--info); padding: 0.6rem; border-radius: 6px; }
 .notice-box { border: 1px solid var(--warn); border-radius: 8px; padding: 0.6rem 0.9rem; margin: 0; }
+
+/* S-54 権限 */
+.card fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0.5rem 0; padding: 0.4rem 0.8rem; }
+.card fieldset legend { font-weight: 600; font-size: 0.9rem; padding: 0 0.3em; }
+.card select { font: inherit; padding: 0.3em 0.4em; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: inherit; max-width: 100%; }
+.card [aria-invalid="true"] { border-color: var(--error); }

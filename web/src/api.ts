@@ -493,3 +493,41 @@ export interface ModelRow {
   state: "match" | "differs" | "not_installed" | "not_registered" | "unverified" | "unknown"; message: string;
   latest: string; check: string; check_message: string; verified_at?: string;
 }
+
+// S-54 権限（役割 × 対象 × グループ。docs/access-model.md）
+export interface AccessPermission { name: string; feature: string; does: string; targets: string[] }
+export interface AccessRole { role_id: string; name: string; description: string; permissions: string[]; used_by: string[] }
+export interface AccessMember {
+  group_id: string; account_id: string; expires_at: string | null; added_by: string; added_at: string;
+  name: string; in_hr: boolean; expired: boolean;
+}
+export interface AccessGrant {
+  grant_id: number; group_id: string; role_id: string; target_id: string | null; set_id: string | null;
+  role: string; target: string; target_kind: string;
+}
+export interface AccessGroup {
+  group_id: string; name: string; description: string; rule: { all?: boolean; departments?: string[] } | null;
+  how: "rule" | "manual"; rule_text: string; rule_count: number; member_count: number;
+  members: AccessMember[]; grants: AccessGrant[];
+}
+export interface AccessTarget {
+  target_id: string; kind: string; name: string; ref: string; description: string; host: string; secret_ref: string;
+  kind_name: string; auto: boolean; used: boolean; stale: boolean;
+}
+export interface AccessSet { set_id: string; name: string; members: string[]; used_by: string[] }
+export interface AccessView {
+  permissions: AccessPermission[]; roles: AccessRole[]; groups: AccessGroup[]; targets: AccessTarget[];
+  target_sets: AccessSet[]; accounts: { account_id: string; kind: string; name: string }[]; departments: string[]; hosts: string[];
+}
+export interface AccessPerson { account_id: string; name: string; dept: string; kind: "person" | "system" }
+export interface AccessPreview {
+  detail: string | null; refused: string | null; problems: { where: string; message: string }[];
+  self: { gained: string[]; lost: string[] }; self_loss: boolean;
+  people: { account_id: string; name: string; dept: string; gained: string[]; lost: string[] }[];
+  checked: number; too_many: boolean; groups: { group_id: string; name: string; members: number; gained: string[]; lost: string[] }[];
+}
+export interface AccessSource { group: string; role: string; target: string; via: string; expires_at: string | null; reason: string }
+export interface AccessExplain {
+  q: string; candidates: AccessPerson[];
+  result: (AccessPerson & { groups: string[]; permissions: { permission: string; feature: string; does: string; from: AccessSource[] }[] }) | null;
+}
