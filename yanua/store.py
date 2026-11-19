@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import ALL_ACCESS, PUBLIC_ACCESS
+
+EVERY_DEPARTMENT = "*"       # chunks_for・can_view で「すべての部署」（権限の判定が全社のとき）
 from .documents import Document, DocumentError, find_files, load_document
 
 SCHEMA = """
@@ -147,19 +149,32 @@ class Store:
 
     # ------------------------------------------------------------ 取り出し
 
-    def chunks_for(self, department: str) -> list[StoredChunk]:
-        """その部署が見られる文書のチャンクだけを返す。部署が空なら全社向け（と社外公開）の文書だけ。"""
+    @staticmethod
+    def _scope(department) -> list[str] | None:
+        """見てよい公開先の一覧。department は部署の名前・部署の集まり・EVERY_DEPARTMENT（すべて）。すべてなら None。"""
+        if department == EVERY_DEPARTMENT:
+            return None
+        depts = [department] if isinstance(department, str) or department is None else list(department)
+        return sorted({ALL_ACCESS, PUBLIC_ACCESS, *(d for d in depts if d)})
+
+    def chunks_for(self, department) -> list[StoredChunk]:
+        """見てよい部署（権限の判定 yanua/access.py の結果）の文書のチャンクだけを返す。
+        部署が空なら全社向け（と社外公開）の文書だけ。EVERY_DEPARTMENT ならすべて。"""
+        scope = self._scope(department)
+        if scope is None:
+            return self.all_chunks()
+        marks = ", ".join("?" for _ in scope)
         rows = self.db.execute(
-            """
+            f"""
             SELECT c.chunk_id, c.doc_id, d.title, c.section, c.text
             FROM chunks c
             JOIN documents d ON d.doc_id = c.doc_id
             WHERE c.doc_id IN (
-                SELECT doc_id FROM doc_access WHERE department IN (?, ?, ?)
+                SELECT doc_id FROM doc_access WHERE department IN ({marks})
             )
             ORDER BY c.doc_id, c.position
             """,
-            (ALL_ACCESS, PUBLIC_ACCESS, department or ALL_ACCESS),
+            scope,
         )
         return [StoredChunk(*row) for row in rows]
 
@@ -188,11 +203,12 @@ class Store:
         )
         return [StoredChunk(*row) for row in rows]
 
-    def can_view(self, doc_id: str, department: str) -> bool:
-        row = self.db.execute(
-            "SELECT 1 FROM doc_access WHERE doc_id = ? AND department IN (?, ?, ?)",
-            (doc_id, ALL_ACCESS, PUBLIC_ACCESS, department or ALL_ACCESS),
-        ).fetchone()
+    def can_view(self, doc_id: str, department) -> bool:
+        scope = self._scope(department)
+        if scope is None:
+            return self.db.execute("SELECT 1 FROM documents WHERE doc_id = ?", (doc_id,)).fetchone() is not None
+        marks = ", ".join("?" for _ in scope)
+        row = self.db.execute(f"SELECT 1 FROM doc_access WHERE doc_id = ? AND department IN ({marks})", (doc_id, *scope)).fetchone()
         return row is not None
 
     def document_sections(self, doc_id: str) -> dict | None:

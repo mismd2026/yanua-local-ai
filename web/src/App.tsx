@@ -99,7 +99,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case "/reception":
       return can("reception.records") ? <Reception /> : <NoPermission />;
     case "/tickets":
-      return can("tickets") ? <Tickets /> : <NoPermission />;
+      return can("helpdesk.handle") ? <Tickets /> : <NoPermission />;
     case "/meetings":
       return can("meetings") ? <Meetings /> : <NoPermission />;
     case "/paper/sort":

@@ -14,7 +14,7 @@ afterEach(() => vi.unstubAllGlobals());
 const GA = { ...ME_EMPLOYEE, employee_no: "10002", dept: "総務部", roles: ["社員", "総務"],
   permissions: [...ME_EMPLOYEE.permissions, "visits.all", "reception.records"] };
 const IT = { ...ME_EMPLOYEE, employee_no: "10005", dept: "情報システム部", roles: ["社員", "情シス", "管理者"],
-  permissions: [...ME_EMPLOYEE.permissions, "tickets", "kiosk.devices", "jobs.all", "documents.ingest"] };
+  permissions: [...ME_EMPLOYEE.permissions, "helpdesk.handle", "kiosk.devices", "jobs.all", "documents.manage"] };
 
 const visit = (over: object = {}) => ({
   visit_id: 1, date: "2099-01-10", time: "15:00", room: "5階 第2会議室", host_employee_no: "10004", host_name: "高橋 美咲",

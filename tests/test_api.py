@@ -87,7 +87,8 @@ def test_login_me_logout(client):
 
 def test_roles_from_config(client):
     login(client, "10005")
-    assert client.get("/api/me").json()["roles"] == ["社員", "情シス", "管理者"]
+    # roles は入っているグループの名前（S-54 の移し替えで、前の役割「情シス」は「情シス・ヘルプデスク」）
+    assert client.get("/api/me").json()["roles"] == ["社員", "情シス・ヘルプデスク", "管理者"]
     login(client, "10002")
     assert client.get("/api/me").json()["roles"] == ["社員", "総務"]
 

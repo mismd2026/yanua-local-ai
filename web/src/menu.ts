@@ -64,7 +64,7 @@ export const MENU: MenuItem[] = [
     path: "/tickets",
     label: "問い合わせ票",
     description: "ヘルプデスクから引き継がれた問い合わせ票を、優先度・状態で絞り込んで対応できます。",
-    needs: ["tickets"],
+    needs: ["helpdesk.handle"],
   },
   {
     id: "S-20",

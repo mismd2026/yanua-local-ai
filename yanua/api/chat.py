@@ -154,7 +154,9 @@ class HelpdeskSessions:
     FLOW = "helpdesk"
 
     def __init__(self, chats: ChatDB, db_path: Path, helpdesk_data: Path, llm: ChatModel, top_k: int, policy=None,
-                 on_answer=None):
+                 on_answer=None, scope_of=None):
+        """scope_of(User)：その人が見てよい文書の部署（権限の判定の結果。"*" ならすべて）。ログインした人の相談で使う。"""
+        self.scope_of = scope_of
         """on_answer(User, 質問, Answer か None, 手順)：案内したたびに呼ぶ（監査ログに残すため）。"""
         self.on_answer = on_answer
         self.chats = chats
@@ -202,6 +204,9 @@ class HelpdeskSessions:
             start = {"account": "", "requester": {
                 "employee_no": user.employee_no, "name": user.name, "dept": user.dept,
                 "dept_code": p.get("dept_code", ""), "account": "", "account_type": "ログイン", "verified": "ログイン"}}
+            if self.scope_of is not None:
+                scope = self.scope_of(user)
+                start["requester"]["doc_scope"] = scope if scope == "*" else sorted(scope)
         else:
             start = {"account": account}   # 開発用：代表アカウントなどからの問い合わせを試す
         return self._run(user, session_id, start, busy_check=False)

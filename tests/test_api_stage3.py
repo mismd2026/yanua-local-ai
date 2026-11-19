@@ -255,11 +255,11 @@ def test_download_needs_the_role_now(client, settings):
                                         headers=H).json()["job_id"])
     fid = done["result"]["files"][0]["file_id"]
     assert client.get(f"/api/files/{fid}").status_code == 200
-    # 総務から外れたら、自分が作ったファイルでも開けない
-    settings.roles_path.write_text(json.dumps({"roles": {"総務": {"departments": ["総務部"]}}}), encoding="utf-8")
-    with TestClient(create_app(settings, FakeLLM())) as c:
-        login(c, "10003")
-        assert c.get(f"/api/files/{fid}").status_code == 404
+    # 総務から外れたら（管理者が「総務（個別）」のグループから外す）、自分が作ったファイルでも開けない
+    login(client, "10005")
+    assert client.delete("/api/admin/access/groups/G-general-manual/members/10003", headers=H).status_code == 200
+    login(client, "10003")
+    assert client.get(f"/api/files/{fid}").status_code == 404
 
 
 def test_expired_files_are_removed(client, settings):

@@ -635,10 +635,27 @@ def _serve(args) -> int:
             print(f"  - {where}：{why}" if where else f"  - {why}")
     try:
         settings.check()
-        load_roles(settings.roles_path)
+        role_config = load_roles(settings.roles_path)
         load_policy(adminsettings.identity_path(settings))     # 画面で保存した写しがあれば写し。誤りがあれば起動しない
     except (ValueError, RoleConfigError) as e:
         print(e)
+        return 1
+    # 権限（役割 × 対象 × グループ）。DB が空なら roles.json から作る。誤りがあれば起動しない
+    import sqlite3 as _sqlite3
+
+    from . import access
+
+    db = _sqlite3.connect(str(settings.db_path))
+    try:
+        if access.migrate_if_empty(db, role_config):
+            print("権限の仕組みを、roles.json から作りました（役割・グループ・対象。docs/access-model.md）")
+        found = access.problems(access.load(db))
+    finally:
+        db.close()
+    if found:
+        print("権限の設定に誤りがあるので起動しません。直すところ：")
+        for where, why in found:
+            print(f"  - {where}：{why}" if where else f"  - {why}")
         return 1
     from .api import paperjobs
 

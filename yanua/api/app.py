@@ -87,7 +87,9 @@ from .jobs import FINISHED, JobContext, JobFailed, JobQueue
 from ..netpolicy import NetworkBlocked
 from .. import identity
 from ..identity import load_policy
-from .roles import allowed, load_roles, permissions_of
+from .. import access
+from ..store import EVERY_DEPARTMENT
+from .roles import load_roles
 from .settings import Settings
 
 CSRF_HEADER = "X-Yanua-Client"
@@ -200,6 +202,21 @@ class PaperRuleDraft(BaseModel):
     use_llm: bool = False                                           # 見分ける言葉を、社内の LLM にも挙げさせる
 
 
+class MemberAdd(BaseModel):
+    account_id: str = Field(min_length=1, max_length=64)            # 社員番号か sys:<名前>
+    expires_at: str | None = Field(default=None, max_length=10)     # YYYY-MM-DD（その日の終わりまで）。空なら期限なし
+
+
+class GrantAdd(BaseModel):
+    role_id: str = Field(min_length=1, max_length=64)
+    target_id: str | None = Field(default=None, max_length=128)
+    set_id: str | None = Field(default=None, max_length=128)
+
+
+class RolePermissions(BaseModel):
+    permissions: list[str] = Field(max_length=200)
+
+
 class SettingValues(BaseModel):
     values: dict                                                    # 設定の画面（S-52）の値
 
@@ -286,12 +303,34 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def connect() -> sqlite3.Connection:
         return sqlite3.connect(str(settings.db_path), timeout=10)
 
+    # 権限（役割 × 対象 × グループ。docs/access-model.md）。DB が空なら roles.json から作る（移し替え）。
+    # 権限の設定に誤りがあれば起動しない（権限と本人確認は止める、の決まり）
+    with closing(connect()) as db:
+        access_migrated = access.migrate_if_empty(db, roles)
+        found = access.problems(access.load(db))
+    if found:
+        raise access.AccessError("権限の設定に誤りがあるので起動しません：" + "／".join(f"{w}: {m}" for w, m in found), found)
+    engine = access.Engine(connect)
+
+    def can(user: User, permission: str, target: tuple[str, str] | None = None) -> bool:
+        """判定の1か所（yanua/access.py の Engine.can）。target が None なら、その機能を使えるか。"""
+        return engine.can(user.employee_no, user.dept, permission, target).allowed
+
+    def doc_scope(user: User, permission: str = "documents.view"):
+        """文書を見てよい部署（検索の絞り込み・LLM に渡す前・出典を開く）。全社なら EVERY_DEPARTMENT。"""
+        depts = engine.departments(user.employee_no, user.dept, permission)
+        return EVERY_DEPARTMENT if depts == access.ALL else depts
+
     def name_of(employee_no: str) -> str | None:
         with closing(connect()) as db:
             return (hr.lookup(db, employee_no) or {}).get("name")
 
     # 監査ログ（K-009）。記録に失敗しても、元の操作は止めない（Auditor.record が例外を出さない）
     auditor = audit.Auditor(settings.audit_path, settings.audit_keep_days, settings.audit_keep_body, names=name_of)
+
+    if access_migrated:
+        auditor.record("roles.migrate", actor=audit.SYSTEM, actor_name=audit.SYSTEM, kind=audit.SYSTEM, ip="",
+                       detail="初めての起動：roles.json から役割・グループ・対象を作った（docs/access-model.md）")
 
     def audit_by(user: User, action: str, **kw) -> None:
         auditor.record(action, actor=user.employee_no, actor_name=user.name, **kw)
@@ -539,7 +578,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         jobs.start()
         chats = ChatDB(settings.chat_db_path, settings.chat_idle_minutes)
         app.state.helpdesk = HelpdeskSessions(chats, settings.db_path, settings.helpdesk_data, llm, settings.top_k, policy_state["policy"],
-                                              on_answer=lambda u, q, a, proc: audit_question(u, "helpdesk", q, a, procedure=proc))
+                                              on_answer=lambda u, q, a, proc: audit_question(u, "helpdesk", q, a, procedure=proc),
+                                              scope_of=doc_scope)
         app.state.reception = ReceptionSessions(chats, settings.db_path, settings.reception_data, llm, settings.top_k,
                                                 settings.today)
 
@@ -628,7 +668,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     def current_user(request: Request) -> User:
         with closing(connect()) as db:
-            user = auth.user_for_token(db, request.cookies.get(auth.COOKIE, ""), roles, settings.session_idle_minutes)
+            user = auth.user_for_token(db, request.cookies.get(auth.COOKIE, ""), engine, settings.session_idle_minutes)
         if not user:
             raise not_logged_in()
         return user
@@ -637,12 +677,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         """権限が足りずに断る（403）。断った操作の名前を監査ログに残す。"""
         target = f"{request.method} {request.url.path}" if request is not None else ""
         audit_by(user, "access.denied", target=target, result=audit.DENIED,
-                 detail=f"操作「{action}」の権限がありません（役割：{'・'.join(user.roles)}）")
+                 detail=f"操作「{action}」の権限がありません（グループ：{'・'.join(user.roles)}）")
         return forbidden()
 
     def require(action: str):
         def check(request: Request, user: User = Depends(current_user)) -> User:
-            if not allowed(user.roles, action):
+            if not can(user, action):
                 raise deny(user, action, request)
             return user
         return check
@@ -704,7 +744,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         token = request.cookies.get(auth.COOKIE, "")
         if token:
             with closing(connect()) as db:
-                user = auth.user_for_token(db, token, roles, settings.session_idle_minutes)
+                user = auth.user_for_token(db, token, engine, settings.session_idle_minutes)
                 auth.delete_session(db, token)
             if user:
                 audit_by(user, "auth.logout", target=user.employee_no)
@@ -713,7 +753,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.get("/api/me")
     def me(user: User = Depends(current_user)):
-        return {**user.as_dict(), "permissions": permissions_of(user.roles)}
+        return {**user.as_dict(), "permissions": engine.permissions(user.employee_no, user.dept)}
 
     # ------------------------------------------------ 質問・検索・文書
 
@@ -721,7 +761,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def ask(req: Ask, user: User = Depends(require("ask"))):
         started = time.monotonic()
         try:
-            result = answer_question(store(), llm, req.question, user.dept, settings.top_k)
+            result = answer_question(store(), llm, req.question, doc_scope(user), settings.top_k)
         except ValueError as e:
             raise ApiError(400, "invalid_question", str(e)) from e
         audit_question(user, "chat", req.question, result)
@@ -732,12 +772,13 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         # ログイン・権限・質問の形は、送り始める前に確かめる（ふつうのエラーの形で返す）
         events: queue.Queue[tuple[str, dict] | None] = queue.Queue()
         ip = audit.client_ip.get()     # 別のスレッドで答えるので、接続元をここで取っておく
+        scope = doc_scope(user)        # 見てよい部署も、ここで決めておく
 
         def work():
             started = time.monotonic()
             s = Store(settings.db_path)
             try:
-                result = answer_question(s, llm, req.question, user.dept, settings.top_k,
+                result = answer_question(s, llm, req.question, scope, settings.top_k,
                                          progress=lambda st: events.put(("progress", {"stage": st, "message": ASK_STAGES[st]})))
                 audit_question(user, "chat", req.question, result, ip=ip)
                 events.put(("result", {**result.as_dict(), "elapsed_sec": round(time.monotonic() - started, 2)}))
@@ -774,32 +815,37 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def search_docs(q: str, top_k: int = 5, user: User = Depends(require("search"))):
         if not q.strip() or len(q) > MAX_QUESTION:
             raise ApiError(400, "invalid_query", "検索する言葉を入れてください")
-        return {"hits": [h.as_dict() for h in search(store(), q, user.dept, max(1, min(top_k, 20)))]}
+        return {"hits": [h.as_dict() for h in search(store(), q, doc_scope(user), max(1, min(top_k, 20)))]}
 
     @app.get("/api/documents")
-    def documents(user: User = Depends(require("documents.list"))):
+    def documents(user: User = Depends(require("documents.view"))):
         s = store()
-        admin = allowed(user.roles, "documents.ingest")
+        # 文書管理（documents.manage）が全社に効く人は、すべての文書と置き場所を見る。ほかは見てよい部署の文書だけ
+        admin = doc_scope(user, "documents.manage") == EVERY_DEPARTMENT
+        scope = doc_scope(user)
+        manage = doc_scope(user, "documents.manage")
+        if scope != EVERY_DEPARTMENT and manage != EVERY_DEPARTMENT:
+            scope = set(scope) | set(manage)
         docs = []
         for d in s.documents():
             if admin:
                 docs.append(d)
-            elif s.can_view(d["doc_id"], user.dept):
+            elif s.can_view(d["doc_id"], scope):
                 # 置き場所（サーバーのパス）は管理者にだけ見せる
                 docs.append({k: v for k, v in d.items() if k != "path"})
         return {"documents": docs}
 
     @app.get("/api/documents/{doc_id}")
-    def document(doc_id: str, user: User = Depends(require("documents.list"))):
+    def document(doc_id: str, user: User = Depends(require("documents.view"))):
         s = store()
-        # 見られない文書は、あるかどうかも分からせない（管理者でも部署の権限で決める）
-        doc = s.document_sections(doc_id) if s.can_view(doc_id, user.dept) else None
+        # 見られない文書は、あるかどうかも分からせない（管理者でも、documents.view の効く部署で決める）
+        doc = s.document_sections(doc_id) if s.can_view(doc_id, doc_scope(user)) else None
         if not doc:
             raise not_found("文書")
         return doc
 
     @app.get("/api/documents/ingest/sources")
-    def ingest_sources(user: User = Depends(require("documents.ingest"))):
+    def ingest_sources(user: User = Depends(require("documents.manage"))):
         out, seen = [], set()
         for root in settings.ingest_roots:
             r = root.resolve()
@@ -817,7 +863,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return {"sources": out}
 
     @app.post("/api/documents/ingest", status_code=202)
-    def ingest(req: Ingest, user: User = Depends(require("documents.ingest"))):
+    def ingest(req: Ingest, user: User = Depends(require("documents.manage"))):
         path = Path(req.source).resolve()
         roots = [r.resolve() for r in settings.ingest_roots]
         if not any(path == r or path.is_relative_to(r) for r in roots) or not path.is_dir():
@@ -848,13 +894,13 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def visible_job(job_id: str, user: User) -> dict:
         job = jobs.get(job_id)
         # 他の人のジョブは、あるかどうかも分からせない
-        if not job or (job["owner"] != user.employee_no and not allowed(user.roles, "jobs.all")):
+        if not job or (job["owner"] != user.employee_no and not can(user, "jobs.all")):
             raise not_found("ジョブ")
         return job
 
     @app.get("/api/jobs")
     def job_list(request: Request, all: bool = False, user: User = Depends(require("jobs.own"))):
-        if all and not allowed(user.roles, "jobs.all"):
+        if all and not can(user, "jobs.all"):
             raise deny(user, "jobs.all", request)
         return {"jobs": jobs.list(None if all else user.employee_no)}
 
@@ -905,7 +951,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.post("/api/visits", status_code=201)
     def visit_create(req: VisitCreate, request: Request, user: User = Depends(require("visits.own"))):
         host_no = req.host_employee_no or user.employee_no
-        if host_no != user.employee_no and not allowed(user.roles, "visits.all"):
+        if host_no != user.employee_no and not can(user, "visits.all"):
             raise deny(user, "visits.all（ほかの人の来訪予定の登録）", request)
         with closing(connect()) as db:
             try:
@@ -922,7 +968,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.get("/api/visits")
     def visit_list(request: Request, host: str = "me", date: str | None = None, user: User = Depends(require("visits.own"))):
-        everyone = allowed(user.roles, "visits.all")
+        everyone = can(user, "visits.all")
         day = None
         if date is not None:
             if not everyone:
@@ -946,7 +992,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         with closing(connect()) as db:
             v = visits.find(db, visit_id)
             # ほかの人の予定は、あるかどうかも分からせない（総務は全社の予定を取り消せる）
-            if not v or (v["host_employee_no"] != user.employee_no and not allowed(user.roles, "visits.all")):
+            if not v or (v["host_employee_no"] != user.employee_no and not can(user, "visits.all")):
                 raise not_found("来訪予定")
             visits.cancel(db, visit_id)
         return {"ok": True}
@@ -1004,7 +1050,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     # ------------------------------------------------ 問い合わせ票（S-30）
 
     @app.get("/api/tickets")
-    def ticket_list(status: str | None = None, priority: str | None = None, user: User = Depends(require("tickets"))):
+    def ticket_list(status: str | None = None, priority: str | None = None, user: User = Depends(require("helpdesk.handle"))):
         if status is not None and status not in desk.TICKET_STATUSES:
             raise ApiError(400, "invalid_status", f"状態は {'・'.join(desk.TICKET_STATUSES)} のどれかです")
         if priority is not None and priority not in desk.PRIORITIES:
@@ -1013,7 +1059,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             return {"tickets": desk.tickets(db, status, priority)}
 
     @app.get("/api/tickets/{ticket_id}")
-    def ticket_get(ticket_id: str, user: User = Depends(require("tickets"))):
+    def ticket_get(ticket_id: str, user: User = Depends(require("helpdesk.handle"))):
         with closing(connect()) as db:
             t = desk.ticket(db, ticket_id)
         if not t:
@@ -1021,7 +1067,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return t
 
     @app.patch("/api/tickets/{ticket_id}")
-    def ticket_update(ticket_id: str, req: TicketUpdate, user: User = Depends(require("tickets"))):
+    def ticket_update(ticket_id: str, req: TicketUpdate, user: User = Depends(require("helpdesk.handle"))):
         if req.status is not None and req.status not in desk.TICKET_STATUSES:
             raise ApiError(400, "invalid_status", f"状態は {'・'.join(desk.TICKET_STATUSES)} のどれかです")
         with closing(connect()) as db:
@@ -1131,7 +1177,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         if kind not in UPLOAD_KINDS:
             raise ApiError(400, "invalid_kind", "アップロードの種類が正しくありません")
         perm, limit_key, exts = UPLOAD_KINDS[kind]
-        if not allowed(user.roles, perm):
+        if not can(user, perm):
             raise await run_in_threadpool(deny, user, f"{perm}（{kind} のアップロード）", request)
         limit = getattr(settings, limit_key)
         shown = files.safe_name(name, f"upload{exts[0]}")
@@ -1202,7 +1248,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         with closing(connect()) as db:
             f = files.get(db, file_id, user.employee_no, kind)
         # 権限がなくなった人・ほかの人・期限切れ・ないものは、どれも同じ「見つかりません」
-        if not f or not allowed(user.roles, f["perm"]):
+        if not f or not can(user, f["perm"]):
             raise not_found("ファイル")
         return f
 
@@ -1957,6 +2003,100 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         if not row or row.get("result") != "new" or row.get("kind") != "whisper":
             raise ApiError(409, "no_new_version", "入れ替える新しい版がありません。先に「更新の確認」をしてください")
         return jobs.submit("model-replace", user.employee_no, {"owner": user.employee_no, "name": name, "revision": row["latest"]})
+
+    # ------------------------------------------------ 役割と権限（S-54。画面は次の PR。今は API だけ）
+
+    def access_change(user: User, action: str, target: str, run):
+        """権限の変更：roles.assign がそのグループに効くか確かめ、変えて、中身つきで監査ログに残す。"""
+        try:
+            with closing(connect()) as db:
+                detail = run(db)
+        except KeyError as e:
+            raise not_found("権限の設定") from e
+        except access.AccessError as e:
+            auditor.record(action, actor=user.employee_no, actor_name=user.name, target=target, result=audit.DENIED,
+                           detail=f"変えませんでした：{e}")
+            raise ApiError(e.status, "invalid_access", str(e),
+                           [{"where": w, "message": m} for w, m in e.problems]) from e
+        audit_by(user, action, target=target, detail=detail)
+        return {"ok": True, "detail": detail, **access_view()}
+
+    def need_group(user: User, group_id: str) -> None:
+        if not engine.can(user.employee_no, user.dept, "roles.assign", ("group", group_id)).allowed:
+            raise deny(user, f"roles.assign（グループ {group_id}）")
+
+    def access_view() -> dict:
+        from ..permissions import PERMISSIONS, TARGET_KINDS
+
+        with closing(connect()) as db:
+            data = access.load(db)
+            names = {m["account_id"]: (hr.lookup(db, m["account_id"]) or {}).get("name") for m in data["members"]}
+        today = datetime.now().astimezone().date().isoformat()
+        groups = []
+        for gid, g in data["groups"].items():
+            members = [{**m, "name": names.get(m["account_id"]) or data["accounts"].get(m["account_id"], {}).get("name") or m["account_id"],
+                        "expired": bool(m["expires_at"]) and m["expires_at"][:10] < today}
+                       for m in data["members"] if m["group_id"] == gid]
+            grants = [{**gr, "role": data["roles"][gr["role_id"]]["name"],
+                       "target": (data["targets"][gr["target_id"]]["name"] if gr["target_id"] else data["sets"][gr["set_id"]]["name"])}
+                      for gr in data["grants"] if gr["group_id"] == gid]
+            groups.append({**g, "members": members, "grants": grants})
+        return {"permissions": [{"name": p.name, "feature": p.feature, "does": p.does,
+                                 "targets": [TARGET_KINDS[t] for t in p.targets]} for p in PERMISSIONS.values()],
+                "roles": list(data["roles"].values()), "groups": groups, "targets": list(data["targets"].values()),
+                "target_sets": list(data["sets"].values()), "accounts": list(data["accounts"].values())}
+
+    @app.get("/api/admin/access")
+    def access_get(user: User = Depends(require("roles.view"))):
+        return access_view()
+
+    @app.get("/api/admin/access/explain")
+    def access_explain(account: str, user: User = Depends(require("roles.view"))):
+        # 「この人は何ができるか」：権限と、それがどこから来たか（期限の切れたものは数えない）
+        with closing(connect()) as db:
+            person = hr.lookup(db, account)
+        if not person and not account.startswith("sys:"):
+            raise not_found("アカウント")
+        dept = (person or {}).get("dept", "")
+        return {"account": account, "name": (person or {}).get("name", account), "dept": dept,
+                "groups": engine.groups_of(account, dept), "permissions": access.explain(engine, account, dept)}
+
+    @app.post("/api/admin/access/groups/{group_id}/members", status_code=201)
+    def access_member_add(group_id: str, req: MemberAdd, user: User = Depends(require("roles.assign"))):
+        need_group(user, group_id)
+        return access_change(user, "roles.member.add", group_id, lambda db: access.add_member(
+            db, engine, user.employee_no, user.dept, group_id, req.account_id.strip(), (req.expires_at or "").strip() or None))
+
+    @app.delete("/api/admin/access/groups/{group_id}/members/{account_id}")
+    def access_member_remove(group_id: str, account_id: str, user: User = Depends(require("roles.assign"))):
+        need_group(user, group_id)
+        return access_change(user, "roles.member.remove", group_id, lambda db: access.remove_member(
+            db, engine, user.employee_no, user.dept, group_id, account_id))
+
+    @app.post("/api/admin/access/groups/{group_id}/grants", status_code=201)
+    def access_grant_add(group_id: str, req: GrantAdd, user: User = Depends(require("roles.assign"))):
+        need_group(user, group_id)
+        return access_change(user, "roles.grant.add", group_id, lambda db: access.add_grant(
+            db, engine, user.employee_no, user.dept, group_id, req.role_id, req.target_id, req.set_id))
+
+    @app.delete("/api/admin/access/grants/{grant_id}")
+    def access_grant_remove(grant_id: int, user: User = Depends(require("roles.assign"))):
+        with closing(connect()) as db:
+            gr = next((g for g in access.load(db)["grants"] if g["grant_id"] == grant_id), None)
+        if not gr:
+            raise not_found("役割の割り当て")
+        need_group(user, gr["group_id"])
+        return access_change(user, "roles.grant.remove", gr["group_id"], lambda db: access.remove_grant(
+            db, engine, user.employee_no, user.dept, grant_id))
+
+    @app.put("/api/admin/access/roles/{role_id}")
+    def access_role_update(role_id: str, req: RolePermissions, user: User = Depends(require("roles.assign"))):
+        with closing(connect()) as db:
+            uses = {g["group_id"] for g in access.load(db)["grants"] if g["role_id"] == role_id}
+        for gid in uses:
+            need_group(user, gid)
+        return access_change(user, "roles.role.update", role_id, lambda db: access.set_role_permissions(
+            db, engine, user.employee_no, user.dept, role_id, req.permissions))
 
     # ------------------------------------------------ 監査ログ（S-55。管理者だけ）
 

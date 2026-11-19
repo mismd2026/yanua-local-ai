@@ -107,3 +107,21 @@ def test_serve_does_not_start_with_a_broken_identity_copy(base, capsys):
     assert cli.main(args) == 1
     out = capsys.readouterr().out
     assert "知らない型です" in out and "モデルの確かめ" not in out
+
+
+def test_serve_builds_access_once_and_stops_on_broken_access(base, capsys):
+    """権限（役割 × 対象 × グループ）：初めての起動で roles.json から作る。誤りがあれば起動しない。"""
+    import sqlite3
+
+    args, tmp = base
+    assert cli.main(args) == 1                                     # モデルの確かめまで進む（起動を続けた）
+    out = capsys.readouterr().out
+    assert "権限の仕組みを、roles.json から作りました" in out and "モデルの確かめで止めます" in out
+    db = sqlite3.connect(tmp / "index.db")
+    with db:
+        db.execute("UPDATE access_roles SET permissions = '[\"nosuch\"]' WHERE name = '総務'")
+    db.close()
+    assert cli.main(args) == 1
+    out = capsys.readouterr().out
+    assert "権限の設定に誤りがあるので起動しません" in out and "roles.総務：知らない権限です: nosuch" in out
+    assert "モデルの確かめ" not in out and "作りました" not in out
