@@ -101,7 +101,7 @@
 
 | ID | 画面 | 役割 | 主な操作 | 呼ぶ API | 関連 | 段階 |
 |---|---|---|---|---|---|---|
-| S-50 | 文書管理 | 管理者 | 文書の一覧、登録・差し替え・削除、見られる部署（社外公開を含む）の設定 | `GET /api/documents`、`POST /api/documents`、`PUT /api/documents/{doc_id}`、`DELETE /api/documents/{doc_id}` | K-010, K-002 | 4 |
+| S-50 | 文書（/admin/documents） | `documents.manage` を持つ人（ほかは 403。メニューにも出さない）。扱えるのは documents.manage の対象に含まれる部署（持ち主）の文書だけ | 文書ごとに「だれに見せるか」を決める（docs/access-model.md）。一覧：題名・持ち主の部署・公開先・要る権限・取り込んだ日。持ち主の部署・公開先で絞り込む。「取り込んだもの」「外したもの」。公開先（部署・グループ・全社から1つ以上）・見るのに要る権限（documents.view・infra.docs.view）・社外公開を、中身を変えずに直す（検索の単位は作り直さない）。外す（検索に出さない）・戻す。変える前に、見られるようになる人・見られなくなる人をグループごとの人数で出す（試しに当てるだけ）。取り込み（今のジョブ）：フォルダと、新しい文書の持ち主・公開先・要る権限（ファイルの先頭の書き方か、ここで選ぶ）。変更・取り込み・外す・戻すは監査ログに中身つき（本文は入れない）。前の版の管理は K-055 | `GET /api/admin/documents`（`?removed=true`）、`POST /api/admin/documents/preview`、`PATCH /api/admin/documents/{doc_id}`、`POST /api/admin/documents/{doc_id}/remove`・`/restore`、`GET /api/documents/ingest/sources`、`POST /api/documents/ingest` | K-010, K-002 | 4 |
 | S-51 | 人事データ | 人事・管理者 | ファイルを選ぶ→対応表の下書き→確認→取り込み→結果（在籍・退職・エラー） | `POST /api/hr/mapping-draft`、`POST /api/hr/imports`、`GET /api/hr/imports` | K-016 | 4 |
 | S-52 | 設定 | 管理者（`settings.view`・`settings.edit`。ほかは 403） | 設定ごとに1つの区切り：今使っているもの（既定／画面で保存したもの）→編集→確かめる（誤りは欄の下）→保存。版の一覧と「この版に戻す」「既定に戻す」（ルールの画面と同じ形）。再起動待ちの設定は画面の上にまとめる。起動の指定が勝つ項目は変えられない。本人確認は言い方を1行試せる（保存しない）。版の「したこと」と監査ログの説明に、変えた項目を短く書く（例「型 標準→社員コード必須」。決まった項目だけ）。仕分けルールは S-20 へのリンクだけ | `GET /api/admin/settings`、`GET/PUT /api/admin/settings/{key}`、`POST .../{key}/validate`、`POST .../{key}/history/{版}/restore`、`POST .../{key}/reset`、`POST /api/admin/settings/identity/try` | K-042, K-009 | 4 |
 | S-53 | 通信とモデル | 管理者（`network.view`・`network.edit`。ほかは 403） | 許可する宛先（既定は ON/OFF だけ・追加は足す・消す・ON/OFF。新しい既定・外れた既定の知らせ）、更新の確認の予定（しない・手動だけ・毎日・毎週。ON の宛先だけ見に行き、知らせるだけ）、モデルの目録（名前・種類・用途・固定した版・記録したハッシュ／digest・状態）、照合（通信しない）、入れ替え（押したときだけ。入手→入手元のハッシュと照合→記録を更新）。版・既定に戻す | `GET/PUT /api/admin/network`、`POST .../validate`、`POST .../history/{版}/restore`、`POST .../reset`、`POST /api/admin/network/check`、`GET /api/admin/models`、`POST /api/admin/models/verify`、`POST /api/admin/models/{name}/replace`（ジョブ） | K-052, K-011, K-023 | 4 |
@@ -144,7 +144,9 @@
 | `POST /api/ask`、`POST /api/ask/stream`（進み具合を逐次表示） | `ask` | 社員 | |
 | `GET /api/search` | `search` | 社員 | |
 | `POST /api/chat/sessions`、`.../messages` | `helpdesk` | 社員 | |
-| `GET/POST/PUT/DELETE /api/documents` | `ingest`、`docs` | 社員（一覧は見られる文書だけ）、管理者（変更） | 取り込みは○ |
+| `GET /api/documents`（見られる文書と、扱える部署の文書。documents.manage が全社に効く人はすべてと置き場所）、`GET /api/documents/{doc_id}`（見られる文書だけ。ほかは 404） | `docs` | 社員（`documents.view`） | |
+| `GET /api/documents/ingest/sources`、`POST /api/documents/ingest`（`source`・`mode`：`file`（ファイルの先頭の owner・access）か `chosen`（`owner`・`targets`・`required`・`external`。新しく足す文書だけ）。扱えない部署の文書は取り込まず、消しもしない） | `ingest` | `documents.manage` | ○ |
+| `GET /api/admin/documents`（扱える部署の文書・公開先に選べるもの・要る権限に選べるもの・扱える部署）、`POST /api/admin/documents/preview`（`doc_id`・`action`：`publish`（`targets`・`required`・`external`）・`remove`・`restore`。見られるようになる人・見られなくなる人の数とグループごとの人数。保存しない）、`PATCH /api/admin/documents/{doc_id}`（`targets`・`required`・`external`。本文は作り直さない）、`POST /api/admin/documents/{doc_id}/remove`・`/restore` | （新規） | `documents.manage`（持ち主の部署に効くこと。ほかの部署の文書は 404） | |
 | `POST /api/hr/mapping-draft`、`POST /api/hr/imports` | `hr-mapping-draft`、`hr-import` | 人事・管理者 | |
 | `POST /api/kiosk/sessions`、`.../messages`、`POST /api/kiosk/check-in` | `reception` | 受付端末 | |
 | `GET /api/reception/records` | （新規） | 総務 | |
@@ -255,6 +257,7 @@
 | `job.start`・`job.done`・`job.failed`・`job.cancel`・`job.interrupted` | ジョブの開始・終わり・失敗・取り消し・再起動での中断（文書の取り込み・議事録・仕分けの予定・変換・ルールの下書き） | ジョブ番号 |
 | `kiosk.register`・`kiosk.revoke`・`kiosk.locked` | 受付端末の登録・取り消し、コードを続けて間違えた端末の照合を止めた | 端末番号 |
 | `paper.rules.save`・`.restore`・`.reset` | 設定の保存・版に戻す・既定に戻す（`yanua/settingfiles.py` を通るものはすべて。成功も失敗も） | 設定の名前 |
+| `documents.ingest`・`documents.publish`・`documents.remove`・`documents.restore` | 文書の取り込み（足した・取り込み直した・消した文書の番号と、新しい文書の公開先）・公開先と要る権限を直した（例「就業規則（抜粋）の公開先 全社→経理部」）・外した・戻した。本文は残さない | 文書の番号・フォルダ |
 | `paper.execute` | PDF の仕分けの実行（何件・移したか写したか・置いた先のフォルダ）。消えたルールで止めたときは「失敗」 | 予定の番号 |
 | `file.download`・`meeting.download` | ファイル（変換の結果など）・議事録の Word のダウンロード | ファイル番号・議事録の番号 |
 | `audit.view` | 監査ログを見た（どんな条件で見たか） | |

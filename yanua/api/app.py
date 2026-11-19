@@ -88,7 +88,8 @@ from ..netpolicy import NetworkBlocked
 from .. import identity
 from ..identity import load_policy
 from .. import access
-from ..store import EVERY_DEPARTMENT
+from ..permissions import DOCUMENT_PERMISSIONS, PERMISSIONS
+from ..store import DocScope, DocSettings
 from .roles import load_roles
 from .settings import Settings
 
@@ -144,6 +145,26 @@ class Ask(BaseModel):
 
 class Ingest(BaseModel):
     source: str = Field(min_length=1, max_length=500)
+    # 新しく足す文書の持ち主の部署・公開先・要る権限。mode が file ならファイルの先頭（access・owner）を使う
+    mode: str = Field(default="file", pattern="^(file|chosen)$")
+    owner: str = Field(default="", max_length=100)
+    targets: list[str] = Field(default_factory=list, max_length=100)
+    required: str = Field(default="documents.view", max_length=64)
+    external: bool = False
+
+
+class DocPublication(BaseModel):
+    targets: list[str] = Field(max_length=100)                     # 公開先：special:all・dept:部署・group:グループ
+    required: str = Field(default="documents.view", max_length=64)  # 見るのに要る権限
+    external: bool = False                                         # 社外公開（社外向けの受付で使う）
+
+
+class DocChange(BaseModel):
+    doc_id: str = Field(min_length=1, max_length=100)
+    action: str = Field(default="publish", max_length=20)          # publish・remove・restore
+    targets: list[str] | None = Field(default=None, max_length=100)
+    required: str | None = Field(default=None, max_length=64)
+    external: bool = False
 
 
 class ChatStart(BaseModel):
@@ -358,10 +379,15 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         """判定の1か所（yanua/access.py の Engine.can）。target が None なら、その機能を使えるか。"""
         return engine.can(user.employee_no, user.dept, permission, target).allowed
 
-    def doc_scope(user: User, permission: str = "documents.view"):
-        """文書を見てよい部署（検索の絞り込み・LLM に渡す前・出典を開く）。全社なら EVERY_DEPARTMENT。"""
-        depts = engine.departments(user.employee_no, user.dept, permission)
-        return EVERY_DEPARTMENT if depts == access.ALL else depts
+    def doc_scope(user: User):
+        """文書を見てよい範囲（DocScope。一覧・開く・検索・質問・ヘルプデスクの検索で、LLM に渡す前に絞る）。
+        決まりは yanua/access.py（見るのに要る権限を、公開先を含む対象で持っているときだけ）。"""
+        return engine.doc_scope(user.employee_no, user.dept)
+
+    def manage_scope(user: User):
+        """文書を扱ってよい持ち主の部署（documents.manage の対象）。全社なら None。"""
+        depts = engine.departments(user.employee_no, user.dept, "documents.manage")
+        return None if depts == access.ALL else depts
 
     def name_of(employee_no: str) -> str | None:
         with closing(connect()) as db:
@@ -497,11 +523,24 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     def ingest_job(ctx: JobContext, params: dict) -> dict:
         ctx.progress(5, "取り込みの準備")
+        chosen = DocSettings(**params["chosen"]) if params.get("chosen") else None
+        owners = set(params["owners"]) if params.get("owners") is not None else None
         s = Store(settings.db_path)
         try:
-            report = s.ingest(Path(params["source"]))
+            report = s.ingest(Path(params["source"]), chosen, owners)
         finally:
             s.close()
+        if params.get("by"):
+            # 取り込んだこと（どの文書を、どの公開先で）を監査ログに残す。中身（本文）は残さない
+            r = report.as_dict()
+            how = "ファイルの先頭の書き方" if chosen is None else (
+                f"持ち主 {chosen.owner}、公開先 {targets_text(chosen.targets, target_names())}、要る権限 {chosen.required}"
+                + ("、社外公開" if chosen.external else ""))
+            counts = "、".join(f"{label} {len(r[k])}件" + (f"（{'・'.join(r[k][:20])}）" if r[k] else "")
+                               for k, label in (("added", "足した"), ("updated", "取り込み直した"), ("deleted", "消した"), ("errors", "取り込めなかった")))
+            auditor.record("documents.ingest", actor=params["by"], target=Path(params["source"]).name,
+                           result=audit.FAILED if r["errors"] and not (r["added"] or r["updated"]) else audit.OK,
+                           detail=f"{counts}（新しい文書の公開先：{how}）", ip="")
         ctx.progress(100, "完了")
         return report.as_dict()
 
@@ -862,19 +901,17 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.get("/api/documents")
     def documents(user: User = Depends(require("documents.view"))):
         s = store()
-        # 文書管理（documents.manage）が全社に効く人は、すべての文書と置き場所を見る。ほかは見てよい部署の文書だけ
-        admin = doc_scope(user, "documents.manage") == EVERY_DEPARTMENT
+        # 文書管理（documents.manage）が全社に効く人は、すべての文書と置き場所を見る。
+        # ほかは、見てよい文書と、扱ってよい部署（持ち主）の文書だけ
+        manage = manage_scope(user)
         scope = doc_scope(user)
-        manage = doc_scope(user, "documents.manage")
-        if scope != EVERY_DEPARTMENT and manage != EVERY_DEPARTMENT:
-            scope = set(scope) | set(manage)
         docs = []
         for d in s.documents():
-            if admin:
+            if manage is None:
                 docs.append(d)
-            elif s.can_view(d["doc_id"], scope):
+            elif s.can_view(d["doc_id"], scope) or d["owner"] in manage:
                 # 置き場所（サーバーのパス）は管理者にだけ見せる
-                docs.append({k: v for k, v in d.items() if k != "path"})
+                docs.append({k: v for k, v in d.items() if k not in ("path", "source")})
         return {"documents": docs}
 
     @app.get("/api/documents/{doc_id}")
@@ -910,7 +947,168 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         roots = [r.resolve() for r in settings.ingest_roots]
         if not any(path == r or path.is_relative_to(r) for r in roots) or not path.is_dir():
             raise ApiError(400, "invalid_source", "取り込めるフォルダではありません（設定の ingest_roots の下のフォルダだけ）")
-        return jobs.submit("ingest", user.employee_no, {"source": str(path)})
+        manage = manage_scope(user)
+        chosen = None
+        if req.mode == "chosen":
+            owner = req.owner.strip()
+            if not owner or (manage is not None and owner not in manage):
+                raise ApiError(400, "invalid_document", "持ち主の部署は、あなたが扱える部署から選んでください",
+                               [{"where": "owner", "message": "あなたが扱える部署から選んでください"}])
+            chosen = {"owner": owner, "targets": check_publication(req.targets, req.required), "required": req.required,
+                      "external": req.external}
+        return jobs.submit("ingest", user.employee_no, {"source": str(path), "chosen": chosen, "by": user.employee_no,
+                                                         "owners": None if manage is None else sorted(manage)})
+
+    # ------------------------------------------------ 文書の画面（S-50。documents.manage）
+
+    DOC_IMPACT_LIMIT = 20000        # 見られる人の増減を数える人数の上限（これより多ければ数えない）
+
+    def target_names() -> dict[str, str]:
+        with closing(connect()) as db:
+            access.sync_targets(db)
+            data = access.load(db)
+        names = {tid: t["name"] for tid, t in data["targets"].items()}
+        names[access.ALL] = "全社"
+        return names
+
+    def doc_publish_targets() -> list[dict]:
+        """公開先に選べるもの：全社・部署・グループ（権限の対象と同じ番号）。"""
+        with closing(connect()) as db:
+            access.sync_targets(db)
+            data = access.load(db)
+        out = [{"target_id": access.ALL, "kind": "全社", "name": "全社"}]
+        for kind, label in (("department", "部署"), ("group", "グループ")):
+            out += [{"target_id": tid, "kind": label, "name": t["name"]} for tid, t in data["targets"].items() if t["kind"] == kind]
+        return out
+
+    def targets_text(targets: list[str], names: dict[str, str]) -> str:
+        return "・".join(names.get(t, t) for t in targets) or "なし"
+
+    def check_publication(targets: list[str], required: str) -> list[str]:
+        allowed = {t["target_id"] for t in doc_publish_targets()}
+        targets = list(dict.fromkeys(t for t in targets if isinstance(t, str)))
+        problems = []
+        if not targets:
+            problems.append({"where": "targets", "message": "公開先を1つ以上選んでください（部署・グループ・全社）"})
+        bad = [t for t in targets if t not in allowed]
+        if bad:
+            problems.append({"where": "targets", "message": f"公開先に選べないものです：{'・'.join(bad)}"})
+        if required not in DOCUMENT_PERMISSIONS:
+            problems.append({"where": "required", "message": f"見るのに要る権限は {'・'.join(DOCUMENT_PERMISSIONS)} のどれかにしてください"})
+        if problems:
+            raise ApiError(400, "invalid_document", problems[0]["message"], problems)
+        return targets
+
+    def managed_doc(user: User, doc_id: str) -> dict:
+        """扱ってよい文書（持ち主の部署が documents.manage の対象）。ほかは、あるかどうかも分からせない。"""
+        d = store().doc_settings(doc_id)
+        manage = manage_scope(user)
+        if not d or (manage is not None and d["owner"] not in manage):
+            raise not_found("文書")
+        return d
+
+    def doc_view(d: dict, names: dict[str, str]) -> dict:
+        return {**d, "target_names": [names.get(t, t) for t in d["targets"]]}
+
+    @app.get("/api/admin/documents")
+    def admin_documents(removed: bool = False, user: User = Depends(require("documents.manage"))):
+        manage = manage_scope(user)
+        names = target_names()
+        docs = [doc_view(d, names) for d in store().documents(removed=removed) if manage is None or d["owner"] in manage]
+        with closing(connect()) as db:
+            depts = access._hr_departments(db)
+        return {"documents": docs, "removed": removed, "publish_targets": doc_publish_targets(),
+                "permissions": [{"name": p, "does": PERMISSIONS[p].does} for p in DOCUMENT_PERMISSIONS],
+                "owners": depts if manage is None else sorted(manage)}
+
+    def publication_detail(d: dict, targets: list[str], required: str, external: bool, names: dict[str, str]) -> str:
+        parts = []
+        if targets != d["targets"]:
+            parts.append(f"公開先 {targets_text(d['targets'], names)}→{targets_text(targets, names)}")
+        if required != d["required"]:
+            parts.append(f"要る権限 {d['required']}→{required}")
+        if external != d["external"]:
+            parts.append(f"社外公開 {'あり' if d['external'] else 'なし'}→{'あり' if external else 'なし'}")
+        return f"{d['title']}の" + "、".join(parts) if parts else ""
+
+    def visibility_impact(before: tuple[str, list[str]] | None, after: tuple[str, list[str]] | None) -> dict:
+        """見られるようになる人・見られなくなる人を、グループごとの人数で数える（保存しない）。None は「だれも見られない」（外した）。"""
+        with closing(connect()) as db:
+            people = access._active_people(db)
+        if len(people) > DOC_IMPACT_LIMIT:
+            return {"checked": len(people), "too_many": True, "gain": 0, "lose": 0, "groups": []}
+        groups: dict[str, dict] = {}
+        gain = lose = 0
+        for no, dept in people:
+            b = before is not None and engine.can_view_document(no, dept, before[0], before[1]).allowed
+            a = after is not None and engine.can_view_document(no, dept, after[0], after[1]).allowed
+            for name in engine.groups_of(no, dept):
+                g = groups.setdefault(name, {"name": name, "members": 0, "gain": 0, "lose": 0, "can_see": 0})
+                g["members"] += 1
+                g["gain"] += int(a and not b)
+                g["lose"] += int(b and not a)
+                g["can_see"] += int(a)
+            gain += int(a and not b)
+            lose += int(b and not a)
+        return {"checked": len(people), "too_many": False, "gain": gain, "lose": lose,
+                "groups": [g for g in groups.values() if g["gain"] or g["lose"] or g["can_see"]]}
+
+    def doc_change(user: User, req: "DocChange") -> tuple[dict, str, tuple | None, tuple | None, callable]:
+        d = managed_doc(user, req.doc_id)
+        names = target_names()
+        now = None if d["removed_at"] else (d["required"], d["targets"])
+        if req.action == "publish":
+            targets = check_publication(req.targets or [], req.required or "documents.view")
+            detail = publication_detail(d, targets, req.required or "documents.view", bool(req.external), names)
+            if not detail:
+                raise ApiError(400, "no_change", "変わったところがありません")
+            later = None if d["removed_at"] else (req.required or "documents.view", targets)
+            return d, detail, now, later, lambda: store().set_publication(d["doc_id"], targets, req.required or "documents.view",
+                                                                          bool(req.external))
+        if req.action == "remove":
+            if d["removed_at"]:
+                raise ApiError(409, "already_removed", "この文書は、もう外しています")
+            return d, f"{d['title']}を外した（検索に出さない。公開先 {targets_text(d['targets'], names)}）", now, None, \
+                lambda: store().set_removed(d["doc_id"], True, user.employee_no)
+        if req.action == "restore":
+            if not d["removed_at"]:
+                raise ApiError(409, "not_removed", "この文書は外していません")
+            return d, f"{d['title']}を戻した（公開先 {targets_text(d['targets'], names)}）", None, (d["required"], d["targets"]), \
+                lambda: store().set_removed(d["doc_id"], False)
+        raise ApiError(400, "invalid_request", "action は publish・remove・restore のどれかにしてください")
+
+    @app.post("/api/admin/documents/preview")
+    def admin_documents_preview(req: DocChange, user: User = Depends(require("documents.manage"))):
+        """変える前の確かめ：見られるようになる人・見られなくなる人を、グループごとの人数で返す（保存しない）。"""
+        d, detail, now, later, _ = doc_change(user, req)
+        return {"doc_id": d["doc_id"], "detail": detail, **visibility_impact(now, later)}
+
+    DOC_ACTIONS = {"publish": "documents.publish", "remove": "documents.remove", "restore": "documents.restore"}
+
+    def doc_apply(user: User, req: "DocChange") -> dict:
+        try:
+            d, detail, _, _, write = doc_change(user, req)
+        except ApiError as e:
+            if e.status != 404:
+                audit_by(user, DOC_ACTIONS.get(req.action, "documents.publish"), target=req.doc_id, result=audit.DENIED,
+                         detail=f"変えませんでした：{e.message}")
+            raise
+        write()
+        audit_by(user, DOC_ACTIONS[req.action], target=d["doc_id"], detail=detail)
+        return {"ok": True, "detail": detail, "document": doc_view(store().doc_settings(d["doc_id"]), target_names())}
+
+    @app.patch("/api/admin/documents/{doc_id}")
+    def admin_document_publish(doc_id: str, req: DocPublication, user: User = Depends(require("documents.manage"))):
+        # 中身（本文とチャンク）は変えずに、公開先・要る権限・社外公開だけを直す
+        return doc_apply(user, DocChange(doc_id=doc_id, action="publish", **req.model_dump()))
+
+    @app.post("/api/admin/documents/{doc_id}/remove")
+    def admin_document_remove(doc_id: str, user: User = Depends(require("documents.manage"))):
+        return doc_apply(user, DocChange(doc_id=doc_id, action="remove"))
+
+    @app.post("/api/admin/documents/{doc_id}/restore")
+    def admin_document_restore(doc_id: str, user: User = Depends(require("documents.manage"))):
+        return doc_apply(user, DocChange(doc_id=doc_id, action="restore"))
 
     # ------------------------------------------------ ヘルプデスク
 

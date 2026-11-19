@@ -59,6 +59,9 @@ PERMISSIONS: dict[str, Permission] = {p.name: p for p in [
     _p("infra.targets", "IaC（将来）", "接続する対象を登録する", FEATURE),
 ]}
 
+# 文書を見るのに要る権限として選べるもの（S-50）。既定は documents.view
+DOCUMENT_PERMISSIONS = ("documents.view", "infra.docs.view")
+
 # 移し替えで名前を変えた権限（前の名前 → 新しい名前）
 RENAMED = {"documents.list": "documents.view", "documents.ingest": "documents.manage", "tickets": "helpdesk.handle"}
 

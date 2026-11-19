@@ -110,14 +110,15 @@ def _split_long(text: str, max_chars: int) -> list[str]:
     return parts
 
 
-def load_document(path: Path) -> Document:
+def load_document(path: Path, need_access: bool = True) -> Document:
+    """need_access：先頭の access（閲覧できる部署）を必ず書くか。画面で公開先を選んで取り込むときは要らない。"""
     raw = path.read_text(encoding="utf-8")
     meta, body = parse_front_matter(raw)
     doc_id = meta.get("id", "").strip()
     if not doc_id:
         raise DocumentError(f"{path.name}: 先頭に id がありません")
     access = parse_access(meta.get("access", ""))
-    if not access:
+    if not access and need_access:
         raise DocumentError(f"{path.name}: 先頭に access（閲覧できる部署）がありません")
     title = meta.get("title", "").strip() or path.stem
     doc = Document(

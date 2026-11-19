@@ -81,6 +81,13 @@ export const MENU: MenuItem[] = [
     needs: ["paper"],
   },
   {
+    id: "S-50",
+    path: "/admin/documents",
+    label: "文書",
+    description: "文書ごとに、だれに見せるか（公開先と見るのに要る権限）を決められます。取り込み・外す・戻すもここでできます。",
+    needs: ["documents.manage"],
+  },
+  {
     id: "S-52",
     path: "/admin/settings",
     label: "設定",

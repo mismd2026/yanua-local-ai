@@ -605,7 +605,7 @@ def test_ingest_sources_only_admin(client):
     r = client.post("/api/documents/ingest", json={"source": str((DEMO / "public").resolve())}, headers=H)
     assert r.status_code == 202
     job = wait_job(client, r.json()["job_id"])
-    assert job["params"] == {"source": str((DEMO / "public").resolve())}
+    assert job["params"] == {"source": str((DEMO / "public").resolve()), "chosen": None, "by": "10005", "owners": None}
 
 
 def test_job_list_all_only_admin(client):

@@ -206,7 +206,7 @@ class HelpdeskSessions:
                 "dept_code": p.get("dept_code", ""), "account": "", "account_type": "ログイン", "verified": "ログイン"}}
             if self.scope_of is not None:
                 scope = self.scope_of(user)
-                start["requester"]["doc_scope"] = scope if scope == "*" else sorted(scope)
+                start["requester"]["doc_scope"] = scope.to_json()       # 会話の状態に残すので JSON の形にする
         else:
             start = {"account": account}   # 開発用：代表アカウントなどからの問い合わせを試す
         return self._run(user, session_id, start, busy_check=False)

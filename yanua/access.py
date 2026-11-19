@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import hr
-from .permissions import DEFAULT_ROLES, PERMISSIONS
+from .permissions import DEFAULT_ROLES, DOCUMENT_PERMISSIONS, PERMISSIONS
 
 PERSON, SYSTEM = "person", "system"
 SELF_DEPT, ALL = "special:self_dept", "special:all"
@@ -391,6 +391,40 @@ class Engine:
             elif g.target_kind == "department":
                 out.add(g.target_ref)
         return out
+
+    def can_view_document(self, account_id: str, dept: str, required: str, targets: list[str]) -> Decision:
+        """文書を見てよいか（S-50）：見るのに要る権限を、公開先を含む対象で持っているときだけ。can を使う。
+        公開先「全社」は、どの対象にも含まれる（要る権限をどこかに持っていれば見られる）。"""
+        reasons: list[str] = []
+        for t in targets:
+            if t == ALL:
+                d = self.can(account_id, dept, required)
+            elif ":" in t:
+                kind, ref = t.split(":", 1)
+                d = self.can(account_id, dept, required, ({"dept": "department"}.get(kind, kind), ref))
+            else:
+                continue
+            reasons += d.reasons
+        return Decision(bool(reasons), list(dict.fromkeys(reasons)))
+
+    def doc_scope(self, account_id: str, dept: str):
+        """文書の検索・一覧で使う、見てよい範囲（yanua/store.py の DocScope）。can_view_document と同じ決まりを、
+        SQL で絞り込める形にしたもの（権限ごとに、効く公開先の集まり。全社に効くなら None）。"""
+        from .store import DocScope
+
+        out: dict[str, set[str] | None] = {}
+        for g in self._live(account_id, dept):
+            if g.permission not in DOCUMENT_PERMISSIONS or out.get(g.permission, set()) is None:
+                continue
+            have = out.setdefault(g.permission, set())
+            if g.target == ALL:
+                out[g.permission] = None
+            elif g.target == SELF_DEPT:
+                if dept:
+                    have.add(f"dept:{dept}")
+            elif g.target_kind in ("department", "group"):
+                have.add(f"{'dept' if g.target_kind == 'department' else 'group'}:{g.target_ref}")
+        return DocScope.of(out)
 
     def groups_of(self, account_id: str, dept: str) -> list[str]:
         seen = []
