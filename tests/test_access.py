@@ -125,28 +125,45 @@ def test_can_gives_reasons_and_respects_targets(client, settings):
 
 def test_expired_members_are_not_counted_and_changes_rebuild(client, settings):
     e = engine_of(settings)
-    assert not e.can("10004", "営業部", "paper").allowed
+    assert not e.can("10004", "営業部", "audit.view").allowed
     login(client, "10005")
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    r = client.post("/api/admin/access/groups/G-general/members", json={"account_id": "10004", "expires_at": tomorrow}, headers=H)
+    r = client.post("/api/admin/access/groups/G-audit/members", json={"account_id": "10004", "expires_at": tomorrow}, headers=H)
     assert r.status_code == 201, r.text
-    assert e.can("10004", "営業部", "paper").allowed                   # 変更があったので作り直した
-    assert "手で入れた、期限 " + tomorrow in e.can("10004", "営業部", "paper").reasons[0]
+    assert e.can("10004", "営業部", "audit.view").allowed                # 変更があったので作り直した
+    assert "手で入れた、期限 " + tomorrow in e.can("10004", "営業部", "audit.view").reasons[0]
     later = access.Engine(e._connect, today=lambda: (date.today() + timedelta(days=2)).isoformat())
-    assert not later.can("10004", "営業部", "paper").allowed          # 期限が切れたら、判定の時点で数えない
+    assert not later.can("10004", "営業部", "audit.view").allowed       # 期限が切れたら、判定の時点で数えない
     login(client, "10004")
-    assert client.get("/api/paper/inbox").status_code == 200
+    assert client.get("/api/audit").status_code == 200
 
 
-def test_rule_members_and_manual_members_are_separate(client):
+def test_rule_groups_cannot_have_manual_members(client):
     login(client, "10005")
-    assert client.post("/api/admin/access/groups/G-general/members", json={"account_id": "10002"}, headers=H).status_code == 201
-    g = group(client.get("/api/admin/access").json(), "総務")
-    assert g["rule"] == {"departments": ["総務部"]} and [m["account_id"] for m in g["members"]] == ["10002"]
-    # 手で入れたメンバーを外しても、決まりで入っている人は外れない
-    assert client.delete("/api/admin/access/groups/G-general/members/10002", headers=H).status_code == 200
-    login(client, "10002")
-    assert "paper" in client.get("/api/me").json()["permissions"]
+    for gid in ("G-employees", "G-general"):
+        r = client.post(f"/api/admin/access/groups/{gid}/members", json={"account_id": "10004"}, headers=H)
+        assert r.status_code == 409 and "決まり" in r.json()["error"]["message"] and "手で出し入れできません" in r.json()["error"]["message"]
+    r = client.delete("/api/admin/access/groups/G-general/members/10002", headers=H)
+    assert r.status_code == 409
+    denied = client.get("/api/audit", params={"action": "roles.member", "result": "拒否"}).json()["entries"]
+    assert len(denied) == 3 and all("手で出し入れできません" in e["detail"] for e in denied)
+
+
+def test_migration_splits_rule_and_manual_members(settings, tmp_path):
+    """roles.json で部署と社員番号の両方を書いた役割は、決まりのグループと「（個別）」のグループに分ける（動きは同じ）。"""
+    roles = tmp_path / "roles.json"
+    roles.write_text(json.dumps({"roles": {"総務": {"departments": ["総務部"], "employees": ["10003"]},
+                                           "管理者": {"employees": ["10005"]}}}, ensure_ascii=False), encoding="utf-8")
+    settings.roles_path = roles
+    with TestClient(create_app(settings, FakeLLM())) as c:
+        v = view(c)
+        assert group(v, "総務")["rule"] == {"departments": ["総務部"]} and group(v, "総務")["members"] == []
+        manual = group(v, "総務（個別）")
+        assert manual["rule"] is None and [m["account_id"] for m in manual["members"]] == ["10003"]
+        assert [(x["role"], x["target"]) for x in manual["grants"]] == [("総務", "全社")]
+        for who in ("10002", "10003"):
+            login(c, who)
+            assert "paper" in c.get("/api/me").json()["permissions"]
 
 
 def test_explain_shows_where_each_permission_comes_from(client):
@@ -170,27 +187,81 @@ def test_only_roles_assign_can_change_and_viewing_needs_roles_view(client):
         assert client.post("/api/admin/access/groups/G-general/members", json={"account_id": "10004"}, headers=H).status_code == 403
 
 
-def test_cannot_change_groups_you_belong_to(client):
+def denied_message(r) -> str:
+    assert r.status_code == 409, r.text
+    return r.json()["error"]["message"]
+
+
+def test_changes_that_increase_your_own_permissions_are_refused(client):
     login(client, "10005")
-    for method, path, body in (("POST", "/api/admin/access/groups/G-admin/members", {"account_id": "10004"}),
-                               ("DELETE", "/api/admin/access/groups/G-admin/members/10005", None),
-                               ("POST", "/api/admin/access/groups/G-admin/grants", {"role_id": "R02", "target_id": "special:all"}),
-                               ("POST", "/api/admin/access/groups/G-employees/members", {"account_id": "sys:kiosk"})):
-        r = client.request(method, path, json=body, headers=H)
-        assert r.status_code == 409 and "自分が入っているグループ" in r.json()["error"]["message"], (path, r.text)
-    # 自分のグループが使っている役割（管理者・監査・文書管理・社員）の中身も変えられない
     roles = {x["name"]: x["role_id"] for x in client.get("/api/admin/access").json()["roles"]}
-    assert client.put(f"/api/admin/access/roles/{roles['監査']}", json={"permissions": ["audit.view"]}, headers=H).status_code == 409
-    denied = client.get("/api/audit", params={"result": "拒否", "action": "roles"}).json()["entries"]
-    assert len(denied) == 5 and all("変えませんでした" in e["detail"] for e in denied)
+    # 自分が入っているグループに役割を足す
+    msg = denied_message(client.post("/api/admin/access/groups/G-admin/grants", json={"role_id": roles["総務"], "target_id": "special:all"}, headers=H))
+    assert "自分の権限が増える変更はできません" in msg and "paper" in msg
+    # 自分のグループが使っている役割に、権限を足す
+    assert "自分の権限が増える" in denied_message(client.put(f"/api/admin/access/roles/{roles['監査']}",
+                                                       json={"permissions": ["audit.view", "roles.view", "hr.view"]}, headers=H))
+    # 自分に効かない変更・権限が減る変更はできる
+    assert client.post("/api/admin/access/groups/G-hr/grants", json={"role_id": roles["総務"], "target_id": "special:all"}, headers=H).status_code == 201
+    assert client.put(f"/api/admin/access/roles/{roles['監査']}", json={"permissions": ["audit.view"]}, headers=H).status_code == 200
+    denied = [e for e in client.get("/api/audit", params={"action": "roles", "result": "拒否"}).json()["entries"]]
+    assert len(denied) == 2 and all("変えませんでした：自分の権限が増える変更はできません" in e["detail"] for e in denied)
+
+
+def test_cannot_add_yourself_or_extend_your_own_expiry(client):
+    login(client, "10005")
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    assert client.post("/api/admin/access/groups/G-admin/members", json={"account_id": "10002", "expires_at": tomorrow}, headers=H).status_code == 201
+    login(client, "10002")                       # 10002 は期限つきの管理者になった
+    later = (date.today() + timedelta(days=30)).isoformat()
+    assert "自分の権限が増える" in denied_message(client.post("/api/admin/access/groups/G-admin/members",
+                                                       json={"account_id": "10002", "expires_at": later}, headers=H))
+    assert "自分の権限が増える" in denied_message(client.post("/api/admin/access/groups/G-admin/members",
+                                                       json={"account_id": "10002"}, headers=H))     # 期限なしにするのも延ばすこと
+    # 期限を縮めるのはできる（減る変更）
+    assert client.post("/api/admin/access/groups/G-admin/members", json={"account_id": "10002", "expires_at": date.today().isoformat()},
+                       headers=H).status_code == 201
+    # 自分を、権限が増えるグループに入れる
+    login(client, "10005")
+    assert client.post("/api/admin/access/groups/G-audit/members", json={"account_id": "10005"}, headers=H).status_code == 201   # 増えない
+    roles = {x["name"]: x["role_id"] for x in client.get("/api/admin/access").json()["roles"]}
+    assert client.post("/api/admin/access/groups/G-audit/grants", json={"role_id": roles["人事"], "target_id": "special:all"},
+                       headers=H).status_code == 409      # 自分が入った監査のグループに人事を足すと、自分が増える
+
+
+def test_roles_can_be_removed_from_the_everyone_group(client):
+    login(client, "10005")
+    grant = next(g for g in group(client.get("/api/admin/access").json(), "社員")["grants"] if g["role"] == "社員")
+    r = client.delete(f"/api/admin/access/grants/{grant['grant_id']}", headers=H)
+    assert r.status_code == 200 and r.json()["detail"] == "社員 から 役割「社員」× メンバー自身の部署 を外した"
+    login(client, "10004")
+    assert "ask" not in client.get("/api/me").json()["permissions"]
+    # 戻すのは自分の権限が増える変更なので、自分（10005）ではできない
+    login(client, "10005")
+    r = client.post("/api/admin/access/groups/G-employees/grants", json={"role_id": grant["role_id"], "target_id": "special:self_dept"}, headers=H)
+    assert "自分の権限が増える" in denied_message(r)
+
+
+def test_cannot_remove_the_last_roles_assign_holder(client):
+    login(client, "10005")
+    msg = denied_message(client.delete("/api/admin/access/groups/G-admin/members/10005", headers=H))
+    assert "roles.assign を持つ人が1人もいなくなる" in msg
+    admin_grant = next(g for g in group(client.get("/api/admin/access").json(), "管理者")["grants"] if g["role"] == "管理者")
+    assert "1人もいなくなる" in denied_message(client.delete(f"/api/admin/access/grants/{admin_grant['grant_id']}", headers=H))
+    roles = {x["name"]: x["role_id"] for x in client.get("/api/admin/access").json()["roles"]}
+    assert "1人もいなくなる" in denied_message(client.put(f"/api/admin/access/roles/{roles['管理者']}",
+                                                     json={"permissions": ["settings.view", "roles.view"]}, headers=H))
+    # ほかに roles.assign を持つ人がいれば、自分を外せる
+    assert client.post("/api/admin/access/groups/G-admin/members", json={"account_id": "10002"}, headers=H).status_code == 201
+    assert client.delete("/api/admin/access/groups/G-admin/members/10005", headers=H).status_code == 200
+    login(client, "10002")                       # 10005 は管理者でなくなったので、10002 で監査ログを見る
+    assert len(client.get("/api/audit", params={"action": "roles", "result": "拒否"}).json()["entries"]) == 3
 
 
 def test_changes_are_recorded_with_their_content(client):
     login(client, "10005")
     roles = {x["name"]: x["role_id"] for x in client.get("/api/admin/access").json()["roles"]}
-    # （10005 は情報システム部なので、決まりで「情シス・ヘルプデスク」に入っている。そのグループは変えられない）
-    assert client.post("/api/admin/access/groups/G-helpdesk/members", json={"account_id": "10001"}, headers=H).status_code == 409
-    assert client.post("/api/admin/access/groups/G-general/members",
+    assert client.post("/api/admin/access/groups/G-audit/members",
                        json={"account_id": "10001", "expires_at": "2026-12-31"}, headers=H).status_code == 201
     r = client.post("/api/admin/access/groups/G-hr/grants", json={"role_id": roles["総務"], "target_id": "special:all"}, headers=H)
     assert r.status_code == 201
@@ -198,18 +269,18 @@ def test_changes_are_recorded_with_their_content(client):
     assert client.delete(f"/api/admin/access/grants/{gid}", headers=H).status_code == 200
     assert client.put(f"/api/admin/access/roles/{roles['人事']}", json={"permissions": ["hr.view"]}, headers=H).status_code == 200
     assert client.put(f"/api/admin/access/roles/{roles['人事']}", json={"permissions": ["nosuch"]}, headers=H).status_code == 400
-    assert client.post("/api/admin/access/groups/G-hr/members", json={"account_id": "99999"}, headers=H).status_code == 400
-    assert client.post("/api/admin/access/groups/G-hr/members", json={"account_id": "10001", "expires_at": "来月"}, headers=H).status_code == 400
+    assert client.post("/api/admin/access/groups/G-audit/members", json={"account_id": "99999"}, headers=H).status_code == 400
+    assert client.post("/api/admin/access/groups/G-audit/members", json={"account_id": "10001", "expires_at": "来月"}, headers=H).status_code == 400
     details = [e["detail"] for e in reversed(client.get("/api/audit", params={"action": "roles", "result": "成功"}).json()["entries"])
                if e["action"] != "roles.migrate"]
     assert details == [
-        "総務 に 山田 太郎 を追加（期限 2026-12-31）",
+        "監査 に 山田 太郎 を追加（期限 2026-12-31）",
         "人事 に 役割「総務」× 全社 を与えた",
         "人事 から 役割「総務」× 全社 を外した",
         "役割「人事」の権限：hr.import を外した",
     ]
     login(client, "10001")
-    assert "paper" in client.get("/api/me").json()["permissions"]   # すぐに効く（作り直した）
+    assert "audit.view" in client.get("/api/me").json()["permissions"]   # すぐに効く（作り直した）
 
 
 # ---------------------------------------------------------------- 起動のときの決まり
@@ -232,19 +303,18 @@ def test_broken_access_settings_stop_startup(settings):
 def test_document_search_uses_the_decision(client, settings):
     """文書の検索の絞り込み（LLM に渡す前）も、判定（documents.view が効く部署）を使う。"""
     login(client, "10005")
-    # 営業部の高橋に、経理部の文書を見られる役割を与える（グループ「経理の閲覧」は作れないので、社員の役割の対象を足す代わりに
-    # 総務のグループに「社員」× 経理部 を与え、高橋を総務に入れる）
+    # 営業部の高橋に、経理部の文書を見られるようにする：監査のグループに「社員」× 経理部 を与え、高橋を監査に入れる
     db = sqlite3.connect(settings.db_path)
     with db:
         db.execute("INSERT INTO targets VALUES ('dept:経理部', 'department', '経理部', '経理部')")
-        db.execute("INSERT INTO group_grants (group_id, role_id, target_id) VALUES ('G-general', 'R01', 'dept:経理部')")
+        db.execute("INSERT INTO group_grants (group_id, role_id, target_id) VALUES ('G-audit', 'R01', 'dept:経理部')")
         db.execute("UPDATE access_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'")
     db.close()
-    assert client.post("/api/admin/access/groups/G-general/members", json={"account_id": "10004"}, headers=H).status_code == 201
+    assert client.post("/api/admin/access/groups/G-audit/members", json={"account_id": "10004"}, headers=H).status_code == 201
     login(client, "10004")
     hits = {h["doc_id"] for h in client.get("/api/search", params={"q": "月次決算"}).json()["hits"]}
     assert "K01" in hits                                              # 経理部の「月次決算の手順」
     assert client.get("/api/documents/K01").status_code == 200
-    login(client, "10003")                                            # 同じ営業部でも、総務に入っていない人は見えない
+    login(client, "10003")                                            # 同じ営業部でも、監査に入っていない人は見えない
     assert "K01" not in {h["doc_id"] for h in client.get("/api/search", params={"q": "月次決算"}).json()["hits"]}
     assert client.get("/api/documents/K01").status_code == 404

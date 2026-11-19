@@ -1994,7 +1994,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         except access.AccessError as e:
             auditor.record(action, actor=user.employee_no, actor_name=user.name, target=target, result=audit.DENIED,
                            detail=f"変えませんでした：{e}")
-            raise ApiError(409 if "自分が入っている" in str(e) else 400, "invalid_access", str(e),
+            raise ApiError(e.status, "invalid_access", str(e),
                            [{"where": w, "message": m} for w, m in e.problems]) from e
         audit_by(user, action, target=target, detail=detail)
         return {"ok": True, "detail": detail, **access_view()}

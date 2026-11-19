@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 import threading
@@ -84,9 +85,10 @@ CREATE TABLE IF NOT EXISTS access_meta (key TEXT PRIMARY KEY, value TEXT NOT NUL
 class AccessError(ValueError):
     """権限の設定の誤り（起動しない）・変更の断り。problems は (位置, 理由)。"""
 
-    def __init__(self, message: str, problems: list[tuple[str, str]] | None = None):
+    def __init__(self, message: str, problems: list[tuple[str, str]] | None = None, status: int = 400):
         super().__init__(message)
         self.problems = problems or [("", message)]
+        self.status = status      # 400：書き方の誤り。409：決まりで断った（自分の権限が増える・締め出し・決まりで入るグループ）
 
 
 def _now() -> str:
@@ -134,6 +136,10 @@ def migrate_if_empty(db: sqlite3.Connection, role_config) -> bool:
             db.execute("INSERT INTO access_roles VALUES (?, ?, ?, ?)", (role_ids[name], name, desc, json.dumps(perms)))
 
         def group(gid, name, desc, rule, grants, members=()):
+            if rule and members:
+                # 決まりで入るグループは、メンバーを手で出し入れしない。roles.json の社員番号は「（個別）」のグループにする
+                group(f"{gid}-manual", f"{name}（個別）", f"{name} と同じ役割。roles.json で社員番号を書いた人", None, grants, members)
+                members = ()
             db.execute("INSERT INTO access_groups VALUES (?, ?, ?, ?)", (gid, name, desc, json.dumps(rule, ensure_ascii=False) if rule else None))
             for role in grants:
                 db.execute("INSERT INTO group_grants (group_id, role_id, target_id) VALUES (?, ?, ?)",
@@ -286,6 +292,34 @@ def _rule_match(rule: dict | None, dept: str) -> str | None:
     return None
 
 
+def compute_grants(data: dict, account_id: str, dept: str) -> list[Grant]:
+    """その人が持つ権限と出どころ（データだけから決める。変更を試すときにも使う）。期限の切れたものも入っている。"""
+    result = []
+    manual = {m["group_id"]: m for m in data["members"] if m["account_id"] == account_id}
+    for gid, g in data["groups"].items():
+        via, expires = None, None
+        rule = _rule_match(g["rule"], dept) if not account_id.startswith("sys:") else None
+        if rule:
+            via = rule
+        if gid in manual:
+            if via is None or manual[gid]["expires_at"] is None:
+                via, expires = ("手で入れた", manual[gid]["expires_at"]) if via is None else (via, None)
+        if via is None:
+            continue
+        for gr in data["grants"]:
+            if gr["group_id"] != gid or gr["role_id"] not in data["roles"]:
+                continue
+            role = data["roles"][gr["role_id"]]
+            tids = [gr["target_id"]] if gr["target_id"] else data["sets"].get(gr["set_id"], {}).get("members", [])
+            for tid in tids:
+                t = data["targets"].get(tid)
+                if not t:
+                    continue
+                for p in role["permissions"]:
+                    result.append(Grant(p, g["name"], role["name"], tid, t["kind"], t["ref"], via, expires))
+    return result
+
+
 class Engine:
     """判定の1か所。アカウントごとの結果を、変更の世代が同じあいだ持っておく。"""
 
@@ -310,27 +344,7 @@ class Engine:
             hit = self._cache.get((account_id, dept))
             if hit and hit[0] == gen:
                 return hit[1]
-            result = []
-            manual = {m["group_id"]: m for m in data["members"] if m["account_id"] == account_id}
-            for gid, g in data["groups"].items():
-                via, expires = None, None
-                rule = _rule_match(g["rule"], dept) if not account_id.startswith("sys:") else None
-                if rule:
-                    via = rule
-                if gid in manual:
-                    if via is None or manual[gid]["expires_at"] is None:
-                        via, expires = ("手で入れた", manual[gid]["expires_at"]) if via is None else (via, None)
-                if via is None:
-                    continue
-                for gr in data["grants"]:
-                    if gr["group_id"] != gid:
-                        continue
-                    role = data["roles"][gr["role_id"]]
-                    tids = [gr["target_id"]] if gr["target_id"] else data["sets"][gr["set_id"]]["members"]
-                    for tid in tids:
-                        t = data["targets"][tid]
-                        for p in role["permissions"]:
-                            result.append(Grant(p, g["name"], role["name"], tid, t["kind"], t["ref"], via, expires))
+            result = compute_grants(data, account_id, dept)
             self._cache[(account_id, dept)] = (gen, result)
             return result
 
@@ -382,24 +396,55 @@ class Engine:
 # ------------------------------------------------------------ 変更（roles.assign。API から）
 
 
-def member_of(engine: Engine, account_id: str, dept: str) -> set[str]:
-    with engine._connect() as db:
-        data = load(db)
-    today = engine._today()
-    out = set()
-    for gid, g in data["groups"].items():
-        if _rule_match(g["rule"], dept):
-            out.add(gid)
-    for m in data["members"]:
-        if m["account_id"] == account_id and not _expired(m["expires_at"], today):
-            out.add(m["group_id"])
+FOREVER = "9999-12-31"
+
+
+def _effect(data: dict, account_id: str, dept: str, today: str) -> dict[tuple[str, str], str]:
+    """(権限, 対象) → いつまで効くか（期限なしは FOREVER）。期限の切れたものは入れない。"""
+    out: dict[tuple[str, str], str] = {}
+    for g in compute_grants(data, account_id, dept):
+        if _expired(g.expires_at, today):
+            continue
+        until = (g.expires_at or FOREVER)[:10]
+        key = (g.permission, g.target)
+        out[key] = max(out.get(key, ""), until)
     return out
 
 
-def _check_not_own(engine: Engine, actor: str, actor_dept: str, group_ids: set[str], what: str) -> None:
-    own = member_of(engine, actor, actor_dept) & group_ids
-    if own:
-        raise AccessError(f"自分が入っているグループの{what}は変えられません", [("group", "自分が入っているグループです")])
+def _active_people(db) -> list[tuple[str, str]]:
+    try:
+        return [(r[0], r[1]) for r in db.execute("SELECT employee_no, dept FROM employees WHERE active = 1")]
+    except sqlite3.Error:
+        return []
+
+
+def _assign_holders(db, data: dict, today: str) -> list[str]:
+    """roles.assign を持つ人（在籍している人だけ。システムアカウントは数えない）。"""
+    return [no for no, dept in _active_people(db)
+            if any(p == "roles.assign" for (p, _t) in _effect(data, no, dept, today))]
+
+
+def guard(db, engine: "Engine", actor: str, actor_dept: str, before: dict, after: dict) -> None:
+    """変更の決まり（docs/access-model.md）：
+    - 自分の権限が増える変更はできない（自分のグループに役割・対象を足す・自分を入れる・自分の期限を延ばす・自分の役割に権限を足す）
+    - 権限が減る変更と、自分に効かない変更はできる
+    - roles.assign を持つ人が1人もいなくなる変更はできない（締め出しを防ぐ）"""
+    today = engine._today()
+    now, then = _effect(before, actor, actor_dept, today), _effect(after, actor, actor_dept, today)
+    gained = sorted(p for key, until in then.items() if until > now.get(key, "") for p in [key[0]])
+    if gained:
+        raise AccessError(f"自分の権限が増える変更はできません（増える権限：{'・'.join(dict.fromkeys(gained))}）",
+                          [("", "自分の権限が増える変更です。ほかの roles.assign を持つ人に頼んでください")], status=409)
+    if not _assign_holders(db, after, today):
+        raise AccessError("roles.assign を持つ人が1人もいなくなるので、この変更はできません（締め出しを防ぐため）",
+                          [("", "roles.assign を持つ人が1人もいなくなります")], status=409)
+
+
+def _no_manual_for_rule_group(g: dict) -> None:
+    if g["rule"]:
+        how = "全員" if g["rule"].get("all") else f"部署「{'・'.join(g['rule'].get('departments', []))}」"
+        raise AccessError(f"グループ「{g['name']}」は決まり（{how}）で入るグループなので、メンバーを手で出し入れできません",
+                          [("account", "決まりで入るグループです")], status=409)
 
 
 def add_member(db, engine: Engine, actor: str, actor_dept: str, group_id: str, account_id: str, expires_at: str | None) -> str:
@@ -407,7 +452,7 @@ def add_member(db, engine: Engine, actor: str, actor_dept: str, group_id: str, a
     g = data["groups"].get(group_id)
     if not g:
         raise KeyError(group_id)
-    _check_not_own(engine, actor, actor_dept, {group_id}, "メンバー")
+    _no_manual_for_rule_group(g)
     if expires_at:
         try:
             datetime.fromisoformat(expires_at)
@@ -422,6 +467,11 @@ def add_member(db, engine: Engine, actor: str, actor_dept: str, group_id: str, a
         if not person:
             raise AccessError("その社員番号の人は、人事データにいません（在籍している人だけ入れられます）", [("account", "人事データにいません")])
         name = person["name"]
+    after = copy.deepcopy(data)
+    after["members"] = [m for m in after["members"] if not (m["group_id"] == group_id and m["account_id"] == account_id)]
+    after["members"].append({"group_id": group_id, "account_id": account_id, "expires_at": expires_at or None,
+                             "added_by": actor, "added_at": _now()})
+    guard(db, engine, actor, actor_dept, data, after)
     with db:
         if not account_id.startswith("sys:"):
             _ensure_person(db, account_id)
@@ -437,8 +487,11 @@ def remove_member(db, engine: Engine, actor: str, actor_dept: str, group_id: str
     g = data["groups"].get(group_id)
     if not g:
         raise KeyError(group_id)
-    _check_not_own(engine, actor, actor_dept, {group_id}, "メンバー")
+    _no_manual_for_rule_group(g)
     name = (data["accounts"].get(account_id) or {}).get("name") or account_id
+    after = copy.deepcopy(data)
+    after["members"] = [m for m in after["members"] if not (m["group_id"] == group_id and m["account_id"] == account_id)]
+    guard(db, engine, actor, actor_dept, data, after)
     with db:
         cur = db.execute("DELETE FROM group_members WHERE group_id = ? AND account_id = ?", (group_id, account_id))
         if not cur.rowcount:
@@ -453,12 +506,12 @@ def add_grant(db, engine: Engine, actor: str, actor_dept: str, group_id: str, ro
     g = data["groups"].get(group_id)
     if not g:
         raise KeyError(group_id)
-    _check_not_own(engine, actor, actor_dept, {group_id}, "役割")
     trial = {**data, "grants": [*data["grants"], {"grant_id": "new", "group_id": group_id, "role_id": role_id,
                                                   "target_id": target_id, "set_id": set_id}]}
     found = [p for p in problems(trial) if p[0] == "grants[new]"]
     if found:
         raise AccessError("役割の与え方に直すところがあります", found)
+    guard(db, engine, actor, actor_dept, data, trial)
     with db:
         db.execute("INSERT INTO group_grants (group_id, role_id, target_id, set_id) VALUES (?, ?, ?, ?)",
                    (group_id, role_id, target_id, set_id))
@@ -472,7 +525,7 @@ def remove_grant(db, engine: Engine, actor: str, actor_dept: str, grant_id: int)
     gr = next((x for x in data["grants"] if x["grant_id"] == grant_id), None)
     if not gr:
         raise KeyError(grant_id)
-    _check_not_own(engine, actor, actor_dept, {gr["group_id"]}, "役割")
+    guard(db, engine, actor, actor_dept, data, {**data, "grants": [x for x in data["grants"] if x["grant_id"] != grant_id]})
     with db:
         db.execute("DELETE FROM group_grants WHERE grant_id = ?", (grant_id,))
         _bump(db)
@@ -488,9 +541,10 @@ def set_role_permissions(db, engine: Engine, actor: str, actor_dept: str, role_i
     bad = [p for p in permissions if p not in PERMISSIONS]
     if bad:
         raise AccessError("知らない権限があります", [("permissions", f"知らない権限です: {p}") for p in bad])
-    uses = {gr["group_id"] for gr in data["grants"] if gr["role_id"] == role_id}
-    _check_not_own(engine, actor, actor_dept, uses, "役割")
     new = [p for p in PERMISSIONS if p in set(permissions)]
+    after = copy.deepcopy(data)
+    after["roles"][role_id]["permissions"] = new
+    guard(db, engine, actor, actor_dept, data, after)
     with db:
         db.execute("UPDATE access_roles SET permissions = ? WHERE role_id = ?", (json.dumps(new), role_id))
         _bump(db)
