@@ -529,5 +529,5 @@ export interface AccessPreview {
 export interface AccessSource { group: string; role: string; target: string; via: string; expires_at: string | null; reason: string }
 export interface AccessExplain {
   q: string; candidates: AccessPerson[];
-  result: (AccessPerson & { groups: string[]; permissions: { permission: string; feature: string; does: string; from: AccessSource[] }[] }) | null;
+  result: (AccessPerson & { note: string; groups: string[]; permissions: { permission: string; feature: string; does: string; from: AccessSource[] }[] }) | null;
 }

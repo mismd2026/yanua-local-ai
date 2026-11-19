@@ -188,6 +188,8 @@ def test_explain_shows_where_each_permission_comes_from(client):
     # システムアカウントも選べる（受付端末・更新の確認）
     r = client.get("/api/admin/access/explain", params={"q": "受付端末"}).json()
     assert r["result"]["account_id"] == "sys:kiosk" and r["result"]["permissions"] == []
+    assert r["result"]["note"] == "今は端末トークンで /api/kiosk/ だけを使えます（この仕組みへの移し替えはまだ）"
+    assert client.get("/api/admin/access/explain", params={"q": "10002"}).json()["result"]["note"] == ""
 
 
 # ---------------------------------------------------------------- 変更（roles.assign）
