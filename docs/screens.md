@@ -260,7 +260,7 @@
 
 残さないもの：パスワード・端末トークン・セッションのトークン・受付端末で入力されたコードは、どの設定でも残さない。質問の文、文書や PDF の中身は、既定では残さない（質問の文は `--audit-body` のときだけ `body` に残す）。部署の権限で見せなかった文書があることは、質問した人への返事には出さない。仕分けの実行は、書類の中身から作るファイル名を残さず、フォルダだけを残す。
 
-通信とモデル（S-53）：`network.init`（初めての起動で既定の宛先を ON にした。システム）・`network.save`・`.restore`・`.reset`（説明は「huggingface.co を OFF」など）・`network.check`（宛先・結果・版）・`models.verify`・`models.replace`（前の版→新しい版）。
+通信とモデル（S-53）：`settings.network.init`（初めての起動で既定の宛先を ON にした。システム。版は増やさない）・`settings.network.save`・`.restore`・`.reset`（ほかの設定とそろえた名前。説明は「huggingface.co を OFF」など。PR #23 のときに `network.save` などで残った記録は、そのまま）・`network.check`（宛先・結果・版）・`models.verify`・`models.replace`（前の版→新しい版）。
 
 これから足すもの：文書の変更（K-010）、役割の変更（S-54）、SSO のログイン（K-008）。
 

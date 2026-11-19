@@ -4,11 +4,13 @@
 - 画面で変えるのは「状態」だけ：既定の宛先の ON/OFF、追加の宛先、更新の確認の予定、入れ替えた版。
   保存は yanua/settingfiles.py を通す（既定 config/network_state.json → 写し data/settings/network_state.json。版・既定に戻す・監査ログ）
 - 既定の宛先の決まり：
-    初めて入れたとき（写しがないとき）は、既定の宛先をすべて ON で始める（起動のときに写しを作り、そのときの既定を覚える）
+    初めて入れたとき（覚えた既定がないとき）は、既定の宛先をすべて ON で始める（起動のときに、そのときの既定を
+    data/settings/network_known_defaults.json に覚える。版は増やさない）
     更新で既定の宛先が増えたら、新しいものは OFF で加え、画面で知らせる（ON にするかは管理者が決める）
     更新で既定の宛先が減ったら、その宛先には通信しない（写しに ON が残っていても使わない）。画面に「既定から外れました」
     既定の宛先は消せない（ON/OFF だけ）。追加の宛先は足す・消す・ON/OFF ができる
-- 「既定に戻す」は写しを消す：既定の宛先がすべて ON、追加の宛先なし、更新の確認は手動だけ
+- 「既定に戻す」は写しを消す：既定の宛先がすべて ON、追加の宛先なし、更新の確認は手動だけ。
+  同じ操作の中で、今の既定を覚え直す（版は1つだけ増える。戻したあとは「既定」を使っている）
 - network.json に誤りがあっても起動は続ける。そのときは社外にはどこにも通信しない（理由を画面に出す）
 """
 
@@ -24,6 +26,7 @@ from ..netpolicy import Policy
 from ..settingfiles import SettingFile
 
 STATE_NAME = "network_state.json"
+KNOWN_NAME = "network_known_defaults.json"     # 覚えた既定の宛先（版にはしない。増えた既定を OFF で加えるため）
 MODES = {"none": "しない", "manual": "手動だけ", "daily": "毎日", "weekly": "毎週"}
 WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -127,7 +130,7 @@ def _is_ip(host: str) -> bool:
 
 def store(settings, default_hosts: list[str], audit=None) -> SettingFile:
     return SettingFile(STATE_NAME, Path(settings.network_state_config), settings.settings_dir,
-                       lambda text: state_problems(text, default_hosts), audit=audit, audit_action="network")
+                       lambda text: state_problems(text, default_hosts), audit=audit, audit_action="settings.network")
 
 
 def read_state(st: SettingFile) -> dict:
@@ -151,13 +154,20 @@ def text_of(state: dict) -> str:
 # ------------------------------------------------------------ 画面に出す形・動いている許可リスト
 
 
-def view(defaults: dict | None, state: dict) -> dict:
+def known_of(defaults: dict, state: dict, known: list[str] | None) -> list[str]:
+    """覚えた既定の宛先：写しに書いたもの → 覚えたファイル → （どちらもなければ）今の既定。"""
+    if state["known_defaults"] is not None:
+        return state["known_defaults"]
+    return known if known is not None else defaults["allowed_hosts"]
+
+
+def view(defaults: dict | None, state: dict, known: list[str] | None = None) -> dict:
     """宛先の一覧（既定・追加）と知らせ。"""
     if defaults is None:
         return {"hosts": [], "new_defaults": [], "removed_defaults": []}
     current = defaults["allowed_hosts"]
     purposes = defaults.get("purposes", {})
-    known = current if state["known_defaults"] is None else state["known_defaults"]
+    known = known_of(defaults, state, known)
     hosts = []
     for h in current:
         new = h not in known
@@ -170,11 +180,11 @@ def view(defaults: dict | None, state: dict) -> dict:
             "removed_defaults": removed}
 
 
-def effective(defaults: dict | None, state: dict) -> Policy | None:
+def effective(defaults: dict | None, state: dict, known: list[str] | None = None) -> Policy | None:
     """動いている許可リスト（ON の宛先だけ）と、目録（入れ替えた版を入れたもの）。network.json が読めなければ None。"""
     if defaults is None:
         return None
-    allowed = [h["host"] for h in view(defaults, state)["hosts"] if h["on"]]
+    allowed = [h["host"] for h in view(defaults, state, known)["hosts"] if h["on"]]
     models = {name: dict(spec) for name, spec in defaults.get("models", {}).items()}
     for name, rev in state["revisions"].items():
         if name in models and models[name].get("kind", "huggingface") == "huggingface":
@@ -188,13 +198,13 @@ def first_state(defaults: dict) -> dict:
             "update_check": {"mode": "manual", "time": "03:00", "weekday": 0}}
 
 
-def from_screen(defaults: dict, state: dict, body: dict) -> dict:
+def from_screen(defaults: dict, state: dict, body: dict, known: list[str] | None = None) -> dict:
     """画面から来た ON/OFF・追加の宛先・更新の確認から、保存する状態を作る（見た既定の宛先は、知ったことにする）。"""
     current = defaults["allowed_hosts"]
     on = body.get("defaults", {})
     if not isinstance(on, dict):
         on = {}
-    known = current if state["known_defaults"] is None else state["known_defaults"]
+    known = known_of(defaults, state, known)
     off = [h for h in current if not on.get(h, h in known and h not in state["off"])]
     return {"known_defaults": list(current), "off": off,
             "added": body.get("added", state["added"]), "revisions": state["revisions"],
@@ -210,11 +220,12 @@ def schedule_text(uc: dict) -> str:
     return MODES.get(mode, mode)
 
 
-def describe_changes(defaults: dict | None, old: dict, new: dict) -> str:
+def describe_changes(defaults: dict | None, old: dict, new: dict, known: list[str] | None = None,
+                     new_known: list[str] | None = None) -> str:
     """例「huggingface.co を OFF、example.com を追加、更新の確認 手動だけ→毎日 03:00」。宛先・予定・版だけを書く。"""
     parts = []
-    before = {h["host"]: h for h in view(defaults, old)["hosts"]}
-    after = {h["host"]: h for h in view(defaults, new)["hosts"]}
+    before = {h["host"]: h for h in view(defaults, old, known)["hosts"]}
+    after = {h["host"]: h for h in view(defaults, new, new_known if new_known is not None else known)["hosts"]}
     for host, h in after.items():
         b = before.get(host)
         if b is None or (b["kind"] == "default" and b["new"] and h["kind"] == "default"):

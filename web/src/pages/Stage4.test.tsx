@@ -316,10 +316,13 @@ describe("S-53 通信とモデル", () => {
     let sent: unknown = null;
     fakeApi({
       "GET /api/admin/network": netView(), "GET /api/admin/models": MODELS,
-      "PUT /api/admin/network": (body: { values: { added: { host: string }[] } }) => {
+      "POST /api/admin/network/validate": (body: { values: { added: { host: string }[] } }) => {
         if (body.values.added.some((a) => a.host.includes("/")))
           return { status: 400, json: { error: { code: "invalid_setting", message: "設定に直すところがあります",
             details: [{ where: "added[1]", message: "https のホスト名だけを書いてください" }] } } };
+        return { json: { ok: true } };
+      },
+      "PUT /api/admin/network": (body: { values: { added: { host: string }[] } }) => {
         sent = body.values;
         return { json: { ...netView(), version: 3 } };
       },
@@ -333,16 +336,27 @@ describe("S-53 通信とモデル", () => {
     expect(within(box).getByRole("button", { name: "registry.ollama.ai を消す" })).toBeInTheDocument();
     expect(within(box).getByLabelText("cdn.example.org を使う")).not.toBeChecked();                       // 新しい既定は OFF
     await user.click(within(box).getByLabelText("huggingface.co を使う"));
+    // 足すときにその場で確かめ、誤りなら一覧に入れず、欄の下に理由を出す
     await user.type(within(box).getByLabelText("追加する宛先（ホスト名）"), "https://bad.example.com/x");
     await user.click(within(box).getByRole("button", { name: "宛先を足す" }));
-    await user.click(screen.getByRole("button", { name: "保存する（宛先と更新の確認）" }));
     expect(await within(box).findByText("https のホスト名だけを書いてください")).toBeInTheDocument();
-    expect(sent).toBeNull();
-    await user.click(within(box).getByRole("button", { name: "https://bad.example.com/x を消す" }));
+    expect(within(box).queryByRole("button", { name: "https://bad.example.com/x を消す" })).not.toBeInTheDocument();
+    expect(within(box).getByLabelText("追加する宛先（ホスト名）")).toHaveValue("https://bad.example.com/x");
     await user.click(screen.getByRole("button", { name: "保存する（宛先と更新の確認）" }));
     expect(await screen.findByText(/保存しました（版 3）/)).toBeInTheDocument();
     expect(sent).toEqual({ defaults: { "huggingface.co": false, "*.hf.co": true, "cdn.example.org": false },
       added: [{ host: "registry.ollama.ai", on: true, purpose: "入手元との照合" }], update_check: { mode: "manual", time: "03:00", weekday: 0 } });
+  });
+
+  it("正しい宛先は、確かめてから一覧に入る", async () => {
+    const { calls } = fakeApi({ "GET /api/admin/network": netView(), "GET /api/admin/models": MODELS, "POST /api/admin/network/validate": { ok: true } });
+    const user = userEvent.setup();
+    render(<NetworkPage canEdit />);
+    const box = await screen.findByRole("region", { name: "許可する宛先" });
+    await user.type(await within(box).findByLabelText("追加する宛先（ホスト名）"), "Mirror.Example.com");
+    await user.click(within(box).getByRole("button", { name: "宛先を足す" }));
+    expect(await within(box).findByRole("button", { name: "mirror.example.com を消す" })).toBeInTheDocument();
+    expect(calls.find((c) => c.path === "/api/admin/network/validate")?.body.values.added.at(-1)).toEqual({ host: "mirror.example.com", on: true, purpose: "" });
   });
 
   it("更新の確認の予定を選び、「しない」なら今すぐ確かめるを押せない。既定に戻すは何が起きるかを伝える", async () => {
@@ -370,6 +384,8 @@ describe("S-53 通信とモデル", () => {
     const rows = await within(box).findAllByRole("row");
     expect(rows[1]).toHaveTextContent("536b0662742c");
     expect(rows[1]).toHaveTextContent("一致");
+    expect(rows[1]).toHaveTextContent("文字起こし");          // 用途は日本語で
+    expect(rows[2]).toHaveTextContent("チャット・要約");
     expect(rows[2]).toHaveTextContent("登録していない");
     await user.click(within(box).getByRole("button", { name: "whisper-small を入れ替える" }));
     expect(calls.some((c) => c.path.endsWith("/replace"))).toBe(false);

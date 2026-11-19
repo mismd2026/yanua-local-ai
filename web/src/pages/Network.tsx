@@ -14,6 +14,9 @@ const STATE: Record<ModelRow["state"], string> = {
 };
 const TONE: Record<string, string> = { match: "ok", differs: "ng", not_installed: "ng", not_registered: "off", unverified: "run", unknown: "off" };
 const short = (h: string) => (h ? h.slice(0, 12) : "—");
+// 目録の用途（use）を日本語で出す
+const USES: Record<string, string> = { transcribe: "文字起こし", chat: "チャット", summary: "要約", embedding: "埋め込み" };
+const useText = (use: string[]) => use.map((u) => USES[u] ?? u).join("・") || "—";
 
 export default function NetworkPage({ canEdit = false }: { canEdit?: boolean }) {
   const [view, setView] = useState<NetworkView | null>(null);
@@ -91,6 +94,7 @@ function Hosts({ view, canEdit, onChanged }: { view: NetworkView; canEdit: boole
   const [uc, setUc] = useState<UpdateCheck>(view.update_check);
   const [newHost, setNewHost] = useState("");
   const [newPurpose, setNewPurpose] = useState("");
+  const [addError, setAddError] = useState<string[]>([]);
   const [asking, setAsking] = useState<number | "reset" | null>(null);
   const { busy, problems, general, message, send } = useSend(onChanged);
   useEffect(() => { setHosts(view.hosts); setUc(view.update_check); }, [view]);
@@ -100,6 +104,30 @@ function Hosts({ view, canEdit, onChanged }: { view: NetworkView; canEdit: boole
     added: hosts.filter((h) => h.kind === "added").map((h) => ({ host: h.host, on: h.on, purpose: h.purpose })),
     update_check: uc,
   });
+  // 足す前に、サーバーの検証（保存のときと同じ）にかける。誤りなら一覧に入れず、欄の下に理由を出す
+  const addHost = async () => {
+    const candidate: NetHost = { host: newHost.trim().toLowerCase(), kind: "added", purpose: newPurpose.trim(), new: false, on: true };
+    const next = [...hosts, candidate];
+    const index = next.filter((h) => h.kind === "added").length - 1;
+    const body = {
+      defaults: Object.fromEntries(next.filter((h) => h.kind === "default").map((h) => [h.host, h.on])),
+      added: next.filter((h) => h.kind === "added").map((h) => ({ host: h.host, on: h.on, purpose: h.purpose })),
+      update_check: uc,
+    };
+    setAddError([]);
+    try {
+      await api("POST", "/api/admin/network/validate", { values: body });
+    } catch (e) {
+      const mine = e instanceof ApiError ? e.details.filter((d) => d.where === `added[${index}]`).map((d) => d.message) : [];
+      if (mine.length || !(e instanceof ApiError)) {
+        setAddError(mine.length ? mine : [errorText(e, "確かめられませんでした")]);
+        return;
+      }
+    }
+    setHosts(next);
+    setNewHost("");
+    setNewPurpose("");
+  };
   const toggle = (host: string) => setHosts((hs) => hs.map((h) => (h.host === host ? { ...h, on: !h.on } : h)));
   const added = hosts.filter((h) => h.kind === "added");
   const Err = ({ at }: { at: string }) => (problems[at]?.length ? <>{problems[at].map((m, i) => <div key={i} className="small error" role="alert">{m}</div>)}</> : null);
@@ -142,14 +170,11 @@ function Hosts({ view, canEdit, onChanged }: { view: NetworkView; canEdit: boole
           <div className="toolbar spaced">
             <input type="text" value={newHost} onChange={(e) => setNewHost(e.target.value)} placeholder="例：registry.ollama.ai" aria-label="追加する宛先（ホスト名）" />
             <input type="text" value={newPurpose} maxLength={100} onChange={(e) => setNewPurpose(e.target.value)} placeholder="用途" aria-label="追加する宛先の用途" />
-            <button type="button" disabled={!newHost.trim()} onClick={() => {
-              setHosts((hs) => [...hs, { host: newHost.trim().toLowerCase(), kind: "added", purpose: newPurpose.trim(), new: false, on: true }]);
-              setNewHost("");
-              setNewPurpose("");
-            }}>宛先を足す</button>
+            <button type="button" disabled={!newHost.trim()} onClick={() => void addHost()}>宛先を足す</button>
             <span className="small muted">https のホスト名だけ（パス・ワイルドカード・IP アドレスは使えません）。足したら「保存する」を押してください。</span>
           </div>
         )}
+        {addError.map((m, i) => <div key={i} className="small error" role="alert">{m}</div>)}
       </section>
 
       <section className="card" aria-label="更新の確認">
@@ -286,7 +311,7 @@ function Models({ view, canEdit, tick, onChanged }: { view: NetworkView; canEdit
                 <tr key={m.name}>
                   <td className="mono">{m.name}</td>
                   <td className="small">{m.kind}</td>
-                  <td className="small">{m.use.join("・") || "—"}</td>
+                  <td className="small">{useText(m.use)}</td>
                   <td className="mono small">{m.kind === "ollama" ? "—" : short(m.revision)}</td>
                   <td className="mono small">{short(m.recorded)}{m.files ? <span className="muted">（{m.files}件）</span> : null}</td>
                   <td>

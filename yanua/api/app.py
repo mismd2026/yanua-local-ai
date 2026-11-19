@@ -339,14 +339,32 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             log.error("通信の設定の状態を読めません（既定で動きます）：%s", e)
             return netsettings.read_state_text(Path(settings.network_state_config).read_text(encoding="utf-8"))
 
+    def known_file() -> Path:
+        return settings.settings_dir / netsettings.KNOWN_NAME
+
+    def read_known() -> list[str] | None:
+        try:
+            data = json.loads(known_file().read_text(encoding="utf-8"))
+            return [h for h in data.get("hosts", []) if isinstance(h, str)]
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def write_known(hosts_: list[str]) -> None:
+        """覚えた既定の宛先を書く（版にはしない）。このあと増えた既定は OFF で加わる。"""
+        settings.settings_dir.mkdir(parents=True, exist_ok=True)
+        tmp = known_file().with_suffix(".tmp")
+        tmp.write_text(json.dumps({"_説明": "覚えた既定の宛先（S-53）。これにない既定の宛先は、新しい既定として OFF で加わる",
+                                   "hosts": list(hosts_)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(known_file())
+
     def net_policy():
         """動いている許可リスト（ON の宛先だけ）。network.json が読めなければ None（社外にはどこにも通信しない）。"""
         defaults, _ = net_defaults()
-        return netsettings.effective(defaults, net_state())
+        return netsettings.effective(defaults, net_state(), read_known())
 
     def net_view() -> dict:
         defaults, error = net_defaults()
-        return {**netsettings.view(defaults, net_state()), "error": error}
+        return {**netsettings.view(defaults, net_state(), read_known()), "error": error}
 
     def local_tags() -> dict[str, str]:
         if ollama_tags is not None:
@@ -1651,16 +1669,17 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     CHECK_FILE = "network_check.json"
 
     def init_network() -> None:
-        """初めて入れたとき（写しがないとき）：今の既定の宛先をすべて ON で覚える（あとで増えた既定は OFF で加わる）。"""
+        """初めて入れたとき（覚えた既定がなく、写しもないとき）：今の既定の宛先をすべて ON で覚える。版は増やさない
+        （画面は「既定」を使っている）。このあと増えた既定は OFF で加わる。"""
         defaults, error = net_defaults()
         if defaults is None:
             log.error("通信の設定を読めません。社外には通信しません：%s", error)
             return
-        st = netsettings.store(settings, defaults["allowed_hosts"])     # 監査ログは下で、システムとして1件残す
-        if st.saved.is_file():
+        st = netsettings.store(settings, defaults["allowed_hosts"])
+        if st.saved.is_file() or read_known() is not None:
             return
-        st.save(netsettings.text_of(netsettings.first_state(defaults)), audit.SYSTEM, "初めての起動：既定の宛先をすべて ON にした")
-        auditor.record("network.init", actor=audit.SYSTEM, actor_name=audit.SYSTEM, kind=audit.SYSTEM, ip="",
+        write_known(defaults["allowed_hosts"])
+        auditor.record("settings.network.init", actor=audit.SYSTEM, actor_name=audit.SYSTEM, kind=audit.SYSTEM, ip="",
                        detail=f"初めての起動：既定の宛先をすべて ON にした（{'、'.join(defaults['allowed_hosts'])}）")
 
     def last_check() -> dict | None:
@@ -1764,7 +1783,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 wrong.append({"where": f"defaults.{host}", "message": f"{host} は既定の宛先なので消せません。使わないときは OFF にしてください"})
         if wrong:
             raise ApiError(400, "invalid_setting", "設定に直すところがあります", wrong)
-        new = netsettings.from_screen(defaults, old, body)
+        new = netsettings.from_screen(defaults, old, body, read_known())
         text = netsettings.text_of(new)
         found = netsettings.state_problems(text, defaults["allowed_hosts"])
         if found:
@@ -1783,18 +1802,20 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     @app.put("/api/admin/network")
     def network_save(req: SettingValues, user: User = Depends(require("network.edit"))):
         text, old, new = net_text(req.values)
-        changes = netsettings.describe_changes(net_defaults()[0], old, netsettings.read_state_text(text))
+        defaults = net_defaults()[0]
+        changes = netsettings.describe_changes(defaults, old, netsettings.read_state_text(text), read_known())
         try:
             version = net_store().save(text, user.employee_no, f"通信の設定を保存した（{changes}）")
         except SettingError as e:
             raise setting_error(e, 400, "invalid_setting", "設定に直すところがあります") from e
+        write_known(defaults["allowed_hosts"])     # 画面で見た既定の宛先は、知ったことにする
         return {"version": version, **net_section()}
 
     @app.post("/api/admin/network/history/{version}/restore")
     def network_restore(version: int, user: User = Depends(require("network.edit"))):
         st = net_store()
         try:
-            note = netsettings.describe_changes(net_defaults()[0], net_state(), netsettings.read_state_text(st.get(version) or ""))
+            note = netsettings.describe_changes(net_defaults()[0], net_state(), netsettings.read_state_text(st.get(version) or ""), read_known())
         except (ValueError, KeyError, AttributeError):
             note = ""
         try:
@@ -1810,7 +1831,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         # 既定に戻す：既定の宛先をすべて ON、追加の宛先を消す、更新の確認は手動だけ（入れ替えた版も既定の版に戻る）
         st = net_store()
         defaults = net_defaults()[0]
-        note = netsettings.describe_changes(defaults, net_state(), netsettings.first_state(defaults)) if defaults and st.saved.is_file() else ""
+        note = (netsettings.describe_changes(defaults, net_state(), netsettings.first_state(defaults), read_known(),
+                                             defaults["allowed_hosts"]) if defaults and st.saved.is_file() else "")
         try:
             new = st.reset_to_default(user.employee_no, note)
         except SettingError as e:
@@ -1818,8 +1840,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         if new is None:
             return {"version": None, "already_default": True, "message": "すでに既定です", **net_section()}
         if defaults:
-            # 既定に戻したあとも「今の既定をすべて ON」で覚えておく（このあと増えた既定は OFF で加わる）
-            st.save(netsettings.text_of(netsettings.first_state(defaults)), user.employee_no, "既定に戻した：今の既定の宛先を覚えた")
+            # 同じ操作の中で、今の既定をすべて ON で覚え直す（版は増やさない。このあと増えた既定は OFF で加わる）
+            write_known(defaults["allowed_hosts"])
         return {"version": new, "already_default": False, **net_section()}
 
     @app.post("/api/admin/network/check")
