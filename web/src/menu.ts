@@ -95,6 +95,13 @@ export const MENU: MenuItem[] = [
     needs: ["network.view"],
   },
   {
+    id: "S-54",
+    path: "/admin/access",
+    label: "権限",
+    description: "グループ・役割・対象で、だれが何をできるかを確かめて変えられます。変える前に、だれの権限が増える・減るかを確かめられます。",
+    needs: ["roles.view"],
+  },
+  {
     id: "S-55",
     path: "/admin/audit",
     label: "監査ログ",

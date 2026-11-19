@@ -167,14 +167,27 @@ def test_migration_splits_rule_and_manual_members(settings, tmp_path):
 
 
 def test_explain_shows_where_each_permission_comes_from(client):
+    """「この人は何ができるか」：画面の欄と同じ q（社員番号・名前の一部・システムアカウント）で引く。"""
     login(client, "10005")
-    r = client.get("/api/admin/access/explain", params={"account": "10002"}).json()
-    assert r["groups"] == ["社員", "総務"]
-    perms = {p["permission"]: p for p in r["permissions"]}
-    assert perms["paper"]["from"] == ["グループ「総務」（決まり：部署「総務部」）の役割「総務」× 全社"]
-    assert perms["ask"]["from"] == ["グループ「社員」（決まり：全員）の役割「社員」× メンバー自身の部署"]
+    for q in ("10002", "佐藤", "花子"):
+        r = client.get("/api/admin/access/explain", params={"q": q})
+        assert r.status_code == 200, r.text
+        res = r.json()["result"]
+        assert res["account_id"] == "10002" and res["groups"] == ["社員", "総務"]
+    perms = {p["permission"]: p for p in res["permissions"]}
+    paper = perms["paper"]["from"]
+    assert [(x["group"], x["role"], x["target"], x["expires_at"]) for x in paper] == [("総務", "総務", "全社", None)]
+    assert paper[0]["reason"] == "グループ「総務」（決まり：部署「総務部」）の役割「総務」× 全社"
+    assert perms["ask"]["from"][0]["target"] == "メンバー自身の部署"
     assert "audit.view" not in perms
-    assert client.get("/api/admin/access/explain", params={"account": "99999"}).status_code == 404
+    # 決まらないときは候補だけ（営業部は2人）・いない人は候補なし
+    r = client.get("/api/admin/access/explain", params={"q": "1000"}).json()
+    assert r["result"] is None and len(r["candidates"]) == 6           # 退職した 10007 は出さない
+    assert client.get("/api/admin/access/explain", params={"q": "99999"}).json() == {"q": "99999", "candidates": [], "result": None}
+    assert client.get("/api/admin/access/explain").json()["candidates"] == []          # 何も入れなくても 400 にしない
+    # システムアカウントも選べる（受付端末・更新の確認）
+    r = client.get("/api/admin/access/explain", params={"q": "受付端末"}).json()
+    assert r["result"]["account_id"] == "sys:kiosk" and r["result"]["permissions"] == []
 
 
 # ---------------------------------------------------------------- 変更（roles.assign）
@@ -306,7 +319,6 @@ def test_document_search_uses_the_decision(client, settings):
     # 営業部の高橋に、経理部の文書を見られるようにする：監査のグループに「社員」× 経理部 を与え、高橋を監査に入れる
     db = sqlite3.connect(settings.db_path)
     with db:
-        db.execute("INSERT INTO targets VALUES ('dept:経理部', 'department', '経理部', '経理部')")
         db.execute("INSERT INTO group_grants (group_id, role_id, target_id) VALUES ('G-audit', 'R01', 'dept:経理部')")
         db.execute("UPDATE access_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'")
     db.close()

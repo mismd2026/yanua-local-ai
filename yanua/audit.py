@@ -12,7 +12,7 @@
     at          時刻（UTC、ISO 8601）
     actor       した人の番号（社員番号。受付端末なら端末番号。ログイン前は「なし」。サーバー自身は「システム」）
     actor_name  名前（社員の名前・端末名。ログイン前は「なし」）
-    actor_kind  社員・受付端末・なし・システム
+    actor_kind  社員・受付端末・なし・システム・サーバーの操作
     action      操作の名前（例 auth.login、paper.rules.save）
     target      対象（例 ルール名、ジョブ番号）
     result      成功・失敗・拒否
@@ -37,6 +37,7 @@ log = logging.getLogger("yanua.audit")
 OK, FAILED, DENIED = "成功", "失敗", "拒否"
 RESULTS = (OK, FAILED, DENIED)
 EMPLOYEE, DEVICE, NOBODY, SYSTEM = "社員", "受付端末", "なし", "システム"
+SERVER_OP = "サーバーの操作"      # サーバーに入れる人が、復旧用のコマンド（python -m yanua access）で変えたとき
 
 # リクエストの接続元。API の入口（app.py のミドルウェア）で入れる。ジョブのスレッドなどでは空
 client_ip: contextvars.ContextVar[str] = contextvars.ContextVar("yanua_client_ip", default="")
@@ -104,8 +105,9 @@ class Auditor:
 
     def record(self, action: str, *, actor: str | None = None, actor_name: str | None = None, kind: str | None = None,
                target: str = "", result: str = OK, detail: str = "", body: str | None = None, ip: str | None = None,
-               at: datetime | None = None) -> None:
-        """1件足す。失敗しても例外は出さない（元の操作を止めない）。actor が None ならログイン前（なし）。"""
+               at: datetime | None = None, strict: bool = False) -> None:
+        """1件足す。失敗しても例外は出さない（元の操作を止めない）。actor が None ならログイン前（なし）。
+        strict のときは、記録できなければ例外を出す（記録できないなら変えない、復旧用のコマンドで使う）。"""
         try:
             if result not in RESULTS:
                 raise ValueError(f"結果は {RESULTS} のどれかにしてください: {result}")
@@ -122,6 +124,8 @@ class Auditor:
                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
         except Exception:  # noqa: BLE001  記録できなくても、元の操作は止めない
             log.exception("監査ログに記録できませんでした（%s）", action)
+            if strict:
+                raise
 
     def purge(self, now: datetime | None = None) -> int:
         """保存期間を過ぎた記録をまとめて消す。消したら、そのこと自体を1件記録する。"""
