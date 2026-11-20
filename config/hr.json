@@ -1,0 +1,5 @@
+{
+  "_説明": "休職中の人の扱い（S-52 の「人事」。K-054）。on_leave_login はログインできるか（true / false）、on_leave_permissions は権限（「そのまま」か「社員の役割だけ」）。退職した人はいつもログインできない",
+  "on_leave_login": true,
+  "on_leave_permissions": "そのまま"
+}

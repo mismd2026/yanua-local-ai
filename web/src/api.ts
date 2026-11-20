@@ -160,6 +160,7 @@ export const JOB_NAMES: Record<string, string> = {
   "paper-plan": "PDF の仕分けの予定",
   "paper-convert": "PDF の変換",
   meeting: "議事録",
+  hr: "人事データ",
 };
 export const jobName = (kind: string) => JOB_NAMES[kind] ?? kind;
 
@@ -246,7 +247,7 @@ export interface WorkFile {
 
 // ファイルのアップロード。本文にファイルをそのまま送る（multipart は使わない。docs/screens.md）。
 // 録画は大きいので、送った量を onProgress（0〜100）で知らせる。そのため fetch ではなく XMLHttpRequest を使う
-export function uploadFile(kind: "pdf" | "recording" | "segments", file: File, onProgress?: (pct: number) => void): Promise<WorkFile> {
+export function uploadFile(kind: "pdf" | "recording" | "segments" | "hr", file: File, onProgress?: (pct: number) => void): Promise<WorkFile> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/uploads?kind=${kind}&name=${encodeURIComponent(file.name)}`);
@@ -439,7 +440,7 @@ export interface AuditPage {
 }
 
 // 設定の画面（S-52。K-042）
-export type SettingKey = "identity" | "audit" | "models" | "files";
+export type SettingKey = "identity" | "audit" | "models" | "files" | "hr";
 
 export interface SettingSection {
   key: SettingKey;
@@ -546,4 +547,48 @@ export interface AdminDocuments {
 export interface DocImpact {
   doc_id: string; detail: string; checked: number; too_many: boolean; gain: number; lose: number;
   groups: { name: string; members: number; gain: number; lose: number; can_see: number }[];
+}
+
+// S-51 人事データ
+export type HrStatus = "在籍" | "休職" | "退職";
+export interface HrMapping { columns: Record<string, string>; status_values?: Record<string, string>; sheet?: string }
+export interface HrOverview {
+  last: { imported_at: string; source: string; active: number; inactive: number; age_days: number } | null;
+  history: { imported_at: string; source: string; kind: string; by: string; added: number; changed: number; removed: number }[];
+  backups: { backup_id: number; saved_at: string; source: string; total: number; active: number }[];
+  mappings: Record<string, HrMapping>;
+  problems: { where: string; message: string }[];
+  fields: Record<string, string>;
+  required: string[];
+  statuses: HrStatus[];
+  leave: { login: boolean; permissions: string };
+  can_import: boolean;
+  can_view: boolean;
+  keep: number;
+}
+export interface HrInspect { headers: string[]; sheets: string[]; draft: Record<string, string>; status_values: { value: string; guess: string }[] }
+export interface HrPerson { employee_no: string; name: string; dept: string; status: string; changes?: string[] }
+export interface HrPreview {
+  source: string;
+  rows: number;
+  errors: { line: number; message: string }[];
+  error_count: number;
+  read_columns: string[];
+  ignored_columns: string[];
+  counts: Record<string, number>;
+  added: { count: number; first: HrPerson[] };
+  changed: { count: number; first: HrPerson[]; by_field: Record<string, number> };
+  removed: { count: number; first: HrPerson[] };
+  groups: { group_id: string; name: string; join: number; leave: number }[];
+  lockout: boolean;
+  ok: boolean;
+  retired_members: number;
+  committed?: boolean;
+  reason?: string;
+  kind?: string;
+}
+export interface HrEmployees {
+  employees: { employee_no: string; name: string; dept: string; status: string; changed_at: string }[];
+  total: number;
+  departments: string[];
 }

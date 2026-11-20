@@ -100,15 +100,16 @@ def test_only_admins(settings):
         assert "settings.view" in c.get("/api/me").json()["permissions"]
 
 
-def test_list_shows_four_sections_using_defaults(client):
+def test_list_shows_five_sections_using_defaults(client):
     r = client.get("/api/admin/settings").json()
-    assert [s["key"] for s in r["sections"]] == ["identity", "audit", "models", "files"]
+    assert [s["key"] for s in r["sections"]] == ["identity", "audit", "models", "files", "hr"]
     assert all(s["status"]["using"] == "default" and s["applied"] for s in r["sections"])
     assert r["pending_restart"] == []
     assert r["links"][0]["path"] == "/paper/sort"
     by = {s["key"]: s for s in r["sections"]}
     assert by["audit"]["values"] == {"keep_days": 365, "keep_body": False}
     assert by["files"]["values"] == {"work_max_gb": 20, "file_keep_hours": 24}
+    assert by["hr"]["values"] == {"on_leave_login": True, "on_leave_permissions": "そのまま"}   # 今のまま（K-054）
     assert by["identity"]["values"]["preset"] == "標準"
     # 秘密の値はこの画面に出さない
     text = json.dumps(r, ensure_ascii=False).lower()

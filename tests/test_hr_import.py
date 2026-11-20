@@ -45,7 +45,7 @@ def test_import_keeps_only_needed_columns(db):
     assert set(report.dropped_columns) == {"氏名カナ", "生年月日", "入社日"}
     cols = [r[1] for r in db.execute("PRAGMA table_info(employees)")]
     # 保存するのは本人確認に使う列と、その照合用の形（正規化した氏名・姓・部署）だけ
-    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email",
+    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email", "kana", "status", "changed_at",
                     "name_key", "surname_key", "dept_key"]
 
 
@@ -113,7 +113,7 @@ def test_excel_and_json(db, tmp_path):
 
 def test_mapping_draft_from_headers():
     draft = hr.suggest_mapping(["社員番号", "氏名", "氏名カナ", "所属", "所属コード", "在籍区分", "生年月日"])
-    assert draft["columns"] == {"employee_no": "社員番号", "name": "氏名", "dept": "所属",
+    assert draft["columns"] == {"employee_no": "社員番号", "name": "氏名", "kana": "氏名カナ", "dept": "所属",
                                 "dept_code": "所属コード", "status": "在籍区分"}
 
 

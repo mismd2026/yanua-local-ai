@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--department", required=True, help="質問する人の部署")
     llm_options(s)
 
-    s = sub.add_parser("hr-mapping-draft", help="人事データの列名から対応表の下書きを作る（中身は読まない）")
+    s = sub.add_parser("hr-mapping-draft", help="人事データの列名から対応表の下書きを作る（読むのは列名と在籍状態の列の値だけ）")
     s.add_argument("source", type=Path)
     s.add_argument("--sheet", help="Excelのシート名（省略時は最初のシート）")
     s.add_argument("--use-llm", action="store_true", help="決まったルールで当たらない列だけ、Ollamaに候補を聞く")
@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("hr-import", help="人事システムの出力（CSV / Excel / JSON）を取り込む")
     s.add_argument("source", type=Path)
     s.add_argument("--mapping", type=Path, required=True, help="列名の対応表（JSON）")
+    s.add_argument("--audit-db", type=Path, default=None, help="監査ログの保存先（既定: --db と同じフォルダの audit.db）")
 
     s = sub.add_parser("helpdesk", help="社内向けヘルプデスク（会話）")
     s.add_argument("--account", default="", help="ログイン中のアカウント（SSOの代わり）")
@@ -254,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     store = Store(args.db)
     try:
         if args.command == "hr-mapping-draft":
+            from .hr import guess_status as hr_guess
             from .hr import read_rows, suggest_mapping
 
             rows = read_rows(args.source, args.sheet)
@@ -262,17 +264,40 @@ def main(argv: list[str] | None = None) -> int:
             draft = suggest_mapping(headers, llm)
             if args.sheet:
                 draft["sheet"] = args.sheet
+            if draft["columns"].get("status"):
+                col = draft["columns"]["status"]
+                values = sorted({r.get(col, "") for r in rows if r.get(col, "")})[:50]
+                draft["status_values"] = {v: hr_guess(v) for v in values}
             print(json.dumps(draft, ensure_ascii=False, indent=2))
-            print("\n※ 下書きです。列の対応と active_values（在籍とみなす値）を確認してから、JSONファイルとして保存してください。")
+            print("\n※ 下書きです。列の対応と status_values（ファイルの値を 在籍・休職・退職 のどれに当てるか。空のものは選ぶ）を"
+                  "確認してから、JSONファイルとして保存してください。")
             return 0
         if args.command == "hr-import":
+            import getpass
+
+            from . import audit, hrimport
             from .hr import HRImportError, import_employees, load_mapping
 
+            # 画面と同じ処理（yanua/hrimport.py）を通す。取り込んだことは監査ログに残す（開けなければ取り込まない）
             try:
-                report = import_employees(store.db, args.source, load_mapping(args.mapping))
+                auditor = audit.Auditor(args.audit_db or Path(args.db).parent / "audit.db")
+            except Exception as e:  # noqa: BLE001
+                print(f"監査ログを開けないので、取り込みませんでした：{e}")
+                return 1
+            try:
+                os_user = getpass.getuser()
+            except (OSError, KeyError):
+                os_user = "（わからない）"
+            try:
+                report = import_employees(store.db, args.source, load_mapping(args.mapping),
+                                          by=f"{audit.SERVER_OP}（OS ユーザー {os_user}）")
             except HRImportError as e:
                 print(e)
                 return 1
+            if report.result is not None:
+                for r in hrimport.audit_records(report.result, args.source.name):
+                    auditor.record(r["action"], actor=audit.SERVER_OP, actor_name=f"OS ユーザー {os_user}", kind=audit.SERVER_OP,
+                                   ip="", target=r["target"], result=r["result"], detail=f"コマンド：{r['detail']}")
             print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
             return 1 if report.errors else 0
         if args.command == "helpdesk":

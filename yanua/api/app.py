@@ -72,7 +72,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response as RawRespons
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, ValidationError
 
-from .. import audit, hr, models, visits
+from .. import audit, hr, hrimport, models, visits
 from ..answer import ANSWERED, NO_PERMISSION, NOT_FOUND, Answer, answer_question
 from ..llm import ChatModel, LLMError, OllamaChat
 from ..search import search
@@ -317,7 +317,25 @@ UPLOAD_KINDS = {
     "pdf": ("paper", "pdf_max_bytes", (".pdf",)),
     "recording": ("meetings", "recording_max_bytes", (".mp4", ".m4a", ".mp3", ".wav", ".webm", ".mov", ".mkv", ".aac")),
     "segments": ("meetings", "segments_max_bytes", (".json",)),
+    "hr": ("hr.import", "hr_max_bytes", (".csv", ".xlsx", ".xlsm", ".json")),   # 人事データ（S-51）
 }
+
+
+class HrInspect(BaseModel):          # S-51
+    file_id: str = Field(min_length=1, max_length=64)
+    sheet: str | None = Field(default=None, max_length=100)
+    status_column: str | None = Field(default=None, max_length=200)
+
+
+class HrMapping(BaseModel):
+    columns: dict[str, str] = Field(max_length=20)
+    status_values: dict[str, str] | None = Field(default=None, max_length=200)
+    sheet: str | None = Field(default=None, max_length=100)
+
+
+class HrRun(BaseModel):
+    file_id: str = Field(min_length=1, max_length=64)
+    mapping: HrMapping
 
 
 class CheckIn(BaseModel):
@@ -374,7 +392,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         found = access.problems(access.load(db))
     if found:
         raise access.AccessError("権限の設定に誤りがあるので起動しません：" + "／".join(f"{w}: {m}" for w, m in found), found)
-    engine = access.Engine(connect)
+    engine = access.Engine(connect, leave_policy=lambda: settings.on_leave_permissions)
 
     def can(user: User, permission: str, target: tuple[str, str] | None = None) -> bool:
         """判定の1か所（yanua/access.py の Engine.can）。target が None なら、その機能を使えるか。"""
@@ -752,7 +770,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     def current_user(request: Request) -> User:
         with closing(connect()) as db:
-            user = auth.user_for_token(db, request.cookies.get(auth.COOKIE, ""), engine, settings.session_idle_minutes)
+            user = auth.user_for_token(db, request.cookies.get(auth.COOKIE, ""), engine, settings.session_idle_minutes,
+                                       settings.on_leave_login)
         if not user:
             raise not_logged_in()
         return user
@@ -810,6 +829,10 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 # 入力された社員番号は対象に残す（パスワードはない。トークンは作っていない）
                 auditor.record("auth.login", target=req.employee_no[:20], result=audit.FAILED,
                                detail="開発用ログイン：その社員番号ではログインできません")
+                raise ApiError(401, "login_failed", "その社員番号ではログインできません")
+            if person.get("status") == "休職" and not settings.on_leave_login:
+                auditor.record("auth.login", target=req.employee_no[:20], result=audit.FAILED,
+                               detail="開発用ログイン：休職中の人はログインできない設定です")
                 raise ApiError(401, "login_failed", "その社員番号ではログインできません")
             token = auth.create_session(db, person["employee_no"], settings.session_max_hours)
         set_cookie(response, token)
@@ -1792,6 +1815,226 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return RawResponse(body, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                            headers={"Content-Disposition": f"attachment; filename=\"minutes.docx\"; filename*=UTF-8''{quote(name)}",
                                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    # ------------------------------------------------ 人事の画面（S-51。取り込みは hr.import、一覧は hr.view）
+
+    HR_LOCK = threading.Lock()        # 確定・戻すは1つずつ（権限の変更 access.CHANGE_LOCK とも重ねない）
+    MAPPING_NAME_MAX = 40
+
+    def hr_mapping_problems(text: str) -> list[tuple[str, str]]:
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            return [("", f"JSON として読めません（{e}）")]
+        if not isinstance(data, dict) or not isinstance(data.get("mappings"), dict):
+            return [("mappings", "{\"mappings\": {\"名前\": {...}}} の形にしてください")]
+        out = []
+        for name, m in data["mappings"].items():
+            if not str(name).strip() or len(str(name)) > MAPPING_NAME_MAX:
+                out.append((f"mappings.{name}", f"名前は1〜{MAPPING_NAME_MAX}文字にしてください"))
+            out += [(f"{name}: {w}" if w else str(name), msg) for w, msg in hrimport.mapping_problems(m)]
+        return out
+
+    def hr_mappings_store():
+        from ..settingfiles import SettingFile
+
+        return SettingFile("hr_mappings.json", settings.hr_mappings_config, settings.settings_dir, hr_mapping_problems,
+                           audit=audit_setting, audit_action="hr.mappings")
+
+    def hr_mappings() -> tuple[dict, list[dict]]:
+        """保存した対応づけ（名前 → 対応づけ）と、読めないときの理由。読めなくても起動は止めない（画面に理由を出す）。"""
+        st = hr_mappings_store()
+        try:
+            text = st.read_text()
+        except OSError as e:
+            return {}, [{"where": "", "message": f"対応づけのファイルを読めません（{e}）"}]
+        found = hr_mapping_problems(text)
+        if found:
+            return {}, [{"where": w, "message": m} for w, m in found]
+        return json.loads(text)["mappings"], []
+
+    def hr_view_scope(user: User):
+        depts = engine.departments(user.employee_no, user.dept, "hr.view")
+        return None if depts == access.ALL else depts
+
+    def hr_problems() -> list[dict]:
+        """人事データについて、画面の上に出す理由（起動は止めない。今の人事データのまま動く）。"""
+        out = []
+        _, bad = hr_mappings()
+        out += [{"where": f"対応づけ {x['where']}".strip(), "message": x["message"]} for x in bad]
+        if "hr" in bad_settings:
+            out += [{"where": "設定「人事」", "message": m} for _w, m in bad_settings["hr"]]
+        try:
+            with closing(connect()) as db:
+                hrimport.ensure_schema(db)
+                last = hr.last_import(db)
+        except sqlite3.Error as e:
+            return out + [{"where": "人事データ", "message": f"人事データを読めません（{e}）"}]
+        if last is None:
+            out.append({"where": "人事データ", "message": "人事データをまだ取り込んでいません"})
+        return out
+
+    @app.get("/api/hr/status")
+    def hr_status(user: User = Depends(current_user)):
+        if not (can(user, "hr.import") or can(user, "hr.view")):
+            raise deny(user, "hr.import か hr.view", None)
+        with closing(connect()) as db:
+            hrimport.ensure_schema(db)
+            last = hr.last_import(db)
+            hist = hrimport.history(db)
+            backs = hrimport.backups(db) if can(user, "hr.import") else []
+        mappings, _ = hr_mappings()
+        return {"last": last, "history": hist if can(user, "hr.import") else [], "backups": backs,
+                "mappings": mappings if can(user, "hr.import") else {}, "problems": hr_problems(),
+                "fields": {f: hr.LABELS[f] for f in hr.FIELDS}, "required": list(hr.REQUIRED), "statuses": list(hr.STATUSES),
+                "leave": {"login": settings.on_leave_login, "permissions": settings.on_leave_permissions},
+                "can_import": can(user, "hr.import"), "can_view": can(user, "hr.view"), "keep": hrimport.HR_KEEP}
+
+    @app.post("/api/hr/inspect")
+    def hr_inspect(req: HrInspect, user: User = Depends(require("hr.import"))):
+        """上げたファイルの列名・シート・対応づけの下書き。status_column を渡すと、その列に出てくる値（50種類まで）と下書き。
+        読むのは列名と在籍状態の列だけ（ほかの列の値は読まない）。"""
+        path = Path(my_file(req.file_id, user, "hr")["path"])
+        sheets: list[str] = []
+        try:
+            if path.suffix.lower() in (".xlsx", ".xlsm"):
+                from openpyxl import load_workbook
+
+                wb = load_workbook(path, read_only=True)
+                sheets = list(wb.sheetnames)
+                wb.close()
+            heads = hrimport.headers(path, req.sheet or None)
+            values: list[dict] = []
+            if req.status_column:
+                if req.status_column not in heads:
+                    raise ApiError(400, "invalid_mapping", f"列「{req.status_column}」がファイルにありません")
+                seen: dict[str, None] = {}
+                for _line, r in hrimport._iter(path, [req.status_column], req.sheet or None):
+                    v = r.get(req.status_column, "")
+                    if v and v not in seen:
+                        seen[v] = None
+                        if len(seen) >= 50:
+                            break
+                values = [{"value": v, "guess": hr.guess_status(v)} for v in seen]
+        except hr.HRImportError as e:
+            raise ApiError(400, "invalid_file", str(e)) from e
+        return {"headers": heads, "sheets": sheets, "draft": hr.suggest_mapping(heads)["columns"], "status_values": values}
+
+    def check_mapping(m: HrMapping) -> dict:
+        data = m.model_dump(exclude_none=True)
+        found = hrimport.mapping_problems(data)
+        if found:
+            raise ApiError(400, "invalid_mapping", "対応づけに直すところがあります", [{"where": w, "message": msg} for w, msg in found])
+        return data
+
+    @app.put("/api/hr/mappings/{name}")
+    def hr_mapping_save(name: str, req: HrMapping, user: User = Depends(require("hr.import"))):
+        name = name.strip()
+        if not name or len(name) > MAPPING_NAME_MAX:
+            raise ApiError(400, "invalid_mapping", f"名前は1〜{MAPPING_NAME_MAX}文字にしてください",
+                           [{"where": "name", "message": f"1〜{MAPPING_NAME_MAX}文字にしてください"}])
+        data = check_mapping(req)
+        st = hr_mappings_store()
+        verb = "直した" if name in hr_mappings()[0] else "足した"
+
+        def put(text: str) -> str:
+            body = json.loads(text) if not hr_mapping_problems(text) else {"mappings": {}}
+            body["mappings"][name] = data
+            return json.dumps(body, ensure_ascii=False, indent=2) + "\n"
+        try:
+            version = st.save(put, user.employee_no, f"人事データの対応づけ「{name}」を{verb}")
+        except SettingError as e:
+            raise ApiError(400, "invalid_mapping", "対応づけに直すところがあります",
+                           [{"where": w, "message": msg} for w, msg in e.problems]) from e
+        return {"ok": True, "version": version, "mappings": hr_mappings()[0]}
+
+    @app.delete("/api/hr/mappings/{name}")
+    def hr_mapping_delete(name: str, user: User = Depends(require("hr.import"))):
+        mappings, _ = hr_mappings()
+        if name not in mappings:
+            raise not_found("対応づけ")
+
+        def drop(text: str) -> str:
+            body = json.loads(text)
+            body["mappings"].pop(name, None)
+            return json.dumps(body, ensure_ascii=False, indent=2) + "\n"
+        hr_mappings_store().save(drop, user.employee_no, f"人事データの対応づけ「{name}」を消した")
+        return {"ok": True, "mappings": hr_mappings()[0]}
+
+    def hr_job(ctx: JobContext, params: dict) -> dict:
+        """試し（preview）・確定（commit）・前に戻す（restore、restore_preview）。"""
+        mode = params["mode"]
+        leave = settings.on_leave_permissions
+        db = sqlite3.connect(str(settings.db_path), timeout=60)
+        try:
+            ctx.progress(5, "読み込み")
+
+            def progress(rows: int) -> None:
+                ctx.progress(min(60, 5 + rows // 20000), f"読み込み（{rows:,}行）")
+            if mode in ("restore", "restore_preview"):
+                try:
+                    if mode == "restore_preview":
+                        out = hrimport.preview_restore(db, leave).as_dict()
+                    else:
+                        with HR_LOCK, access.CHANGE_LOCK:
+                            result = hrimport.restore(db, params["by"], leave, today().isoformat())
+                        out = result.as_dict()
+                except hrimport.NoBackup as e:
+                    raise JobFailed(str(e)) from e
+            else:
+                f = job_file(params["owner"], params["file_id"], "hr")
+                path = Path(f["path"])
+                try:
+                    if mode == "preview":
+                        out = hrimport.preview(db, path, params["mapping"], leave, progress).as_dict()
+                    else:
+                        with HR_LOCK, access.CHANGE_LOCK:
+                            ctx.progress(10, "確定（入れ替え）")
+                            result = hrimport.commit(db, path, params["mapping"], params["by"], leave, today().isoformat(), progress)
+                        out = result.as_dict()
+                except hr.HRImportError as e:
+                    raise JobFailed(str(e)) from e
+                out["source"] = f["name"]
+            if mode in ("commit", "restore"):
+                source = out["source"] if mode == "commit" else "1つ前に戻す"
+                for r in hrimport.audit_records(result, source):
+                    auditor.record(r["action"], actor=params["by"], target=r["target"],
+                                   result=audit.OK if r["result"] == "成功" else audit.FAILED, detail=r["detail"], ip="")
+        finally:
+            db.close()
+        ctx.progress(100, "完了")
+        return out
+
+    jobs.register("hr", hr_job)
+
+    @app.post("/api/hr/preview", status_code=202)
+    def hr_preview(req: HrRun, user: User = Depends(require("hr.import"))):
+        my_file(req.file_id, user, "hr")
+        return jobs.submit("hr", user.employee_no, {"mode": "preview", "file_id": req.file_id, "owner": user.employee_no,
+                                                    "mapping": check_mapping(req.mapping), "by": user.employee_no})
+
+    @app.post("/api/hr/imports", status_code=202)
+    def hr_commit(req: HrRun, user: User = Depends(require("hr.import"))):
+        my_file(req.file_id, user, "hr")
+        return jobs.submit("hr", user.employee_no, {"mode": "commit", "file_id": req.file_id, "owner": user.employee_no,
+                                                    "mapping": check_mapping(req.mapping), "by": user.employee_no})
+
+    @app.post("/api/hr/restore/preview", status_code=202)
+    def hr_restore_preview(user: User = Depends(require("hr.import"))):
+        return jobs.submit("hr", user.employee_no, {"mode": "restore_preview", "owner": user.employee_no, "by": user.employee_no})
+
+    @app.post("/api/hr/restore", status_code=202)
+    def hr_restore(user: User = Depends(require("hr.import"))):
+        return jobs.submit("hr", user.employee_no, {"mode": "restore", "owner": user.employee_no, "by": user.employee_no})
+
+    @app.get("/api/hr/employees")
+    def hr_employees(q: str = "", dept: str = "", offset: int = 0, user: User = Depends(require("hr.view"))):
+        """一覧（hr.view の対象の部署の人だけ）：社員番号・氏名・部署・在籍状態・最後に変わった日。"""
+        scope = hr_view_scope(user)
+        with closing(connect()) as db:
+            out = hrimport.employees(db, scope, q[:100], dept[:100], max(0, offset), 100)
+            out["departments"] = hrimport.department_names(db, scope)
+        return out
 
     # ------------------------------------------------ 設定の画面（S-52。管理者だけ。K-042）
 

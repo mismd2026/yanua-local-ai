@@ -88,6 +88,13 @@ export const MENU: MenuItem[] = [
     needs: ["documents.manage"],
   },
   {
+    id: "S-51",
+    path: "/admin/hr",
+    label: "人事データ",
+    description: "人事アプリから出したファイルを取り込みます。変わる人と権限への効き方を確かめてから確定します。社員の一覧も見られます。",
+    needs: ["hr.import", "hr.view"],
+  },
+  {
     id: "S-52",
     path: "/admin/settings",
     label: "設定",
