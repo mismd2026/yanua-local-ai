@@ -369,6 +369,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     # 権限の設定に誤りがあれば起動しない（権限と本人確認は止める、の決まり）
     with closing(connect()) as db:
         access_migrated = access.migrate_if_empty(db, roles)
+        access_upgraded = access.upgrade(db)   # 前の版のデータを今の版に合わせる（社員の対象 → メンバー自身の所属）
         access.sync_targets(db)          # 部署・グループ・機能の対象をそろえる
         found = access.problems(access.load(db))
     if found:
@@ -399,6 +400,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     if access_migrated:
         auditor.record("roles.migrate", actor=audit.SYSTEM, actor_name=audit.SYSTEM, kind=audit.SYSTEM, ip="",
                        detail="初めての起動：roles.json から役割・グループ・対象を作った（docs/access-model.md）")
+    for done in access_upgraded:
+        auditor.record("roles.migrate", actor=audit.SYSTEM, actor_name=audit.SYSTEM, kind=audit.SYSTEM, ip="", detail=done)
 
     def audit_by(user: User, action: str, **kw) -> None:
         auditor.record(action, actor=user.employee_no, actor_name=user.name, **kw)

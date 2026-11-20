@@ -91,6 +91,29 @@ describe("S-50 文書", () => {
     expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ targets: ["special:all"], required: "documents.view", external: false });
   });
 
+  it("確かめで「やめる」を押すと、欄を保存されている値に戻す", async () => {
+    const impact = { doc_id: "K01", detail: "月次決算の手順の公開先 経理部→全社", checked: 6, too_many: false, gain: 5, lose: 0, groups: [] };
+    const { calls } = fakeApi({
+      "GET /api/admin/documents": VIEW, "GET /api/documents/ingest/sources": { sources: [] },
+      "POST /api/admin/documents/preview": impact,
+    });
+    const user = userEvent.setup();
+    render(<DocumentsPage />);
+    await user.click(await screen.findByRole("button", { name: "月次決算の手順" }));
+    const editor = screen.getByRole("region", { name: "文書「月次決算の手順」" });
+    await user.click(within(editor).getByLabelText("部署：経理部"));
+    await user.click(within(editor).getByLabelText("全社"));
+    await user.selectOptions(within(editor).getByLabelText("見るのに要る権限"), "infra.docs.view");
+    await user.click(within(editor).getByRole("button", { name: "変更を確かめる" }));
+    const box = await within(editor).findByRole("region", { name: "変更の確かめ" });
+    await user.click(within(box).getByRole("button", { name: "やめる" }));
+    expect(within(editor).queryByRole("region", { name: "変更の確かめ" })).toBeNull();
+    expect(within(editor).getByLabelText("部署：経理部")).toBeChecked();
+    expect(within(editor).getByLabelText("全社")).not.toBeChecked();
+    expect(within(editor).getByLabelText("見るのに要る権限")).toHaveValue("documents.view");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
   it("外す・外したものから戻す", async () => {
     const removedDoc = doc("K02", "支払処理", "経理部", [["dept:経理部", "経理部"]], { removed_at: "2026-11-19T02:00:00+00:00", removed_by: "10005" });
     const { calls } = fakeApi({

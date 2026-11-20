@@ -3,7 +3,8 @@
 - 権限：できる操作の最小単位（yanua/permissions.py。コードで決める）
 - 役割：権限の束（roles）
 - 対象：権限が効く先（targets）。種類は 部署・グループ・機能・システム・サーバー。まとめたもの（target_sets）。
-        特別な対象「メンバー自身の部署」（special:self_dept）と「全社」（special:all）
+        特別な対象「メンバー自身の所属」（special:self。その人の部署と、入っているグループ）、
+        「メンバー自身の部署」（special:self_dept。部署だけ）と「全社」（special:all）
 - グループ：役割 × 対象 を受け取る（group_grants）。権限は人に直接は与えない。入れ子は作らない
 - アカウント：グループのメンバー（人 person・システム system）。手で入れたメンバー（group_members。期限つき）と、
         グループの決まり（rule：全員・部署）で自動で入るメンバーを、区別して持つ
@@ -30,8 +31,8 @@ from . import hr
 from .permissions import DEFAULT_ROLES, DOCUMENT_PERMISSIONS, PERMISSIONS
 
 PERSON, SYSTEM = "person", "system"
-SELF_DEPT, ALL = "special:self_dept", "special:all"
-SPECIAL_NAMES = {SELF_DEPT: "メンバー自身の部署", ALL: "全社"}
+SELF, SELF_DEPT, ALL = "special:self", "special:self_dept", "special:all"
+SPECIAL_NAMES = {SELF: "メンバー自身の所属（部署と、入っているグループ）", SELF_DEPT: "メンバー自身の部署", ALL: "全社"}
 TARGET_KINDS = ("department", "group", "feature", "system", "server", "special")
 EVERYONE = "全員"     # 決まりの中身：在籍している人の全員
 MIGRATED_BY = "（移し替え）"
@@ -124,7 +125,7 @@ def _bump(db: sqlite3.Connection) -> None:
 def migrate_if_empty(db: sqlite3.Connection, role_config) -> bool:
     """DB が空なら、今の roles.json（RoleConfig）から役割・グループ・対象を作る。作ったら True。
 
-    社員 → 「社員」（全員）× メンバー自身の部署
+    社員 → 「社員」（全員）× メンバー自身の所属（部署と、入っているグループ）
     総務 → 「総務」（決まり：roles.json の部署）× 全社
     情シス → 「情シス・ヘルプデスク」（決まり：部署）× 全社。役割は「ヘルプデスク担当」
     人事 → 「人事」× 全社
@@ -152,7 +153,7 @@ def migrate_if_empty(db: sqlite3.Connection, role_config) -> bool:
             db.execute("INSERT INTO access_groups VALUES (?, ?, ?, ?)", (gid, name, desc, json.dumps(rule, ensure_ascii=False) if rule else None))
             for role in grants:
                 db.execute("INSERT INTO group_grants (group_id, role_id, target_id) VALUES (?, ?, ?)",
-                           (gid, role_ids[role], SELF_DEPT if role == "社員" else ALL))
+                           (gid, role_ids[role], SELF if role == "社員" else ALL))
             for no in members:
                 _ensure_person(db, no)
                 db.execute("INSERT OR IGNORE INTO group_members VALUES (?, ?, NULL, ?, ?)", (gid, no, MIGRATED_BY, now))
@@ -175,8 +176,31 @@ def migrate_if_empty(db: sqlite3.Connection, role_config) -> bool:
         # システムアカウント（画面には入らない）。受付端末の端末トークンの移し替えは次の PR 以降
         for aid, name in (("sys:kiosk", "受付端末"), ("sys:update-check", "更新の確認（S-53）")):
             db.execute("INSERT OR IGNORE INTO accounts VALUES (?, 'system', ?, ?)", (aid, name, now))
+        db.execute("INSERT OR IGNORE INTO access_meta (key, value) VALUES ('self_target', '1')")
         _bump(db)
     return True
+
+
+def upgrade(db: sqlite3.Connection) -> list[str]:
+    """前の版で作ったデータを、今の版に合わせる（起動のたびに呼ぶ。済んだものは2回はしない）。したことの説明を返す。
+
+    - 特別な対象「メンバー自身の所属（部署と、入っているグループ）」を作り、役割「社員」の
+      「メンバー自身の部署」を、これに置き換える（グループに公開した文書を、そのグループの人が見られるように。S-50）。
+      1回だけ。あとで画面で「メンバー自身の部署」に戻しても、また置き換えはしない
+    """
+    ensure_schema(db)
+    done = []
+    with db:
+        for special, name in SPECIAL_NAMES.items():
+            db.execute("INSERT OR IGNORE INTO targets (target_id, kind, name, ref) VALUES (?, 'special', ?, '')", (special, name))
+        if db.execute("SELECT 1 FROM access_meta WHERE key = 'self_target'").fetchone() is None:
+            rows = db.execute("UPDATE group_grants SET target_id = ? WHERE target_id = ? AND role_id IN "
+                              "(SELECT role_id FROM access_roles WHERE name = '社員')", (SELF, SELF_DEPT)).rowcount
+            db.execute("INSERT INTO access_meta (key, value) VALUES ('self_target', '1')")
+            if rows:
+                _bump(db)
+                done.append(f"役割「社員」の対象を「{SPECIAL_NAMES[SELF_DEPT]}」から「{SPECIAL_NAMES[SELF]}」に置き換えた（{rows}件）")
+    return done
 
 
 def _ensure_person(db: sqlite3.Connection, employee_no: str) -> None:
@@ -303,9 +327,9 @@ def _rule_match(rule: dict | None, dept: str) -> str | None:
     return None
 
 
-def compute_grants(data: dict, account_id: str, dept: str) -> list[Grant]:
-    """その人が持つ権限と出どころ（データだけから決める。変更を試すときにも使う）。期限の切れたものも入っている。"""
-    result = []
+def compute_memberships(data: dict, account_id: str, dept: str) -> dict[str, tuple[str, str | None]]:
+    """その人が入っているグループ：{group_id: (入り方, 期限)}。期限の切れたものも入っている。"""
+    out = {}
     manual = {m["group_id"]: m for m in data["members"] if m["account_id"] == account_id}
     for gid, g in data["groups"].items():
         via, expires = None, None
@@ -315,8 +339,16 @@ def compute_grants(data: dict, account_id: str, dept: str) -> list[Grant]:
         if gid in manual:
             if via is None or manual[gid]["expires_at"] is None:
                 via, expires = ("手で入れた", manual[gid]["expires_at"]) if via is None else (via, None)
-        if via is None:
-            continue
+        if via is not None:
+            out[gid] = (via, expires)
+    return out
+
+
+def compute_grants(data: dict, account_id: str, dept: str) -> list[Grant]:
+    """その人が持つ権限と出どころ（データだけから決める。変更を試すときにも使う）。期限の切れたものも入っている。"""
+    result = []
+    for gid, (via, expires) in compute_memberships(data, account_id, dept).items():
+        g = data["groups"][gid]
         for gr in data["grants"]:
             if gr["group_id"] != gid or gr["role_id"] not in data["roles"]:
                 continue
@@ -338,6 +370,7 @@ class Engine:
         self._connect = connect
         self._today = today or (lambda: datetime.now().astimezone().date().isoformat())
         self._cache: dict[tuple[str, str], tuple[int, list[Grant]]] = {}
+        self._groups: dict[tuple[str, str], tuple[int, dict]] = {}
         self._data: tuple[int, dict] | None = None
         self._lock = threading.Lock()
 
@@ -346,6 +379,7 @@ class Engine:
         if self._data is None or self._data[0] != gen:
             self._data = (gen, load(db))
             self._cache.clear()
+            self._groups.clear()
         return self._data
 
     def grants_for(self, account_id: str, dept: str) -> list[Grant]:
@@ -359,6 +393,17 @@ class Engine:
             self._cache[(account_id, dept)] = (gen, result)
             return result
 
+    def member_groups(self, account_id: str, dept: str) -> set[str]:
+        """今入っているグループの番号（期限の切れたものは数えない）。「メンバー自身の所属」の判定に使う。"""
+        with self._lock, self._connect() as db:
+            gen, data = self._load(db)
+            hit = self._groups.get((account_id, dept))
+            if not hit or hit[0] != gen:
+                hit = (gen, compute_memberships(data, account_id, dept))
+                self._groups[(account_id, dept)] = hit
+        today = self._today()
+        return {gid for gid, (_, exp) in hit[1].items() if not _expired(exp, today)}
+
     def _live(self, account_id: str, dept: str) -> list[Grant]:
         today = self._today()
         return [g for g in self.grants_for(account_id, dept) if not _expired(g.expires_at, today)]
@@ -366,10 +411,14 @@ class Engine:
     def can(self, account_id: str, dept: str, permission: str, target: tuple[str, str] | None = None) -> Decision:
         """target は (種類, 参照)（例 ("department", "営業部")）。None なら「どこかに対して持っているか」（機能を使えるか）。"""
         reasons = []
+        mine = None
         for g in self._live(account_id, dept):
             if g.permission != permission:
                 continue
-            if target is None or g.target == ALL or (g.target == SELF_DEPT and target == ("department", dept)) \
+            if g.target == SELF and target is not None and target[0] == "group" and mine is None:
+                mine = self.member_groups(account_id, dept)
+            if target is None or g.target == ALL or (g.target in (SELF, SELF_DEPT) and target == ("department", dept)) \
+                    or (g.target == SELF and target[0] == "group" and target[1] in mine) \
                     or (g.target_kind == target[0] and g.target_ref == target[1]):
                 reasons.append(g.reason())
         return Decision(bool(reasons), reasons)
@@ -386,7 +435,7 @@ class Engine:
                 continue
             if g.target == ALL:
                 return ALL
-            if g.target == SELF_DEPT and dept:
+            if g.target in (SELF, SELF_DEPT) and dept:
                 out.add(dept)
             elif g.target_kind == "department":
                 out.add(g.target_ref)
@@ -419,9 +468,11 @@ class Engine:
             have = out.setdefault(g.permission, set())
             if g.target == ALL:
                 out[g.permission] = None
-            elif g.target == SELF_DEPT:
+            elif g.target in (SELF, SELF_DEPT):
                 if dept:
                     have.add(f"dept:{dept}")
+                if g.target == SELF:
+                    have.update(f"group:{gid}" for gid in self.member_groups(account_id, dept))
             elif g.target_kind in ("department", "group"):
                 have.add(f"{'dept' if g.target_kind == 'department' else 'group'}:{g.target_ref}")
         return DocScope.of(out)

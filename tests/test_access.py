@@ -73,7 +73,7 @@ def test_migration_builds_roles_groups_and_targets(client):
     v = view(client)
     assert [g["name"] for g in v["groups"]] == ["社員", "総務", "情シス・ヘルプデスク", "人事", "管理者", "監査"]
     assert group(v, "社員")["rule"] == {"all": True}
-    assert [(x["role"], x["target"]) for x in group(v, "社員")["grants"]] == [("社員", "メンバー自身の部署")]
+    assert [(x["role"], x["target"]) for x in group(v, "社員")["grants"]] == [("社員", "メンバー自身の所属（部署と、入っているグループ）")]
     assert group(v, "総務")["rule"] == {"departments": ["総務部"]}
     assert [(x["role"], x["target"]) for x in group(v, "情シス・ヘルプデスク")["grants"]] == [("ヘルプデスク担当", "全社")]
     admin = group(v, "管理者")
@@ -87,7 +87,7 @@ def test_migration_builds_roles_groups_and_targets(client):
     assert roles["インフラ承認者"]["permissions"] == ["infra.docs.view", "infra.approve"]
     used = {x["role"] for g in v["groups"] for x in g["grants"]}
     assert not used & {"インフラ技術者", "インフラ承認者", "インフラ実行者", "インフラ管理"}
-    assert {t["target_id"] for t in v["targets"]} >= {"special:self_dept", "special:all"}
+    assert {t["target_id"] for t in v["targets"]} >= {"special:self", "special:self_dept", "special:all"}
     assert {a["account_id"]: a["kind"] for a in v["accounts"]}["sys:kiosk"] == "system"
     logs = client.get("/api/audit", params={"action": "roles.migrate"}).json()["entries"]
     assert len(logs) == 1 and logs[0]["actor"] == "システム"
@@ -178,7 +178,7 @@ def test_explain_shows_where_each_permission_comes_from(client):
     paper = perms["paper"]["from"]
     assert [(x["group"], x["role"], x["target"], x["expires_at"]) for x in paper] == [("総務", "総務", "全社", None)]
     assert paper[0]["reason"] == "グループ「総務」（決まり：部署「総務部」）の役割「総務」× 全社"
-    assert perms["ask"]["from"][0]["target"] == "メンバー自身の部署"
+    assert perms["ask"]["from"][0]["target"] == "メンバー自身の所属（部署と、入っているグループ）"
     assert "audit.view" not in perms
     # 決まらないときは候補だけ（営業部は2人）・いない人は候補なし
     r = client.get("/api/admin/access/explain", params={"q": "1000"}).json()
@@ -248,12 +248,12 @@ def test_roles_can_be_removed_from_the_everyone_group(client):
     login(client, "10005")
     grant = next(g for g in group(client.get("/api/admin/access").json(), "社員")["grants"] if g["role"] == "社員")
     r = client.delete(f"/api/admin/access/grants/{grant['grant_id']}", headers=H)
-    assert r.status_code == 200 and r.json()["detail"] == "社員 から 役割「社員」× メンバー自身の部署 を外した"
+    assert r.status_code == 200 and r.json()["detail"] == "社員 から 役割「社員」× メンバー自身の所属（部署と、入っているグループ） を外した"
     login(client, "10004")
     assert "ask" not in client.get("/api/me").json()["permissions"]
     # 戻すのは自分の権限が増える変更なので、自分（10005）ではできない
     login(client, "10005")
-    r = client.post("/api/admin/access/groups/G-employees/grants", json={"role_id": grant["role_id"], "target_id": "special:self_dept"}, headers=H)
+    r = client.post("/api/admin/access/groups/G-employees/grants", json={"role_id": grant["role_id"], "target_id": "special:self"}, headers=H)
     assert "自分の権限が増える" in denied_message(r)
 
 

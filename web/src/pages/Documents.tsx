@@ -144,6 +144,8 @@ function Editor({ doc, view, onDone }: { doc: AdminDocument; view: AdminDocument
   const [pending, setPending] = useState<{ action: string; impact: DocImpact } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // 確かめで「やめる」：欄を保存されている値に戻す
+  const cancel = () => { setTargets(doc.targets); setRequired(doc.required); setExternal(doc.external); setPending(null); };
   const id = encodeURIComponent(doc.doc_id);
   const publication = { targets, required, external };
 
@@ -209,7 +211,7 @@ function Editor({ doc, view, onDone }: { doc: AdminDocument; view: AdminDocument
           <Impact p={pending.impact} />
           <p>
             <button className="primary" disabled={busy} onClick={() => void save()}>{SAVE[pending.action]}</button>{" "}
-            <button disabled={busy} onClick={() => setPending(null)}>やめる</button>
+            <button disabled={busy} onClick={cancel}>やめる</button>
           </p>
         </div>
       )}

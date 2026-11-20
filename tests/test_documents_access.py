@@ -104,7 +104,7 @@ def test_can_and_the_search_filter_agree_for_everyone(client, settings):
         for d in s.documents():
             assert engine.can_view_document(no, dept, d["required"], d["targets"]).allowed == s.can_view(d["doc_id"], scope), (no, d["doc_id"])
     why = engine.can_view_document("10001", "経理部", "documents.view", ["dept:経理部"]).reasons
-    assert why == ["グループ「社員」（決まり：全員）の役割「社員」× メンバー自身の部署"]
+    assert why == ["グループ「社員」（決まり：全員）の役割「社員」× メンバー自身の所属（部署と、入っているグループ）"]
 
 
 def test_group_only_document_that_needs_infra_docs_view(client):
@@ -129,6 +129,70 @@ def test_group_only_document_that_needs_infra_docs_view(client):
     assert "障害対応の手順" not in json.dumps(ans, ensure_ascii=False)       # 見られない文書の題名は返事に出さない
     entry = logs(client, "ask.chat")[0]
     assert "権限" in entry["detail"] and "障害対応の手順" not in entry["detail"]
+
+
+def test_document_published_to_a_group_is_seen_by_its_members_only(client):
+    # 社員の documents.view の対象は「メンバー自身の所属（部署と、入っているグループ）」。グループの公開先にも効く
+    p = client.post("/api/admin/documents/preview", json={"doc_id": "H01", "targets": ["group:G-general"]}, headers=H).json()
+    assert p["detail"] == "人事評価の運用手順の公開先 人事部→総務" and (p["gain"], p["lose"]) == (1, 1)
+    assert client.patch("/api/admin/documents/H01", json={"targets": ["group:G-general"]}, headers=H).status_code == 200
+    for no in PEOPLE:
+        login(client, no)
+        seen = no == "10002"                                  # 総務のメンバー（決まり：部署「総務部」）だけ
+        assert ("H01" in search_ids(client, "人事評価")) is seen, no
+        assert (client.get("/api/documents/H01").status_code == 200) is seen, no
+        listed = "H01" in {d["doc_id"] for d in client.get("/api/documents").json()["documents"]}
+        assert listed is (seen or no == "10005"), no          # 10005 は文書を扱える人なので、一覧には扱う文書として出る
+
+
+def test_group_membership_counts_for_the_self_target(settings):
+    import datetime as dt
+
+    with TestClient(create_app(settings, FakeLLM(), ollama_tags=lambda: {}, model_catalog=lambda: [])):
+        pass
+    db = sqlite3.connect(settings.db_path)
+    with db:
+        db.execute("INSERT INTO access_groups VALUES ('G-x', '読む会', '', NULL)")   # 役割を与えていないグループ
+        db.execute("INSERT INTO group_members VALUES ('G-x', '10004', NULL, 't', 't')")
+        db.execute("INSERT INTO group_members VALUES ('G-x', '10003', '2000-01-01', 't', 't')")   # 期限切れ
+        access._bump(db)
+    db.close()
+    today = dt.date.today().isoformat()
+    e = access.Engine(lambda: sqlite3.connect(str(settings.db_path)), today=lambda: today)
+    assert e.can_view_document("10004", "営業部", "documents.view", ["group:G-x"]).allowed
+    assert not e.can_view_document("10003", "営業部", "documents.view", ["group:G-x"]).allowed
+    assert not e.can_view_document("10001", "経理部", "documents.view", ["group:G-x"]).allowed
+    assert not e.can_view_document("10004", "営業部", "infra.docs.view", ["group:G-x"]).allowed   # 要る権限は別
+    s = Store(settings.db_path)
+    s.set_publication("H01", ["group:G-x"], "documents.view", False)
+    assert s.can_view("H01", e.doc_scope("10004", "営業部")) and not s.can_view("H01", e.doc_scope("10003", "営業部"))
+    s.close()
+
+
+def test_upgrade_replaces_the_employee_target_once(settings):
+    with TestClient(create_app(settings, FakeLLM(), ollama_tags=lambda: {}, model_catalog=lambda: [])):
+        pass
+    db = sqlite3.connect(settings.db_path)
+    with db:                                                  # 前の版のデータ：社員 × メンバー自身の部署、置き換えの印なし
+        db.execute("UPDATE group_grants SET target_id = 'special:self_dept' WHERE target_id = 'special:self'")
+        db.execute("DELETE FROM access_meta WHERE key = 'self_target'")
+        db.execute("DELETE FROM targets WHERE target_id = 'special:self'")
+    db.close()
+    with TestClient(create_app(settings, FakeLLM(), ollama_tags=lambda: {}, model_catalog=lambda: [])) as c:
+        login(c, "10005")
+        v = c.get("/api/admin/access").json()
+        g = next(x for x in v["groups"] if x["name"] == "社員")
+        assert [(x["role"], x["target"]) for x in g["grants"]] == [("社員", "メンバー自身の所属（部署と、入っているグループ）")]
+        entry = c.get("/api/audit", params={"action": "roles.migrate"}).json()["entries"][0]
+        assert entry["detail"] == "役割「社員」の対象を「メンバー自身の部署」から「メンバー自身の所属（部署と、入っているグループ）」に置き換えた（1件）"
+    db = sqlite3.connect(settings.db_path)
+    with db:                                                  # 画面で「メンバー自身の部署」に戻したら、起動し直しても戻したまま
+        db.execute("UPDATE group_grants SET target_id = 'special:self_dept' WHERE target_id = 'special:self'")
+    db.close()
+    with TestClient(create_app(settings, FakeLLM(), ollama_tags=lambda: {}, model_catalog=lambda: [])) as c:
+        login(c, "10005")
+        g = next(x for x in c.get("/api/admin/access").json()["groups"] if x["name"] == "社員")
+        assert [x["target"] for x in g["grants"]] == ["メンバー自身の部署"]
 
 
 # ---------------------------------------------------------------- 画面の API
