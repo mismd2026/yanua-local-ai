@@ -27,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from .... import hr, identity
+from ....store import DocScope
 from ....answer import answer_question
 from ....llm import ChatModel
 from ....search import bm25
@@ -237,7 +238,7 @@ def build_app(store: Store, llm: ChatModel, data_dir: Path, top_k: int = 5, chec
         # ログインしている人は、権限の判定（yanua/access.py）で決めた「見てよい部署」を使う（API が doc_scope に入れる）
         scope = s["requester"].get("doc_scope")
         if scope is not None and s["requester"]["verified"] == "ログイン":
-            dept = scope if scope == "*" else set(scope)
+            dept = DocScope.from_json(scope)
         ans = answer_question(store, llm, s["problem"], dept, top_k)
         if observe:
             observe(s["problem"], ans, row["question"] if ans.refused and row else None)

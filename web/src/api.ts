@@ -531,3 +531,19 @@ export interface AccessExplain {
   q: string; candidates: AccessPerson[];
   result: (AccessPerson & { note: string; groups: string[]; permissions: { permission: string; feature: string; does: string; from: AccessSource[] }[] }) | null;
 }
+
+// S-50 文書（公開先 × 見るのに要る権限）
+export interface AdminDocument {
+  doc_id: string; title: string; path: string; updated: string; owner: string; required: string; external: boolean;
+  indexed_at: string; source: string; removed_at: string | null; removed_by: string; targets: string[]; target_names: string[];
+  decided_by: "file" | "screen";
+}
+export interface PublishTarget { target_id: string; kind: string; name: string }
+export interface AdminDocuments {
+  documents: AdminDocument[]; removed: boolean; publish_targets: PublishTarget[];
+  permissions: { name: string; does: string }[]; owners: string[];
+}
+export interface DocImpact {
+  doc_id: string; detail: string; checked: number; too_many: boolean; gain: number; lose: number;
+  groups: { name: string; members: number; gain: number; lose: number; can_see: number }[];
+}

@@ -81,9 +81,9 @@ def test_preview_warns_when_you_lose_your_own_permissions(client):
     grant = next(g for g in group(view(client), "社員")["grants"] if g["role"] == "社員")
     p = preview(client, "grant.remove", grant_id=grant["grant_id"])
     assert p["refused"] is None and p["self_loss"] is True
-    assert "ask × メンバー自身の部署" in p["self"]["lost"]
+    assert "ask × メンバー自身の所属（部署と、入っているグループ）" in p["self"]["lost"]
     assert {x["account_id"] for x in p["people"]} == {"10001", "10002", "10003", "10004", "10005", "10006"}
-    assert all("ask × メンバー自身の部署" in x["lost"] for x in p["people"])
+    assert all("ask × メンバー自身の所属（部署と、入っているグループ）" in x["lost"] for x in p["people"])
     # 自分の期限を縮めるのも「減る」
     client.post("/api/admin/access/groups/G-admin/members", json={"account_id": "10002", "expires_at": "2099-12-31"}, headers=H)
     login(client, "10002")
@@ -116,7 +116,7 @@ def test_preview_summarises_by_group_when_many_people_are_affected(client, monke
     p = preview(client, "grant.remove", grant_id=grant["grant_id"])
     assert p["too_many"] is True and p["checked"] == 6 and p["people"] == []
     assert p["groups"][0]["name"] == "社員" and p["groups"][0]["members"] == 6
-    assert "ask × メンバー自身の部署" in p["groups"][0]["lost"]
+    assert "ask × メンバー自身の所属（部署と、入っているグループ）" in p["groups"][0]["lost"]
     assert p["self_loss"] is True                                      # 自分のことは、多くても必ず出す
 
 

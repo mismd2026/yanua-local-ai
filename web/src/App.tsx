@@ -17,6 +17,7 @@ import Audit from "./pages/Audit";
 import SettingsPage from "./pages/Settings";
 import NetworkPage from "./pages/Network";
 import AccessPage from "./pages/Access";
+import DocumentsPage from "./pages/Documents";
 
 type State = { kind: "loading" } | { kind: "out"; notice?: string } | { kind: "in"; me: Me } | { kind: "error"; message: string };
 
@@ -111,6 +112,8 @@ function Page({ path, me }: { path: string; me: Me }) {
       return can("settings.view") ? <SettingsPage canEdit={can("settings.edit")} /> : <NoPermission />;
     case "/admin/network":
       return can("network.view") ? <NetworkPage canEdit={can("network.edit")} /> : <NoPermission />;
+    case "/admin/documents":
+      return can("documents.manage") ? <DocumentsPage /> : <NoPermission />;
     case "/admin/access":
       return can("roles.view") ? <AccessPage canEdit={can("roles.assign")} /> : <NoPermission />;
     case "/admin/audit":

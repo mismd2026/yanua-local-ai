@@ -729,6 +729,8 @@ def _serve(args) -> int:
     try:
         if access.migrate_if_empty(db, role_config):
             print("権限の仕組みを、roles.json から作りました（役割・グループ・対象。docs/access-model.md）")
+        for done in access.upgrade(db):
+            print(f"権限の仕組みを今の版に合わせました：{done}")
         access.sync_targets(db)
         found = access.problems(access.load(db))
     finally:
