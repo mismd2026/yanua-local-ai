@@ -7,6 +7,7 @@
               選べるのは、Yanua の目録（config/network.json の models）にある Ollama のモデルで、
               その用途（use）があり、models pull で登録した digest と手元の Ollama の digest が同じものだけ
     files     作業用フォルダ       既定 config/files.json     → 写し data/settings/files.json
+    hr        人事（休職中の人）   既定 config/hr.json        → 写し data/settings/hr.json（K-054）
 
 決まり：
 - 読むときは、写しがあれば写し、なければ既定（settingfiles と同じ）
@@ -27,13 +28,16 @@ from typing import Callable
 from .. import identity
 from ..settingfiles import SettingError, SettingFile
 
-SECTIONS = ("identity", "audit", "models", "files")
-LABELS = {"identity": "本人確認の方針", "audit": "監査ログ", "models": "モデル", "files": "ファイル（作業用フォルダ）"}
+SECTIONS = ("identity", "audit", "models", "files", "hr")
+LABELS = {"identity": "本人確認の方針", "audit": "監査ログ", "models": "モデル", "files": "ファイル（作業用フォルダ）",
+          "hr": "人事（休職中の人）"}
+LEAVE_PERMISSIONS = ("そのまま", "社員の役割だけ")
 KEYS = {
     "identity": identity.POLICY_KEYS,
     "audit": ("keep_days", "keep_body"),
     "models": ("chat", "summary"),
     "files": ("work_max_gb", "file_keep_hours"),
+    "hr": ("on_leave_login", "on_leave_permissions"),
 }
 # 起動の指定が勝つ項目 → 起動の指定の名前
 PIN_FLAGS = {"audit.keep_days": "--audit-keep-days", "audit.keep_body": "--audit-body",
@@ -49,6 +53,7 @@ COMMENTS = {
     "audit": "監査ログの設定。画面（S-52）で保存したもの",
     "models": "使う Ollama のモデル。画面（S-52）で保存したもの",
     "files": "作業用フォルダの設定。画面（S-52）で保存したもの",
+    "hr": "休職中の人の扱い。画面（S-52）で保存したもの",
 }
 
 
@@ -102,6 +107,11 @@ def problems(key: str, text: str, catalog: Catalog | None = None) -> list[tuple[
         out += _number(data, "keep_days", "audit.keep_days", integer=True)
         if not isinstance(data["keep_body"], bool):
             out.append(("keep_body", "残すか残さないか（true か false）にしてください"))
+    elif key == "hr":
+        if not isinstance(data["on_leave_login"], bool):
+            out.append(("on_leave_login", "ログインできるか（true か false）にしてください"))
+        if data["on_leave_permissions"] not in LEAVE_PERMISSIONS:
+            out.append(("on_leave_permissions", f"{'か'.join(f'「{x}」' for x in LEAVE_PERMISSIONS)}にしてください"))
     elif key == "files":
         out += _number(data, "work_max_gb", "files.work_max_gb", integer=False)
         out += _number(data, "file_keep_hours", "files.file_keep_hours", integer=True)
@@ -142,6 +152,7 @@ FIELD_LABELS = {
     "audit": {"keep_days": "保存期間", "keep_body": "質問の本文"},
     "models": {"chat": "チャットのモデル", "summary": "要約のモデル"},
     "files": {"work_max_gb": "作業用フォルダの上限", "file_keep_hours": "ファイルを消すまで"},
+    "hr": {"on_leave_login": "休職中の人のログイン", "on_leave_permissions": "休職中の人の権限"},
 }
 
 
@@ -157,6 +168,8 @@ def _shown(key: str, field: str, v) -> str:
             return f"{v}回"
     if key == "audit":
         return f"{v}日" if field == "keep_days" else ("残す" if v else "残さない")
+    if key == "hr" and field == "on_leave_login":
+        return "できる" if v else "できない"
     if key == "files":
         return f"{v:g}GB" if field == "work_max_gb" and isinstance(v, (int, float)) else f"{v}時間" if field == "file_keep_hours" else str(v)
     return str(v)
@@ -206,6 +219,8 @@ def running_values(settings, key: str, policy: identity.Policy | None = None) ->
         return {"keep_days": settings.audit_keep_days, "keep_body": settings.audit_keep_body}
     if key == "models":
         return {"chat": settings.chat_model, "summary": settings.summary_model}
+    if key == "hr":
+        return {"on_leave_login": settings.on_leave_login, "on_leave_permissions": settings.on_leave_permissions}
     return {"work_max_gb": settings.work_max_bytes / 1_000_000_000, "file_keep_hours": settings.file_keep_hours}
 
 
@@ -223,17 +238,20 @@ def apply_to_settings(settings, key: str, values: dict) -> None:
             settings.chat_model = put["chat"]
         if "summary" in put:
             settings.summary_model = put["summary"]
+    elif key == "hr":
+        settings.on_leave_login = bool(put["on_leave_login"])
+        settings.on_leave_permissions = put["on_leave_permissions"]
     elif key == "files":
         settings.work_max_bytes = int(round(float(put["work_max_gb"]) * 1_000_000_000))
         settings.file_keep_hours = int(put["file_keep_hours"])
 
 
 def startup(settings) -> tuple[set[str], dict[str, list[tuple[str, str]]]]:
-    """起動のとき：画面で保存した写しがあれば Settings に入れる（監査ログ・モデル・ファイル）。
+    """起動のとき：画面で保存した写しがあれば Settings に入れる（監査ログ・モデル・ファイル・人事）。
     (写しを使った設定, {設定: 誤り}) を返す。誤りのある写しは使わず、既定のまま動く（起動は止めない）。
     本人確認の方針は load_policy で読む（誤りがあれば起動しない）。"""
     bad, loaded = {}, set()
-    for key in ("audit", "models", "files"):
+    for key in ("audit", "models", "files", "hr"):
         s = store(settings, key)
         if s.path() != s.saved:
             continue                     # 写しがなければ、起動の値（既定）のまま

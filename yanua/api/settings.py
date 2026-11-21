@@ -23,6 +23,8 @@ class Settings:
     audit_config: Path = Path("config/audit.json")
     models_config: Path = Path("config/models.json")
     files_config: Path = Path("config/files.json")
+    hr_config: Path = Path("config/hr.json")                        # 休職中の人の扱い（S-52 の「人事」）
+    hr_mappings_config: Path = Path("config/hr_mappings.json")      # 人事データの列の対応づけ（S-51 で名前を付けて保存）
     network_config: Path = Path("config/network.json")              # 宛先の一覧と目録（既定。S-53 からは書き換えない）
     network_state_config: Path = Path("config/network_state.json")  # 宛先の ON/OFF・追加・更新の確認の既定（写しは settings_dir）
     # 起動の指定が勝つ項目（例 "audit.keep_body"）。画面では変えられない。serve が付けたものを入れる
@@ -55,6 +57,9 @@ class Settings:
     pdf_max_bytes: int = 50_000_000              # PDF のアップロードの上限（50MB）
     recording_max_bytes: int = 2_000_000_000     # 録画・録音のアップロードの上限（2GB）
     segments_max_bytes: int = 5_000_000          # 文字起こし済みの発言（JSON）の上限
+    hr_max_bytes: int = 500_000_000              # 人事データ（CSV・Excel・JSON）のアップロードの上限（500MB。100万人の CSV で 100MB ほど）
+    on_leave_login: bool = True                  # 休職中の人がログインできるか（S-52 の「人事」で変える）
+    on_leave_permissions: str = "そのまま"        # 休職中の人の権限：「そのまま」か「社員の役割だけ」
     work_max_bytes: int = 20_000_000_000         # 作業用フォルダの合計の上限（20GB）。超えるアップロードは断る
     # PDF の仕分け・変換
     paper_inbox: Path = Path("demo/company/paper/inbox")     # 受信箱（スキャナーが PDF を置くフォルダ）

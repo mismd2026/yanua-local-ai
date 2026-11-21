@@ -45,7 +45,7 @@ def test_import_keeps_only_needed_columns(db):
     assert set(report.dropped_columns) == {"氏名カナ", "生年月日", "入社日"}
     cols = [r[1] for r in db.execute("PRAGMA table_info(employees)")]
     # 保存するのは本人確認に使う列と、その照合用の形（正規化した氏名・姓・部署）だけ
-    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email",
+    assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email", "kana", "status", "changed_at",
                     "name_key", "surname_key", "dept_key"]
 
 
@@ -68,8 +68,13 @@ def test_import_replaces_everything(db, tmp_path):
     hr.import_employees(db, SAMPLE, hr.load_mapping(MAPPING))
     small = tmp_path / "small.csv"
     small.write_text("社員番号,氏名,所属,所属コード,在籍区分\n20001,新人 一郎,営業部,400,在籍\n", encoding="utf-8")
-    hr.import_employees(db, small, basic_mapping())
-    assert hr.verify(db, "10001", "山田 太郎") is None   # 前回の名簿は残らない
+    hr.import_employees(db, small, basic_mapping())                    # 一部のファイル（既定）：ほかの人は変えない
+    assert hr.verify(db, "10001", "山田 太郎") is not None
+    report = hr.import_employees(db, small, basic_mapping(), scope="all")
+    assert "いなくなる人が 7人（全体の 87.5%）います" in report.errors[0]   # 多いときは、確かめてからでないと確定しない
+    assert hr.verify(db, "10001", "山田 太郎") is not None
+    hr.import_employees(db, small, basic_mapping(), scope="all", confirm_removal=True)
+    assert hr.verify(db, "10001", "山田 太郎") is None   # 全員のファイル：前回の名簿は残らない
     assert hr.verify(db, "20001", "新人 一郎") is not None
 
 
@@ -113,7 +118,7 @@ def test_excel_and_json(db, tmp_path):
 
 def test_mapping_draft_from_headers():
     draft = hr.suggest_mapping(["社員番号", "氏名", "氏名カナ", "所属", "所属コード", "在籍区分", "生年月日"])
-    assert draft["columns"] == {"employee_no": "社員番号", "name": "氏名", "dept": "所属",
+    assert draft["columns"] == {"employee_no": "社員番号", "name": "氏名", "kana": "氏名カナ", "dept": "所属",
                                 "dept_code": "所属コード", "status": "在籍区分"}
 
 

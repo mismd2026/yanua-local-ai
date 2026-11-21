@@ -71,9 +71,10 @@ def delete_session(db: sqlite3.Connection, token: str) -> None:
         db.execute("DELETE FROM web_sessions WHERE token_hash = ?", (_hash(token),))
 
 
-def user_for_token(db: sqlite3.Connection, token: str, roles, idle_minutes: int) -> User | None:
+def user_for_token(db: sqlite3.Connection, token: str, roles, idle_minutes: int, allow_on_leave: bool = True) -> User | None:
     # roles は roles_for(社員番号, 部署) を持つもの（yanua/access.py の Engine。入っているグループの名前を返す）
-    """トークンからログイン中の人を返す。期限切れ・操作のない時間が長すぎる・在籍でない人は None。"""
+    """トークンからログイン中の人を返す。期限切れ・操作のない時間が長すぎる・在籍でない人は None。
+    休職中の人は、allow_on_leave が False（設定 S-52 の「人事」で「ログインできない」）なら None。"""
     if not token:
         return None
     ensure_schema(db)
@@ -87,7 +88,7 @@ def user_for_token(db: sqlite3.Connection, token: str, roles, idle_minutes: int)
         delete_session(db, token)
         return None
     person = hr.lookup(db, employee_no)
-    if not person:
+    if not person or (person.get("status") == "休職" and not allow_on_leave):
         delete_session(db, token)
         return None
     with db:

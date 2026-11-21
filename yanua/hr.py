@@ -3,22 +3,25 @@
 人事DBには直接つながない。人事システムから出力したファイル（CSV / Excel / JSON）を取り込む。
 人事システムごとに列名や形式が違うので、「対応表（mapping）」で Yanua の決まった項目に読み替える。
 
-- 取り込むのは本人確認と取次に必要な項目だけ（従業員番号・氏名・部署・部署番号・在籍の状態・メールアドレス）。
+- 取り込むのは本人確認と取次・権限に必要な項目だけ（従業員番号・氏名・よみ・部署・部署番号・在籍の状態・メールアドレス）。
   メールアドレスは任意で、Googleカレンダーなどで登録した来訪予定の担当者を、社員番号に結びつけるときに使う。
-  生年月日や住所などの列が出力に含まれていても、読み込んだ時点で捨てる。
-- 取り込みは毎回まるごと入れ替える（人事システムの出力を正とする）。
-- 在籍していない人（退職者など）は、照合で一致しない。
+  生年月日や住所などの列が出力に含まれていても、その列は読まない（yanua/hrimport.py）。
+- 取り込みは毎回まるごと入れ替える（人事システムの出力を正とする）。試し・確定・前に戻すは yanua/hrimport.py。
+- 在籍の状態は「在籍」「休職」「退職」の3つ。退職した人は、照合で一致しない（ログインもできない）。
+  休職中の人は照合で一致する。ログインと権限は設定（S-52 の「人事」）で決める
 - 最後に取り込んだ日時を記録し、古くなったら警告できるようにする。
 
 対応表（JSON）の例:
 
     {
-      "columns": {"employee_no": "社員番号", "name": "氏名", "dept": "所属", "dept_code": "所属コード", "status": "在籍区分"},
-      "active_values": ["在籍", "休職"],
+      "columns": {"employee_no": "社員番号", "name": "氏名", "kana": "氏名カナ", "dept": "所属", "dept_code": "所属コード",
+                  "status": "在籍区分"},
+      "status_values": {"在職": "在籍", "休業": "休職", "退社": "退職"},
       "sheet": "社員一覧"
     }
 
-"status" を対応させない場合は、全員を在籍として扱う。
+"status" を対応させない場合は、全員を在籍として扱う。前の書き方の "active_values"（在籍とみなす値の並び）も読める
+（その値は在籍、ただし「休職」は休職。ほかの値は退職）。
 """
 
 from __future__ import annotations
@@ -34,11 +37,14 @@ from pathlib import Path
 
 from .llm import ChatModel
 
-FIELDS = ("employee_no", "name", "dept", "dept_code", "status", "email")
+FIELDS = ("employee_no", "name", "kana", "dept", "dept_code", "status", "email")
+STATUSES = ("在籍", "休職", "退職")
+ACTIVE_STATUSES = ("在籍", "休職")        # 照合で一致する（active = 1）
 REQUIRED = ("employee_no", "name", "dept")
 LABELS = {
     "employee_no": "従業員番号",
     "name": "氏名",
+    "kana": "よみ",
     "dept": "部署",
     "dept_code": "部署番号",
     "status": "在籍の状態",
@@ -47,11 +53,12 @@ LABELS = {
 
 # 列名から対応表の下書きを作るときの手がかり（決まったルール。AIはこれで決まらないときだけ使う）
 HINTS = {
-    "employee_no": ["社員番号", "従業員番号", "社員no", "社員コード", "従業員コード", "職員番号", "employeeid", "employee_no", "empno", "社員id"],
+    "employee_no": ["社員番号", "従業員番号", "社員no", "社員コード", "従業員コード", "職員番号", "職員コード", "職員id", "employeeid", "employee_no", "empno", "社員id"],
     "name": ["氏名", "名前", "社員名", "従業員名", "fullname", "name", "漢字氏名"],
+    "kana": ["氏名カナ", "よみ", "読み", "フリガナ", "ふりがな", "カナ氏名", "氏名かな", "kana", "furigana"],
     "dept": ["所属", "部署", "所属部署", "部署名", "所属名", "department", "dept", "組織名"],
-    "dept_code": ["所属コード", "部署コード", "部署番号", "所属番号", "組織コード", "deptcode", "departmentcode"],
-    "status": ["在籍区分", "在籍状況", "在籍", "雇用状態", "ステータス", "status", "退職区分"],
+    "dept_code": ["所属コード", "部署コード", "部署番号", "所属番号", "組織コード", "所属cd", "部署cd", "deptcode", "departmentcode"],
+    "status": ["在籍区分", "在籍状況", "在職区分", "在籍状態", "在籍", "雇用状態", "ステータス", "status", "退職区分"],
     "email": ["メールアドレス", "メール", "社用メール", "email", "mail", "e-mail", "mailaddress"],
 }
 
@@ -61,8 +68,11 @@ CREATE TABLE IF NOT EXISTS employees (
     name        TEXT NOT NULL,
     dept        TEXT NOT NULL,
     dept_code   TEXT NOT NULL DEFAULT '',
-    active      INTEGER NOT NULL,
-    email       TEXT NOT NULL DEFAULT ''
+    active      INTEGER NOT NULL,                 -- 1：在籍・休職（照合で一致する）、0：退職
+    email       TEXT NOT NULL DEFAULT '',
+    kana        TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT '在籍',     -- 在籍・休職・退職
+    changed_at  TEXT NOT NULL DEFAULT ''          -- 最後に変わった日（YYYY-MM-DD。取り込みで入った・変わった日）
 );
 CREATE TABLE IF NOT EXISTS hr_departments (
     dept      TEXT PRIMARY KEY,
@@ -87,6 +97,7 @@ class HRImportReport:
     inactive: int = 0
     dropped_columns: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    result: object = None          # yanua/hrimport.py の Result（監査ログに使う）
 
     def as_dict(self) -> dict:
         return {"active": self.active, "inactive": self.inactive,
@@ -182,7 +193,24 @@ def suggest_mapping(headers: list[str], llm: ChatModel | None = None) -> dict:
                     cols[f] = v
         except Exception:  # noqa: BLE001  AIの下書きは補助なので、失敗しても止めない
             pass
-    return {"columns": cols, "active_values": ["在籍"]}
+    return {"columns": cols, "status_values": {}}
+
+
+# 在籍状態の値の下書き（画面・コマンドで、ファイルに出てくる値を在籍・休職・退職に当てるときの手がかり）
+STATUS_HINTS = {
+    "在籍": ["在籍", "在職", "現職", "勤務", "就業", "active", "employed"],
+    "休職": ["休職", "休業", "休暇", "産休", "育休", "leave", "onleave"],
+    "退職": ["退職", "退社", "離職", "解雇", "retired", "resigned", "inactive", "terminated"],
+}
+
+
+def guess_status(value: str) -> str:
+    """ファイルの値から、在籍・休職・退職の下書き。決まらなければ空（人が選ぶ）。"""
+    k = _key(value)
+    for status, words in STATUS_HINTS.items():
+        if any(_key(w) == k or (len(_key(w)) >= 2 and _key(w) in k) for w in words):
+            return status
+    return ""
 
 
 # ---------------------------------------------------------------- 取り込みと照合
@@ -219,6 +247,15 @@ def ensure_schema(db) -> None:
     # 古い保存先には列を足す
     if "email" not in cols:
         db.execute("ALTER TABLE employees ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+    if "kana" not in cols:
+        db.execute("ALTER TABLE employees ADD COLUMN kana TEXT NOT NULL DEFAULT ''")
+    if "changed_at" not in cols:
+        db.execute("ALTER TABLE employees ADD COLUMN changed_at TEXT NOT NULL DEFAULT ''")
+    if "status" not in cols:
+        # 前の保存先は在籍（1）か、そうでないか（0）だけ。休職は次の取り込みで分かる
+        db.execute("ALTER TABLE employees ADD COLUMN status TEXT NOT NULL DEFAULT '在籍'")
+        with db:
+            db.execute("UPDATE employees SET status = '退職' WHERE active = 0")
     added = [c for c in KEY_COLUMNS if c not in cols]
     for c in added:
         db.execute(f"ALTER TABLE employees ADD COLUMN {c} TEXT NOT NULL DEFAULT ''")
@@ -244,58 +281,30 @@ def refresh_departments(db) -> None:
                    "WHERE active = 1 GROUP BY dept")
 
 
-def import_employees(db, path: Path, mapping: dict) -> HRImportReport:
-    """人事データを取り込む。対応表の列以外は読み込んだ時点で捨てる。毎回まるごと入れ替える。"""
-    ensure_schema(db)
-    cols = mapping["columns"]
-    rows = read_rows(path, mapping.get("sheet"))
+def import_employees(db, path: Path, mapping: dict, by: str = "（コマンド）", leave_policy: str = "そのまま",
+                     scope: str = "partial", confirm_removal: bool = False) -> HRImportReport:
+    """人事データを取り込む（コマンド・テスト用）。画面と同じ処理（yanua/hrimport.py の commit）を通す。
+    対応表の列以外は読まない。誤りが1件でもあれば入れ替えない。scope は "partial"（一部のファイル。ファイルにいない人は
+    変えない。既定）か "all"（全員のファイル。ファイルにいない人はいなくなる。多いときは confirm_removal が要る）。"""
+    from . import hrimport
+
     report = HRImportReport()
-    if not rows:
-        report.errors.append(f"{path.name}: 行がありません")
+    try:
+        result = hrimport.commit(db, path, mapping, by, leave_policy, scope=scope, confirm_removal=confirm_removal)
+    except hrimport.MappingError as e:
+        report.errors = [f"{path.name}: 対応表 {w} {m}".replace("対応表  ", "対応表 ") for w, m in e.problems]
         return report
-
-    headers = list(rows[0].keys())
-    absent = [f"{LABELS[f]}（{cols[f]}）" for f in FIELDS if cols.get(f) and cols[f] not in headers]
-    if absent:
-        report.errors.append(f"{path.name}: 対応表の列がファイルにありません: {'、'.join(absent)}")
-        return report
-    report.dropped_columns = [h for h in headers if h not in cols.values()]
-
-    active_values = {norm(v) for v in mapping.get("active_values", ["在籍"])}
-    records = {}
-    for i, r in enumerate(rows, start=2):
-        rec = {f: r.get(cols[f], "") if cols.get(f) else "" for f in FIELDS}
-        no = norm(rec["employee_no"])
-        if not no or not rec["name"] or not rec["dept"]:
-            report.errors.append(f"{path.name} {i}行目: 従業員番号・氏名・部署のどれかが空です")
-            continue
-        if no in records:
-            report.errors.append(f"{path.name} {i}行目: 従業員番号 {no} が重複しています")
-            continue
-        active = (norm(rec["status"]) in active_values) if cols.get("status") else True
-        records[no] = (no, rec["name"].strip(), rec["dept"].strip(), rec["dept_code"].strip(), int(active),
-                       rec["email"].strip().lower())
-
-    if report.errors:
-        return report   # 1件でも不備があれば入れ替えない（中途半端な名簿にしない）
-
-    with db:
-        db.execute("DELETE FROM employees")
-        db.executemany("INSERT INTO employees (employee_no, name, dept, dept_code, active, email, "
-                       "name_key, surname_key, dept_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                       [(*r, *_keys(r[1], r[2])) for r in records.values()])
-        db.execute("DELETE FROM hr_departments")
-        depts: dict[str, str] = {}
-        for r in records.values():
-            if r[4]:
-                depts[r[2]] = depts.get(r[2]) or r[3]
-        db.executemany("INSERT INTO hr_departments VALUES (?, ?)", list(depts.items()))
-        report.active = sum(1 for r in records.values() if r[4])
-        report.inactive = len(records) - report.active
-        db.execute(
-            "INSERT INTO hr_imports VALUES (?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(timespec="seconds"), path.name, report.active, report.inactive),
-        )
+    p = result.preview
+    report.dropped_columns = p.ignored_columns
+    report.errors = [f"{path.name} {e['line']}行目: {e['message']}" for e in p.errors]
+    if p.error_count > len(p.errors):
+        report.errors.append(f"ほかに {p.error_count - len(p.errors)}件の誤りがあります")
+    if not result.committed and not report.errors:
+        report.errors.append(result.reason)
+    if result.committed:
+        report.active = p.counts.get("在籍", 0) + p.counts.get("休職", 0)
+        report.inactive = p.counts.get("退職", 0)
+    report.result = result
     return report
 
 
@@ -312,13 +321,22 @@ def verify(db, employee_no: str, name: str) -> dict | None:
 
 
 def lookup(db, employee_no: str) -> dict | None:
-    """SSOの個人アカウントから本人の候補を出すとき用（在籍中の人だけ）。"""
+    """SSOの個人アカウントから本人の候補を出すとき用（在籍中の人だけ。休職中の人も入る。status で見分ける）。"""
     ensure_schema(db)
     row = db.execute(
-        "SELECT employee_no, name, dept, dept_code FROM employees WHERE employee_no = ? AND active = 1",
+        "SELECT employee_no, name, dept, dept_code, status FROM employees WHERE employee_no = ? AND active = 1",
         (norm(employee_no),),
     ).fetchone()
-    return {"employee_no": row[0], "name": row[1], "dept": row[2], "dept_code": row[3]} if row else None
+    return {"employee_no": row[0], "name": row[1], "dept": row[2], "dept_code": row[3], "status": row[4]} if row else None
+
+
+def status_of(db, employee_no: str) -> str | None:
+    """在籍の状態（在籍・休職・退職）。人事データにいなければ None。"""
+    try:
+        row = db.execute("SELECT status FROM employees WHERE employee_no = ?", (employee_no,)).fetchone()
+    except Exception:  # noqa: BLE001  人事データをまだ取り込んでいないとき
+        return None
+    return row[0] if row else None
 
 
 def lookup_by_email(db, email: str) -> dict | None:
@@ -335,7 +353,7 @@ def lookup_by_email(db, email: str) -> dict | None:
 
 def last_import(db) -> dict | None:
     ensure_schema(db)
-    row = db.execute("SELECT imported_at, source, active, inactive FROM hr_imports ORDER BY imported_at DESC LIMIT 1").fetchone()
+    row = db.execute("SELECT imported_at, source, active, inactive FROM hr_imports ORDER BY rowid DESC LIMIT 1").fetchone()
     if not row:
         return None
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(row[0])).days
