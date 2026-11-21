@@ -327,8 +327,15 @@ def _rule_match(rule: dict | None, dept: str) -> str | None:
     return None
 
 
-def compute_memberships(data: dict, account_id: str, dept: str) -> dict[str, tuple[str, str | None]]:
-    """その人が入っているグループ：{group_id: (入り方, 期限)}。期限の切れたものも入っている。"""
+LEAVE_KEEP, LEAVE_EMPLOYEE_ONLY = "そのまま", "社員の役割だけ"   # 休職中の人の権限（設定 S-52 の「人事」）
+EMPLOYEE_ROLE = "社員"
+
+
+def compute_memberships(data: dict, account_id: str, dept: str, status: str | None = None) -> dict[str, tuple[str, str | None]]:
+    """その人が入っているグループ：{group_id: (入り方, 期限)}。期限の切れたものも入っている。
+    退職した人は、どのグループにも数えない（決まりのグループは在籍している人だけ。手で入れたグループも数えない。K-054）。"""
+    if status == "退職":
+        return {}
     out = {}
     manual = {m["group_id"]: m for m in data["members"] if m["account_id"] == account_id}
     for gid, g in data["groups"].items():
@@ -344,15 +351,20 @@ def compute_memberships(data: dict, account_id: str, dept: str) -> dict[str, tup
     return out
 
 
-def compute_grants(data: dict, account_id: str, dept: str) -> list[Grant]:
-    """その人が持つ権限と出どころ（データだけから決める。変更を試すときにも使う）。期限の切れたものも入っている。"""
+def compute_grants(data: dict, account_id: str, dept: str, status: str | None = None,
+                   leave: str = LEAVE_KEEP) -> list[Grant]:
+    """その人が持つ権限と出どころ（データだけから決める。変更を試すときにも使う）。期限の切れたものも入っている。
+    休職中の人は、設定が「社員の役割だけ」なら、役割「社員」から来る権限だけ。"""
     result = []
-    for gid, (via, expires) in compute_memberships(data, account_id, dept).items():
+    only_employee = status == "休職" and leave == LEAVE_EMPLOYEE_ONLY
+    for gid, (via, expires) in compute_memberships(data, account_id, dept, status).items():
         g = data["groups"][gid]
         for gr in data["grants"]:
             if gr["group_id"] != gid or gr["role_id"] not in data["roles"]:
                 continue
             role = data["roles"][gr["role_id"]]
+            if only_employee and role["name"] != EMPLOYEE_ROLE:
+                continue
             tids = [gr["target_id"]] if gr["target_id"] else data["sets"].get(gr["set_id"], {}).get("members", [])
             for tid in tids:
                 t = data["targets"].get(tid)
@@ -366,11 +378,13 @@ def compute_grants(data: dict, account_id: str, dept: str) -> list[Grant]:
 class Engine:
     """判定の1か所。アカウントごとの結果を、変更の世代が同じあいだ持っておく。"""
 
-    def __init__(self, connect, today=None):
+    def __init__(self, connect, today=None, leave_policy: Callable[[], str] | None = None):
+        """leave_policy は休職中の人の権限（「そのまま」か「社員の役割だけ」）を返す関数（設定を変えたらすぐ効く）。"""
         self._connect = connect
         self._today = today or (lambda: datetime.now().astimezone().date().isoformat())
-        self._cache: dict[tuple[str, str], tuple[int, list[Grant]]] = {}
-        self._groups: dict[tuple[str, str], tuple[int, dict]] = {}
+        self._leave = leave_policy or (lambda: LEAVE_KEEP)
+        self._cache: dict[tuple, tuple[int, list[Grant]]] = {}
+        self._groups: dict[tuple, tuple[int, dict]] = {}
         self._data: tuple[int, dict] | None = None
         self._lock = threading.Lock()
 
@@ -384,13 +398,16 @@ class Engine:
 
     def grants_for(self, account_id: str, dept: str) -> list[Grant]:
         """その人が持つ権限と出どころ（期限は判定のときに見るので、期限の切れたものも入っている）。"""
+        leave = self._leave()
         with self._lock, self._connect() as db:
             gen, data = self._load(db)
-            hit = self._cache.get((account_id, dept))
+            key = (account_id, dept, leave)
+            hit = self._cache.get(key)
             if hit and hit[0] == gen:
                 return hit[1]
-            result = compute_grants(data, account_id, dept)
-            self._cache[(account_id, dept)] = (gen, result)
+            status = None if account_id.startswith("sys:") else hr.status_of(db, account_id)
+            result = compute_grants(data, account_id, dept, status, leave)
+            self._cache[key] = (gen, result)
             return result
 
     def member_groups(self, account_id: str, dept: str) -> set[str]:
@@ -399,7 +416,8 @@ class Engine:
             gen, data = self._load(db)
             hit = self._groups.get((account_id, dept))
             if not hit or hit[0] != gen:
-                hit = (gen, compute_memberships(data, account_id, dept))
+                status = None if account_id.startswith("sys:") else hr.status_of(db, account_id)
+                hit = (gen, compute_memberships(data, account_id, dept, status))
                 self._groups[(account_id, dept)] = hit
         today = self._today()
         return {gid for gid, (_, exp) in hit[1].items() if not _expired(exp, today)}

@@ -12,7 +12,7 @@ import { errorText, time } from "../ui";
 type Values = Record<string, unknown>;
 type Problems = Record<string, string[]>;
 
-const KEYS: SettingKey[] = ["identity", "audit", "models", "files"];
+const KEYS: SettingKey[] = ["identity", "audit", "models", "files", "hr"];
 const CLUE_ORDER = ["employee_no", "name", "dept"];
 // 確定する組み合わせの選び肢（違う手がかりを2つ以上）
 const COMBOS: string[][] = [["name", "employee_no"], ["name", "dept"], ["employee_no", "dept"], ["employee_no", "name", "dept"]];
@@ -138,6 +138,7 @@ function Section({ settingKey, canEdit, tick, onChanged }: { settingKey: Setting
           {settingKey === "audit" && <AuditEditor data={data} values={values} set={set} Err={Err} Pinned={Pinned} disabled={!editable} />}
           {settingKey === "models" && <ModelsEditor data={data} values={values} set={set} Err={Err} Pinned={Pinned} disabled={!editable} />}
           {settingKey === "files" && <FilesEditor data={data} values={values} set={set} Err={Err} disabled={!editable} />}
+          {settingKey === "hr" && <HrEditor data={data} values={values} set={set} Err={Err} disabled={!editable} />}
           {problems[""] && <div className="small error" role="alert">{problems[""].join("　")}</div>}
           {canEdit && (
             <div className="toolbar">
@@ -407,6 +408,34 @@ function FilesEditor({ data, values, set, Err, disabled }: EditorProps) {
     <div className="form-grid">
       {num("work_max_gb", "作業用フォルダの合計の上限", 0.1)}
       {num("file_keep_hours", "アップロード・結果のファイルを消すまでの時間", 1)}
+    </div>
+  );
+}
+
+// 休職中の人の扱い（K-054）。退職した人は、いつもログインできない（ここでは変えない）
+function HrEditor({ values, set, Err, disabled }: EditorProps) {
+  return (
+    <div className="form-grid">
+      <div className="form-row">
+        <span>休職中の人のログイン</span>
+        <span className="toolbar">
+          {([[true, "ログインできる"], [false, "ログインできない"]] as const).map(([v, text]) => (
+            <label key={text}><input type="radio" style={{ width: "auto" }} name="on_leave_login" checked={values.on_leave_login === v}
+              onChange={() => set("on_leave_login", v)} disabled={disabled} /> {text}</label>
+          ))}
+        </span>
+        <Err at="on_leave_login" />
+      </div>
+      <div className="form-row">
+        <label htmlFor="f-on_leave_permissions">休職中の人の権限</label>
+        <select id="f-on_leave_permissions" value={String(values.on_leave_permissions ?? "")}
+          onChange={(e) => set("on_leave_permissions", e.target.value)} disabled={disabled}>
+          <option value="そのまま">そのまま</option>
+          <option value="社員の役割だけ">社員の役割だけ（ほかのグループの役割は効かない）</option>
+        </select>
+        <Err at="on_leave_permissions" />
+      </div>
+      <p className="small muted">退職した人は、いつもログインできません。手で入れたグループのメンバーとしても数えません。</p>
     </div>
   );
 }

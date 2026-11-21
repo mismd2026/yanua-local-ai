@@ -185,7 +185,8 @@ def test_fast_with_many_employees(tmp_path):
         dept = f"第{i % 300}営業部"
         rows.append((str(1_000_000 + i), name, dept, "", 1, "", *hr._keys(name, dept)))
     with db:
-        db.executemany("INSERT INTO employees VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        db.executemany("INSERT INTO employees (employee_no, name, dept, dept_code, active, email, name_key, surname_key, dept_key) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     hr.refresh_departments(db)
     target = rows[123_456]
     said = f"{target[2]}の{target[1].replace(' ', '')}です。番号は{target[0]}"

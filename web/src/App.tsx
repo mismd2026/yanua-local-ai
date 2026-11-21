@@ -18,6 +18,7 @@ import SettingsPage from "./pages/Settings";
 import NetworkPage from "./pages/Network";
 import AccessPage from "./pages/Access";
 import DocumentsPage from "./pages/Documents";
+import HrPage from "./pages/Hr";
 
 type State = { kind: "loading" } | { kind: "out"; notice?: string } | { kind: "in"; me: Me } | { kind: "error"; message: string };
 
@@ -114,6 +115,8 @@ function Page({ path, me }: { path: string; me: Me }) {
       return can("network.view") ? <NetworkPage canEdit={can("network.edit")} /> : <NoPermission />;
     case "/admin/documents":
       return can("documents.manage") ? <DocumentsPage /> : <NoPermission />;
+    case "/admin/hr":
+      return can("hr.import") || can("hr.view") ? <HrPage /> : <NoPermission />;
     case "/admin/access":
       return can("roles.view") ? <AccessPage canEdit={can("roles.assign")} /> : <NoPermission />;
     case "/admin/audit":
