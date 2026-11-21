@@ -377,6 +377,38 @@ def test_restore_previous_import_with_preview_and_keep_three(client, settings):
     assert tables == {f"hr_backup_{b['backup_id']}" for b in st["backups"]}
 
 
+def test_restore_preview_counts_groups_of_people_coming_back(client):
+    """2人がいなくなったあとに戻すと、試しに戻ってくる2人の入るグループが出る（取り込みの試しと同じ数え方）。"""
+    commit(client, DEMO_ROWS)
+    gone = [r for r in DEMO_ROWS if r[0] not in ("10001", "10002")]
+    p = preview(client, gone, scope="all")
+    assert p["removed"]["count"] == 2
+    assert {g["name"]: (g["join"], g["leave"]) for g in p["groups"]} == {"社員": (0, 2), "総務": (0, 1)}
+    assert commit(client, gone, scope="all", confirm_removal=True)["committed"]
+    p = run(client, "/api/hr/restore/preview", {})
+    assert p["added"]["count"] == 2
+    assert {g["name"]: (g["join"], g["leave"]) for g in p["groups"]} == {"社員": (2, 0), "総務": (1, 0)}
+
+
+def test_new_people_are_counted_in_import_preview_groups(client):
+    commit(client, DEMO_ROWS)
+    p = preview(client, DEMO_ROWS + [("10008", "小林 新", "コバヤシ アラタ", "総務部", "200", "在職", "")])
+    assert p["added"]["count"] == 1
+    assert {g["name"]: (g["join"], g["leave"]) for g in p["groups"]} == {"社員": (1, 0), "総務": (1, 0)}
+
+
+def test_restored_name_has_one_suffix_however_many_times(client):
+    for name, rows in (("a.csv", DEMO_ROWS), ("b.csv", change(DEMO_ROWS, "10001", name="山田 太一"))):
+        fid = upload(client, csv_text(rows), name=name)
+        assert run(client, "/api/hr/imports", {"file_id": fid, "mapping": MAPPING})["committed"]
+    for _ in range(3):
+        assert run(client, "/api/hr/restore", {})["committed"]
+    names = [h["source"] for h in client.get("/api/hr/status").json()["history"]]
+    assert names[:3] == ["a.csv（戻した）", "b.csv（戻した）", "a.csv（戻した）"]
+    assert all(n.count("戻した") <= 1 for n in names)
+    assert hrimport.restored_name("a.csv（1つ前に戻した）（1つ前に戻した）") == "a.csv（戻した）"   # 前の版の名前も1つにする
+
+
 def test_commit_is_all_or_nothing(settings, tmp_path):
     with TestClient(create_app(settings, FakeLLM(), ollama_tags=lambda: {}, model_catalog=lambda: [])):
         pass

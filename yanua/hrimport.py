@@ -402,8 +402,9 @@ def _state_groups(data: dict, account_id: str, dept: str | None, status: str | N
 
 
 def _group_effects(db, data: dict) -> list[dict]:
-    """部署が変わる人・退職になる人・いなくなる人の、入るグループ・外れるグループ（グループごとの人数）。
-    決まり（全員・部署）で入るグループは、(前の部署, 前の状態, 後の部署, 後の状態) ごとにまとめて数える。
+    """新しく入る人・部署や在籍状態が変わる人・いなくなる人の、入るグループ・外れるグループ（グループごとの人数）。
+    決まり（全員・部署）で入るグループは、(前の部署, 前の状態, 後の部署, 後の状態) ごとにまとめて数える
+    （新しく入る人は「前」がなく、いなくなる人は「後」がない）。取り込みと「1つ前に戻す」で同じ数え方をする。
     手で入れたグループは、メンバーの人だけを1人ずつ見る。"""
     s = STAGE
     manual = {m["account_id"] for m in data["members"]}
@@ -412,7 +413,10 @@ def _group_effects(db, data: dict) -> list[dict]:
     rule_only = {**data, "members": []}
     combos = db.execute(
         f"SELECT e.dept, e.status, n.dept, n.status, COUNT(*) FROM employees e JOIN temp.{s} n USING (employee_no) "
-        f"WHERE (e.dept IS NOT n.dept OR (n.status = '退職' AND e.status <> '退職')) GROUP BY 1, 2, 3, 4").fetchall()
+        f"WHERE e.dept IS NOT n.dept OR e.status IS NOT n.status GROUP BY 1, 2, 3, 4").fetchall()
+    combos += [(None, None, d, st, c) for d, st, c in db.execute(
+        f"SELECT n.dept, n.status, COUNT(*) FROM temp.{s} n LEFT JOIN employees e USING (employee_no) "
+        f"WHERE e.employee_no IS NULL GROUP BY 1, 2")]
     combos += [(d, st, None, None, c) for d, st, c in db.execute(
         f"SELECT e.dept, e.status, COUNT(*) FROM employees e LEFT JOIN temp.{s} n USING (employee_no) "
         f"WHERE n.employee_no IS NULL GROUP BY 1, 2")]
@@ -703,6 +707,22 @@ class NoBackup(hr.HRImportError):
     pass
 
 
+RESTORED = "（戻した）"
+_OLD_RESTORED = "（1つ前に戻した）"      # 前の版の名前の付け方
+
+
+def restored_name(source: str) -> str:
+    """戻したときの記録の名前：「元のファイル名（戻した）」。何回戻しても「（戻した）」は1つだけ。"""
+    base = source
+    while True:
+        for suffix in (RESTORED, _OLD_RESTORED):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        else:
+            return base + RESTORED
+
+
 def preview_restore(db, leave_policy: str = LEAVE_KEEP) -> Preview:
     ensure_schema(db)
     bid = _latest_backup(db)
@@ -725,7 +745,7 @@ def restore(db, by: str, leave_policy: str = LEAVE_KEEP, today: str | None = Non
     parsed = _stage_from_backup(db, bid)
     try:
         # 控えは全員のデータなので、全員のファイルと同じに扱う（いなくなる人が多いときは確かめる）
-        return _commit_staged(db, parsed, f"{source}（1つ前に戻した）", "戻す", by, leave_policy,
+        return _commit_staged(db, parsed, restored_name(source), "戻す", by, leave_policy,
                               today or date.today().isoformat(), scope=SCOPE_ALL, confirm_removal=confirm_removal)
     finally:
         db.execute(f"DROP TABLE IF EXISTS temp.{STAGE}")
