@@ -66,6 +66,7 @@ from datetime import date, datetime
 Date = date   # 引数名 date（?date=...）に隠されないための別名
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, Response as RawResponse, StreamingResponse
@@ -336,6 +337,12 @@ class HrMapping(BaseModel):
 class HrRun(BaseModel):
     file_id: str = Field(min_length=1, max_length=64)
     mapping: HrMapping
+    scope: Literal["partial", "all"] = "partial"   # 一部のファイル（ファイルにいない人は変えない）か、全員のファイル
+    confirm_removal: bool = False                  # 全員のファイルで、いなくなる人が多いのを確かめた
+
+
+class HrRestore(BaseModel):
+    confirm_removal: bool = False
 
 
 class CheckIn(BaseModel):
@@ -1977,7 +1984,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                         out = hrimport.preview_restore(db, leave).as_dict()
                     else:
                         with HR_LOCK, access.CHANGE_LOCK:
-                            result = hrimport.restore(db, params["by"], leave, today().isoformat())
+                            result = hrimport.restore(db, params["by"], leave, today().isoformat(),
+                                                      bool(params.get("confirm_removal")))
                         out = result.as_dict()
                 except hrimport.NoBackup as e:
                     raise JobFailed(str(e)) from e
@@ -1985,12 +1993,16 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 f = job_file(params["owner"], params["file_id"], "hr")
                 path = Path(f["path"])
                 try:
+                    scope = params.get("scope", hrimport.SCOPE_PARTIAL)
                     if mode == "preview":
-                        out = hrimport.preview(db, path, params["mapping"], leave, progress).as_dict()
+                        out = hrimport.preview(db, path, params["mapping"], leave, progress, scope=scope,
+                                               source_name=f["name"]).as_dict()
                     else:
                         with HR_LOCK, access.CHANGE_LOCK:
                             ctx.progress(10, "確定（入れ替え）")
-                            result = hrimport.commit(db, path, params["mapping"], params["by"], leave, today().isoformat(), progress)
+                            result = hrimport.commit(db, path, params["mapping"], params["by"], leave, today().isoformat(),
+                                                     progress, scope=scope, confirm_removal=bool(params.get("confirm_removal")),
+                                                     source_name=f["name"])
                         out = result.as_dict()
                 except hr.HRImportError as e:
                     raise JobFailed(str(e)) from e
@@ -2011,21 +2023,24 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def hr_preview(req: HrRun, user: User = Depends(require("hr.import"))):
         my_file(req.file_id, user, "hr")
         return jobs.submit("hr", user.employee_no, {"mode": "preview", "file_id": req.file_id, "owner": user.employee_no,
-                                                    "mapping": check_mapping(req.mapping), "by": user.employee_no})
+                                                    "mapping": check_mapping(req.mapping), "by": user.employee_no,
+                                                    "scope": req.scope})
 
     @app.post("/api/hr/imports", status_code=202)
     def hr_commit(req: HrRun, user: User = Depends(require("hr.import"))):
         my_file(req.file_id, user, "hr")
         return jobs.submit("hr", user.employee_no, {"mode": "commit", "file_id": req.file_id, "owner": user.employee_no,
-                                                    "mapping": check_mapping(req.mapping), "by": user.employee_no})
+                                                    "mapping": check_mapping(req.mapping), "by": user.employee_no,
+                                                    "scope": req.scope, "confirm_removal": req.confirm_removal})
 
     @app.post("/api/hr/restore/preview", status_code=202)
     def hr_restore_preview(user: User = Depends(require("hr.import"))):
         return jobs.submit("hr", user.employee_no, {"mode": "restore_preview", "owner": user.employee_no, "by": user.employee_no})
 
     @app.post("/api/hr/restore", status_code=202)
-    def hr_restore(user: User = Depends(require("hr.import"))):
-        return jobs.submit("hr", user.employee_no, {"mode": "restore", "owner": user.employee_no, "by": user.employee_no})
+    def hr_restore(req: HrRestore | None = None, user: User = Depends(require("hr.import"))):
+        return jobs.submit("hr", user.employee_no, {"mode": "restore", "owner": user.employee_no, "by": user.employee_no,
+                                                    "confirm_removal": bool(req and req.confirm_removal)})
 
     @app.get("/api/hr/employees")
     def hr_employees(q: str = "", dept: str = "", offset: int = 0, user: User = Depends(require("hr.view"))):

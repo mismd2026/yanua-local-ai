@@ -81,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("hr-import", help="人事システムの出力（CSV / Excel / JSON）を取り込む")
     s.add_argument("source", type=Path)
     s.add_argument("--mapping", type=Path, required=True, help="列名の対応表（JSON）")
+    s.add_argument("--scope", choices=["partial", "all"], default="partial",
+                   help="partial：一部のファイル（ファイルにいない人は変えない。既定）、all：全員のファイル（ファイルにいない人はいなくなる）")
+    s.add_argument("--confirm-removal", action="store_true",
+                   help="全員のファイルで、いなくなる人が今の人数の10%%を超えても確定する（確かめたあとに付ける）")
     s.add_argument("--audit-db", type=Path, default=None, help="監査ログの保存先（既定: --db と同じフォルダの audit.db）")
 
     s = sub.add_parser("helpdesk", help="社内向けヘルプデスク（会話）")
@@ -290,7 +294,8 @@ def main(argv: list[str] | None = None) -> int:
                 os_user = "（わからない）"
             try:
                 report = import_employees(store.db, args.source, load_mapping(args.mapping),
-                                          by=f"{audit.SERVER_OP}（OS ユーザー {os_user}）")
+                                          by=f"{audit.SERVER_OP}（OS ユーザー {os_user}）", scope=args.scope,
+                                          confirm_removal=args.confirm_removal)
             except HRImportError as e:
                 print(e)
                 return 1

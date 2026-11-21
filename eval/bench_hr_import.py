@@ -4,7 +4,8 @@
 
 架空の人事データ（CSV。住所・給与の列も入れる）を作り、次の時間を測る。作ったファイルは一時フォルダに置き、最後に消す。
 1. 初めての取り込み（試し・確定）
-2. 2回目（部署の異動 1%・退職 0.5%・新しく入る人 0.1%・いなくなる人 0.1%）の試しと確定
+2. 2回目（全員のファイル。部署の異動 1%・退職 0.5%・新しく入る人 0.1%・いなくなる人 0.1%）の試しと確定、
+   一部のファイル（1つの部署の人だけ）の試し
    （手で入れたグループのメンバーも 1,000人置き、退職した人がそこから外れる分も含む）
 3. 1つ前に戻す（試し・確定）
 """
@@ -92,11 +93,15 @@ def main() -> int:
         changed = [x for i, x in enumerate(changed) if i not in gone]
         changed += [[str(20_000_000 + i), "新人 一郎", "", "第1営業部", "1", "在職", "", "", ""] for i in range(n // 1000)]
         write(second, changed)
-        p = timed("2回目の試し", lambda: hrimport.preview(db, second, MAPPING))
+        p = timed("2回目の試し（全員のファイル）", lambda: hrimport.preview(db, second, MAPPING, scope="all"))
         print(f"  入る {p.diff['added']['count']:,}人・変わる {p.diff['changed']['count']:,}人・"
               f"いなくなる {p.diff['removed']['count']:,}人・グループ {len(p.groups)}個・手で入れたグループから外れる {len(p.retired_members)}人")
-        r = timed("2回目の確定", lambda: hrimport.commit(db, second, MAPPING, "bench"))
+        r = timed("2回目の確定（全員のファイル）", lambda: hrimport.commit(db, second, MAPPING, "bench", scope="all"))
         assert r.committed, r.reason
+        part = Path(tmp) / "hr3.csv"
+        write(part, [x for x in changed if x[3] == "第1営業部"][:1000])
+        p = timed("一部のファイル（1つの部署）の試し", lambda: hrimport.preview(db, part, MAPPING))
+        print(f"  変わる {p.diff['changed']['count']:,}人・いなくなる {p.diff['removed']['count']:,}人")
         timed("1つ前に戻す（試し）", lambda: hrimport.preview_restore(db))
         r = timed("1つ前に戻す（確定）", lambda: hrimport.restore(db, "bench"))
         assert r.committed

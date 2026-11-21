@@ -1,7 +1,9 @@
 // S-51 人事データ（取り込みは hr.import、一覧は hr.view）。考え方は yanua/hrimport.py
 // - 人事アプリから出したファイル（Excel・CSV・JSON）を上げ、列を Yanua の項目に割り当てる（名前を付けて保存して、次から選べる）
 // - 読むのは割り当てた列だけ。在籍状態は、ファイルの値を在籍・休職・退職に当てる
+// - 取り込みの種類：「一部のファイル」（既定。ファイルにいない人は変えない）か「全員のファイル」（ファイルにいない人はいなくなる）
 // - 試す（保存しない）→ 確かめる（入る・変わる・いなくなる人、グループごとの増減、誤りは行番号つき）→ 確定（まとめて1回）
+//   全員のファイルで、いなくなる人が今の人数の 10% を超えるときは、「いなくなる人が N人（全体の M%）います」と出して、もう一度押させる
 // - 前の取り込みに戻す（戻す前にも試しの結果を出す）
 // - 一覧は hr.view の対象の部署の人だけ（守りは API の側）
 import { useEffect, useState } from "react";
@@ -68,6 +70,8 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   const [mode, setMode] = useState<"preview" | "commit">("preview");
   const [result, setResult] = useState<HrPreview | null>(null);
   const [tried, setTried] = useState("");     // 試したときの対応づけ（変えたら、もう一度試す）
+  const [scope, setScope] = useState<"partial" | "all">("partial");
+  const [ack, setAck] = useState(false);      // いなくなる人が多いことを、一度押して確かめた
   const { job } = useJob(jobId, (j: Job) => {
     if (j.status !== "完了") return;
     const r = j.result as unknown as HrPreview;
@@ -75,9 +79,9 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
       setResult(null);
       setMessage(r.committed ? `確定しました：入る ${r.added.count}人・変わる ${r.changed.count}人・いなくなる ${r.removed.count}人` : `確定しませんでした：${r.reason}`);
       onDone();
-    } else setResult(r);
+    } else { setResult(r); setAck(false); }
   });
-  const key = JSON.stringify({ fileId, mapping });
+  const key = JSON.stringify({ fileId, mapping, scope });
 
   const inspect = async (id: string, sheet?: string, statusColumn?: string) => {
     const r = await api<HrInspect>("POST", "/api/hr/inspect", { file_id: id, sheet: sheet || null, status_column: statusColumn || null });
@@ -125,14 +129,15 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   };
   const body = () => {
     const sv = Object.fromEntries(Object.entries(mapping.status_values ?? {}).filter(([, v]) => v));
-    return { file_id: fileId, mapping: { columns: mapping.columns, status_values: mapping.columns.status ? sv : undefined, sheet: mapping.sheet || undefined } };
+    return { file_id: fileId, scope, mapping: { columns: mapping.columns, status_values: mapping.columns.status ? sv : undefined, sheet: mapping.sheet || undefined } };
   };
   const start = async (m: "preview" | "commit") => {
     setError(""); setMessage("");
     try {
       setMode(m);
       if (m === "preview") { setResult(null); setTried(key); }
-      const j = await api<Job>("POST", m === "preview" ? "/api/hr/preview" : "/api/hr/imports", body());
+      const confirm = m === "commit" && !!result?.removal_warning;
+      const j = await api<Job>("POST", m === "preview" ? "/api/hr/preview" : "/api/hr/imports", m === "preview" ? body() : { ...body(), confirm_removal: confirm });
       setJobId(j.job_id);
     } catch (e) {
       setError(errorText(e, "始められませんでした"));
@@ -141,7 +146,7 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   const save = async () => {
     setError(""); setMessage("");
     try {
-      await api("PUT", `/api/hr/mappings/${encodeURIComponent(saveName.trim())}`, body().mapping);
+      await api("PUT", `/api/hr/mappings/${encodeURIComponent(saveName.trim())}`, body().mapping);  // 種類は対応づけに入れない
       setMessage(`対応づけ「${saveName.trim()}」を保存しました。次からこの名前で選べます`);
       setChosen(saveName.trim());
       onDone();
@@ -228,14 +233,23 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
             </label>{" "}
             <button disabled={!saveName.trim() || missing.length > 0} onClick={save}>保存する</button>
           </p>
+          <fieldset>
+            <legend>取り込みの種類</legend>
+            <label style={{ display: "block" }}><input type="radio" name="hr-scope" style={{ width: "auto" }} checked={scope === "partial"} onChange={() => setScope("partial")} />
+              {" "}一部のファイル（ファイルにいない人は変えない）</label>
+            <label style={{ display: "block" }}><input type="radio" name="hr-scope" style={{ width: "auto" }} checked={scope === "all"} onChange={() => setScope("all")} />
+              {" "}全員のファイル（ファイルにいない人は、いなくなる人として扱う）</label>
+          </fieldset>
+          <p className="small muted">「使わない」にした よみ・部署コード・メールアドレス・在籍状態は、今いる人の値をそのまま残します（新しく入る人だけ空のまま）。</p>
           <p><button className="primary" disabled={running || missing.length > 0 || !fileId} onClick={() => start("preview")}>試す（保存しない）</button></p>
         </>
       )}
       {jobId && running && <JobProgress job={job} label={mode === "preview" ? "試し" : "確定"} />}
       {job?.status === "失敗" && <p className="error" role="alert">{job.error}</p>}
       {result && (
-        <PreviewBox p={result} title="試しの結果" stale={tried !== key}>
-          <button className="primary" disabled={!result.ok || tried !== key || running} onClick={() => start("commit")}>確定する</button>{" "}
+        <PreviewBox p={result} title="試しの結果" stale={tried !== key} ack={ack}>
+          <button className="primary" disabled={!result.ok || tried !== key || running}
+            onClick={() => (result.removal_warning && !ack ? setAck(true) : start("commit"))}>確定する</button>{" "}
           <button disabled={running} onClick={() => setResult(null)}>やめる</button>
         </PreviewBox>
       )}
@@ -254,11 +268,12 @@ function People({ label, part }: { label: string; part: { count: number; first: 
   );
 }
 
-export function PreviewBox({ p, title, stale, children }: { p: HrPreview; title: string; stale?: boolean; children: React.ReactNode }) {
+export function PreviewBox({ p, title, stale, ack, children }: { p: HrPreview; title: string; stale?: boolean; ack?: boolean; children: React.ReactNode }) {
   const by = Object.entries(p.changed.by_field ?? {}).filter(([, n]) => n > 0);
   return (
     <section className="card" aria-label={title}>
       <h3>{title}</h3>
+      <p>取り込みの種類：<strong>{p.scope_label}</strong>{p.scope === "partial" && <span className="small muted">（ファイルにいない人は変えません）</span>}</p>
       <p>
         読んだ行：{p.rows}行。在籍 {p.counts["在籍"] ?? 0}人・休職 {p.counts["休職"] ?? 0}人・退職 {p.counts["退職"] ?? 0}人
         {p.ignored_columns.length > 0 && <span className="small muted">（読まなかった列：{p.ignored_columns.join("・")}）</span>}
@@ -289,6 +304,11 @@ export function PreviewBox({ p, title, stale, children }: { p: HrPreview; title:
           )}
           {p.retired_members > 0 && <p className="small">退職・いなくなる {p.retired_members}人は、手で入れたグループからも外れます（在籍に戻っても自動では戻りません）。</p>}
           {p.lockout && <p className="error" role="alert">確定すると、権限を変えられる人（roles.assign）がいなくなるので、確定できません。</p>}
+          {p.removal_warning && (
+            <p className={ack ? "error" : "small"} role={ack ? "alert" : undefined}>
+              {p.removal_warning.message}（今の {p.current_total}人のうち）。{ack ? "よければ、もう一度押してください。" : "確定するときは、もう一度確かめます。"}
+            </p>
+          )}
         </>
       )}
       {stale && <p className="small">対応づけかファイルを変えたので、もう一度試してから確定してください。</p>}
@@ -303,9 +323,11 @@ function RestoreBox({ view, onDone }: { view: HrOverview; onDone: () => void }) 
   const [result, setResult] = useState<HrPreview | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [ack, setAck] = useState(false);
   const { job } = useJob(jobId, (j: Job) => {
     if (j.status !== "完了") return;
     const r = j.result as unknown as HrPreview;
+    setAck(false);
     if (mode === "restore") {
       setResult(null);
       setMessage(r.committed ? "1つ前の取り込みに戻しました" : `戻しませんでした：${r.reason}`);
@@ -317,7 +339,8 @@ function RestoreBox({ view, onDone }: { view: HrOverview; onDone: () => void }) 
     try {
       setMode(m);
       if (m === "preview") setResult(null);
-      const j = await api<Job>("POST", m === "preview" ? "/api/hr/restore/preview" : "/api/hr/restore");
+      const j = await api<Job>("POST", m === "preview" ? "/api/hr/restore/preview" : "/api/hr/restore",
+        m === "preview" ? undefined : { confirm_removal: !!result?.removal_warning });
       setJobId(j.job_id);
     } catch (e) {
       setError(errorText(e, "始められませんでした"));
@@ -330,10 +353,10 @@ function RestoreBox({ view, onDone }: { view: HrOverview; onDone: () => void }) 
       {view.history.length > 0 && (
         <div className="table-wrap">
           <table className="table" aria-label="取り込みの記録">
-            <thead><tr><th>日時</th><th>したこと</th><th>ファイル</th><th>した人</th><th>入る・変わる・いなくなる</th></tr></thead>
+            <thead><tr><th>日時</th><th>したこと</th><th>種類</th><th>ファイル</th><th>した人</th><th>入る・変わる・いなくなる</th></tr></thead>
             <tbody>
               {view.history.map((h, i) => (
-                <tr key={i}><td className="small">{h.imported_at.slice(0, 16).replace("T", " ")}</td><td>{h.kind}</td><td>{h.source}</td><td>{h.by}</td>
+                <tr key={i}><td className="small">{h.imported_at.slice(0, 16).replace("T", " ")}</td><td>{h.kind}</td><td>{h.scope || "—"}</td><td>{h.source}</td><td>{h.by}</td>
                   <td>{h.added}人・{h.changed}人・{h.removed}人</td></tr>
               ))}
             </tbody>
@@ -347,8 +370,9 @@ function RestoreBox({ view, onDone }: { view: HrOverview; onDone: () => void }) 
       {jobId && running && <JobProgress job={job} label={mode === "preview" ? "戻す前の試し" : "戻す"} />}
       {job?.status === "失敗" && <p className="error" role="alert">{job.error}</p>}
       {result && (
-        <PreviewBox p={result} title="戻す前の試し">
-          <button className="primary" disabled={!result.ok || running} onClick={() => start("restore")}>戻す</button>{" "}
+        <PreviewBox p={result} title="戻す前の試し" ack={ack}>
+          <button className="primary" disabled={!result.ok || running}
+            onClick={() => (result.removal_warning && !ack ? setAck(true) : start("restore"))}>戻す</button>{" "}
           <button disabled={running} onClick={() => setResult(null)}>やめる</button>
         </PreviewBox>
       )}

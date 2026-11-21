@@ -281,14 +281,16 @@ def refresh_departments(db) -> None:
                    "WHERE active = 1 GROUP BY dept")
 
 
-def import_employees(db, path: Path, mapping: dict, by: str = "（コマンド）", leave_policy: str = "そのまま") -> HRImportReport:
+def import_employees(db, path: Path, mapping: dict, by: str = "（コマンド）", leave_policy: str = "そのまま",
+                     scope: str = "partial", confirm_removal: bool = False) -> HRImportReport:
     """人事データを取り込む（コマンド・テスト用）。画面と同じ処理（yanua/hrimport.py の commit）を通す。
-    対応表の列以外は読まない。毎回まるごと入れ替える。誤りが1件でもあれば入れ替えない。"""
+    対応表の列以外は読まない。誤りが1件でもあれば入れ替えない。scope は "partial"（一部のファイル。ファイルにいない人は
+    変えない。既定）か "all"（全員のファイル。ファイルにいない人はいなくなる。多いときは confirm_removal が要る）。"""
     from . import hrimport
 
     report = HRImportReport()
     try:
-        result = hrimport.commit(db, path, mapping, by, leave_policy)
+        result = hrimport.commit(db, path, mapping, by, leave_policy, scope=scope, confirm_removal=confirm_removal)
     except hrimport.MappingError as e:
         report.errors = [f"{path.name}: 対応表 {w} {m}".replace("対応表  ", "対応表 ") for w, m in e.problems]
         return report
@@ -351,7 +353,7 @@ def lookup_by_email(db, email: str) -> dict | None:
 
 def last_import(db) -> dict | None:
     ensure_schema(db)
-    row = db.execute("SELECT imported_at, source, active, inactive FROM hr_imports ORDER BY imported_at DESC LIMIT 1").fetchone()
+    row = db.execute("SELECT imported_at, source, active, inactive FROM hr_imports ORDER BY rowid DESC LIMIT 1").fetchone()
     if not row:
         return None
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(row[0])).days

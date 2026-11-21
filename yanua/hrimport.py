@@ -10,6 +10,10 @@
   部署が変わる人・退職になる人・いなくなる人の、入るグループ・外れるグループ（グループごとの人数）
 - 確定：1つのトランザクションで、今のデータを控えに写し → まるごと入れ替え → 部署の一覧を作り直し →
   退職した人・いなくなった人を、手で入れたグループから外す → 権限の結果を作り直す（世代を上げる）。途中で失敗したら前のまま
+- 取り込みの種類：「一部のファイル」（既定。ファイルにいない人は変えない）と「全員のファイル」（ファイルにいない人は
+  いなくなる人）。全員のファイルで、いなくなる人が今の人数の REMOVAL_WARN を超えるときは、確かめてからでないと確定しない
+- 「使わない」にした任意の列（よみ・部署コード・メールアドレス・在籍状態）は、今いる人の値をそのまま残す（変わる人にも数えない）。
+  新しく入る人だけ、その列が空（在籍状態は「在籍」）で入る
 - 控えは直近の HR_KEEP 回分。「1つ前に戻す」は、いちばん新しい控えを、取り込みと同じ流れ（試し → 確定）で入れる
   （戻したことも控えに残るので、戻したことをまた戻せる）。手で入れたグループのメンバーは、戻しても自動では戻らない
 - 100万人でも数分で終わるように、比べるのは SQLite の一時表どうし（全員を Python に読み込まない）
@@ -35,6 +39,10 @@ COMPARED = ("name", "kana", "dept", "dept_code", "status", "email")
 CHANGE_LABELS = {"name": "名前", "kana": "よみ", "dept": "部署", "dept_code": "部署コード", "status": "在籍状態",
                  "email": "メールアドレス"}
 LEAVE_KEEP, LEAVE_EMPLOYEE_ONLY = "そのまま", "社員の役割だけ"
+SCOPE_PARTIAL, SCOPE_ALL = "partial", "all"
+SCOPE_LABELS = {SCOPE_PARTIAL: "一部のファイル", SCOPE_ALL: "全員のファイル"}
+REMOVAL_WARN = 0.10         # 全員のファイルで、いなくなる人がこの割合を超えたら、確かめてからでないと確定しない
+OPTIONAL = ("kana", "dept_code", "email", "status")   # 「使わない」にできる列（今の値を残す）
 
 META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS hr_backups (
@@ -47,7 +55,7 @@ CREATE TABLE IF NOT EXISTS hr_backups (
 """
 IMPORT_COLUMNS = {"kind": "TEXT NOT NULL DEFAULT '取り込み'", "by_who": "TEXT NOT NULL DEFAULT ''",
                   "added": "INTEGER NOT NULL DEFAULT 0", "changed": "INTEGER NOT NULL DEFAULT 0",
-                  "removed": "INTEGER NOT NULL DEFAULT 0"}
+                  "removed": "INTEGER NOT NULL DEFAULT 0", "scope": "TEXT NOT NULL DEFAULT ''"}
 
 
 class MappingError(hr.HRImportError):
@@ -253,7 +261,6 @@ def _stage(db: sqlite3.Connection, path: Path, mapping: Mapping, progress=None) 
     wanted = out.read_columns
     seen: dict[str, int] = {}
     batch: list[tuple] = []
-    counts: Counter = Counter()
     for line, r in _iter(path, wanted, mapping.sheet):
         out.rows += 1
         get = lambda f: r.get(cols[f], "") if f in cols else ""  # noqa: E731
@@ -272,7 +279,6 @@ def _stage(db: sqlite3.Connection, path: Path, mapping: Mapping, progress=None) 
         if status is None:
             out.error(line, f"在籍状態「{raw}」を、在籍・休職・退職のどれに当てるか決めていません")
             continue
-        counts[status] += 1
         batch.append((no, name, get("kana").strip(), dept, get("dept_code").strip(), status, get("email").strip().lower(),
                       int(status in hr.ACTIVE_STATUSES), *hr._keys(name, dept)))
         if len(batch) >= 20000:
@@ -283,8 +289,27 @@ def _stage(db: sqlite3.Connection, path: Path, mapping: Mapping, progress=None) 
     if not out.rows:
         out.error(1, "行がありません")
     _insert_stage(db, batch)
-    out.counts = {s: counts.get(s, 0) for s in hr.STATUSES}
+    _keep_unmapped(db, mapping)
+    found = dict(db.execute(f"SELECT status, COUNT(*) FROM temp.{STAGE} GROUP BY status").fetchall())
+    out.counts = {s: found.get(s, 0) for s in hr.STATUSES}
     return out
+
+
+def _keep_unmapped(db, mapping: Mapping) -> None:
+    """「使わない」にした任意の列は、今いる人の値をそのまま使う（新しく入る人だけ空のまま）。"""
+    unmapped = [c for c in OPTIONAL if c not in mapping.columns]
+    if not unmapped:
+        return
+    sets = ", ".join(f"{c} = e.{c}" for c in unmapped)
+    if "status" in unmapped:
+        sets += ", active = e.active"
+    db.execute(f"UPDATE temp.{STAGE} AS n SET {sets} FROM employees AS e WHERE e.employee_no = n.employee_no")
+
+
+def _add_others(db) -> None:
+    """一部のファイル：ファイルにいない人は、今のまま残す（一時表に今の値で足す）。"""
+    db.execute(f"INSERT INTO temp.{STAGE} SELECT employee_no, name, kana, dept, dept_code, status, email, active, "
+               f"name_key, surname_key, dept_key FROM employees WHERE employee_no NOT IN (SELECT employee_no FROM temp.{STAGE})")
 
 
 def _create_stage(db) -> None:
@@ -468,16 +493,28 @@ class Preview:
     groups: list[dict]
     lockout: bool
     retired_members: list[dict]           # 退職・いなくなるので、手で入れたグループから外れる人（社員番号とグループ）
+    scope: str = SCOPE_PARTIAL
+    current_total: int = 0                # 今の人事データの人数
 
     @property
     def ok(self) -> bool:
         return not self.error_count and not self.lockout
 
+    @property
+    def removal_warning(self) -> dict | None:
+        """いなくなる人が今の人数の REMOVAL_WARN を超えるとき {count, percent, message}（確かめてからでないと確定しない）。"""
+        n = self.diff["removed"]["count"]
+        if not self.current_total or n <= self.current_total * REMOVAL_WARN:
+            return None
+        pct = round(100 * n / self.current_total, 1)
+        return {"count": n, "percent": pct, "message": f"いなくなる人が {n}人（全体の {pct:g}%）います"}
+
     def as_dict(self) -> dict:
         return {"source": self.source, "rows": self.rows, "errors": self.errors, "error_count": self.error_count,
                 "read_columns": self.read_columns, "ignored_columns": self.ignored_columns, "counts": self.counts,
                 **self.diff, "groups": self.groups, "lockout": self.lockout, "ok": self.ok,
-                "retired_members": len(self.retired_members)}
+                "retired_members": len(self.retired_members), "scope": self.scope, "scope_label": SCOPE_LABELS[self.scope],
+                "current_total": self.current_total, "removal_warning": self.removal_warning}
 
 
 def _retired_members(db, data: dict) -> list[dict]:
@@ -500,26 +537,32 @@ def _empty_diff() -> dict:
             "removed": {"count": 0, "first": []}}
 
 
-def _preview_staged(db, parsed: Parsed, source: str, leave_policy: str) -> Preview:
+def _preview_staged(db, parsed: Parsed, source: str, leave_policy: str, scope: str = SCOPE_PARTIAL) -> Preview:
     from . import access
 
+    if scope not in SCOPE_LABELS:
+        raise hr.HRImportError(f"取り込みの種類が正しくありません：{scope}")
+    current = db.execute("SELECT COUNT(*) FROM employees").fetchone()[0]
     if parsed.error_count:
         return Preview(source, parsed.rows, parsed.errors, parsed.error_count, parsed.read_columns, parsed.ignored_columns,
-                       parsed.counts, _empty_diff(), [], False, [])
+                       parsed.counts, _empty_diff(), [], False, [], scope, current)
+    if scope == SCOPE_PARTIAL:
+        _add_others(db)
     data = access.load(db)
     # 今は roles.assign を持つ人がいて、確定するといなくなるときだけ止める（まだだれも持っていないときは止めない）
     lockout = (_assign_holders(db, data, leave_policy, f"temp.{STAGE}") == 0
                and _assign_holders(db, data, leave_policy, "employees") > 0)
     return Preview(source, parsed.rows, [], 0, parsed.read_columns, parsed.ignored_columns, parsed.counts,
-                   _diff(db), _group_effects(db, data), lockout, _retired_members(db, data))
+                   _diff(db), _group_effects(db, data), lockout, _retired_members(db, data), scope, current)
 
 
-def preview(db, path: Path, mapping: dict, leave_policy: str = LEAVE_KEEP, progress=None) -> Preview:
-    """試しの結果（保存しない）。"""
+def preview(db, path: Path, mapping: dict, leave_policy: str = LEAVE_KEEP, progress=None, scope: str = SCOPE_PARTIAL,
+            source_name: str | None = None) -> Preview:
+    """試しの結果（保存しない）。source_name は上げたときのファイル名（画面に出す。なければ path の名前）。"""
     ensure_schema(db)
     parsed = _stage(db, path, parse_mapping(mapping), progress)
     try:
-        return _preview_staged(db, parsed, path.name, leave_policy)
+        return _preview_staged(db, parsed, source_name or path.name, leave_policy, scope)
     finally:
         db.execute(f"DROP TABLE IF EXISTS temp.{STAGE}")
 
@@ -554,8 +597,8 @@ class Result:
         d = p.as_dict()
         by = d["changed"]["by_field"]
         parts = "・".join(f"{k} {v}" for k, v in by.items() if v)
-        head = (f"入る {d['added']['count']}人・変わる {d['changed']['count']}人" + (f"（{parts}）" if parts else "")
-                + f"・いなくなる {d['removed']['count']}人")
+        head = (f"{d['scope_label']}：入る {d['added']['count']}人・変わる {d['changed']['count']}人"
+                + (f"（{parts}）" if parts else "") + f"・いなくなる {d['removed']['count']}人")
         if self.changed_numbers:
             more = self.changed_total - len(self.changed_numbers)
             head += "。社員番号：" + "・".join(self.changed_numbers) + (f" ほか {more}人" if more > 0 else "")
@@ -563,14 +606,17 @@ class Result:
 
 
 def _commit_staged(db, parsed: Parsed, source: str, kind: str, by: str, leave_policy: str,
-                   today: str, fail_hook: Callable[[str], None] | None = None) -> Result:
+                   today: str, fail_hook: Callable[[str], None] | None = None, scope: str = SCOPE_PARTIAL,
+                   confirm_removal: bool = False) -> Result:
     from . import access
 
-    p = _preview_staged(db, parsed, source, leave_policy)
+    p = _preview_staged(db, parsed, source, leave_policy, scope)
     if not p.ok:
         reason = ("誤りがあるので確定しません" if p.error_count else
                   "確定すると、roles.assign（権限を変える権限）を持つ人がいなくなるので確定しません")
         return Result(p, False, kind, reason=reason)
+    if p.removal_warning and not confirm_removal:
+        return Result(p, False, kind, reason=p.removal_warning["message"] + "。確かめてから、もう一度確定してください")
     numbers, total = _changed_numbers(db, 200)
     s = STAGE
     db.commit()                                 # 一時表に入れた分（読み込み）を区切ってから、入れ替えを1つのトランザクションで
@@ -607,10 +653,10 @@ def _commit_staged(db, parsed: Parsed, source: str, kind: str, by: str, leave_po
         active = db.execute("SELECT COUNT(*) FROM employees WHERE active = 1").fetchone()[0]
         total_now = db.execute("SELECT COUNT(*) FROM employees").fetchone()[0]
         d = p.diff
-        db.execute("INSERT INTO hr_imports (imported_at, source, active, inactive, kind, by_who, added, changed, removed) "
-                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        db.execute("INSERT INTO hr_imports (imported_at, source, active, inactive, kind, by_who, added, changed, removed, scope) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                    (_now(), source, active, total_now - active, kind, by, d["added"]["count"], d["changed"]["count"],
-                    d["removed"]["count"]))
+                    d["removed"]["count"], SCOPE_LABELS[scope]))
         for (old,) in db.execute("SELECT backup_id FROM hr_backups ORDER BY backup_id DESC LIMIT -1 OFFSET ?", (HR_KEEP,)).fetchall():
             db.execute(f"DROP TABLE IF EXISTS {_backup_table(old)}")
             db.execute("DELETE FROM hr_backups WHERE backup_id = ?", (old,))
@@ -629,12 +675,15 @@ def _commit_staged(db, parsed: Parsed, source: str, kind: str, by: str, leave_po
 
 
 def commit(db, path: Path, mapping: dict, by: str, leave_policy: str = LEAVE_KEEP, today: str | None = None,
-           progress=None, fail_hook=None) -> Result:
-    """確定：まとめて1回で入れ替える。誤りがあれば何も変えない（committed = False）。"""
+           progress=None, fail_hook=None, scope: str = SCOPE_PARTIAL, confirm_removal: bool = False,
+           source_name: str | None = None) -> Result:
+    """確定：まとめて1回で入れ替える。誤りがあれば何も変えない（committed = False）。
+    全員のファイルで、いなくなる人が多いとき（removal_warning）は、confirm_removal がなければ確定しない。"""
     ensure_schema(db)
     parsed = _stage(db, path, parse_mapping(mapping), progress)
     try:
-        return _commit_staged(db, parsed, path.name, "取り込み", by, leave_policy, today or date.today().isoformat(), fail_hook)
+        return _commit_staged(db, parsed, source_name or path.name, "取り込み", by, leave_policy,
+                              today or date.today().isoformat(), fail_hook, scope, confirm_removal)
     finally:
         db.execute(f"DROP TABLE IF EXISTS temp.{STAGE}")
 
@@ -661,12 +710,12 @@ def preview_restore(db, leave_policy: str = LEAVE_KEEP) -> Preview:
         raise NoBackup("戻せる前の取り込みがありません")
     parsed = _stage_from_backup(db, bid)
     try:
-        return _preview_staged(db, parsed, f"控え {bid}", leave_policy)
+        return _preview_staged(db, parsed, f"控え {bid}", leave_policy, SCOPE_ALL)
     finally:
         db.execute(f"DROP TABLE IF EXISTS temp.{STAGE}")
 
 
-def restore(db, by: str, leave_policy: str = LEAVE_KEEP, today: str | None = None) -> Result:
+def restore(db, by: str, leave_policy: str = LEAVE_KEEP, today: str | None = None, confirm_removal: bool = False) -> Result:
     """1つ前（いちばん新しい控え）に戻す。取り込みと同じ流れで入れるので、戻したこともまた戻せる。"""
     ensure_schema(db)
     bid = _latest_backup(db)
@@ -675,16 +724,17 @@ def restore(db, by: str, leave_policy: str = LEAVE_KEEP, today: str | None = Non
     source = db.execute("SELECT source FROM hr_backups WHERE backup_id = ?", (bid,)).fetchone()[0]
     parsed = _stage_from_backup(db, bid)
     try:
+        # 控えは全員のデータなので、全員のファイルと同じに扱う（いなくなる人が多いときは確かめる）
         return _commit_staged(db, parsed, f"{source}（1つ前に戻した）", "戻す", by, leave_policy,
-                              today or date.today().isoformat())
+                              today or date.today().isoformat(), scope=SCOPE_ALL, confirm_removal=confirm_removal)
     finally:
         db.execute(f"DROP TABLE IF EXISTS temp.{STAGE}")
 
 
 def history(db, limit: int = 10) -> list[dict]:
     ensure_schema(db)
-    return [dict(zip(("imported_at", "source", "active", "inactive", "kind", "by", "added", "changed", "removed"), r))
-            for r in db.execute("SELECT imported_at, source, active, inactive, kind, by_who, added, changed, removed "
+    return [dict(zip(("imported_at", "source", "active", "inactive", "kind", "by", "added", "changed", "removed", "scope"), r))
+            for r in db.execute("SELECT imported_at, source, active, inactive, kind, by_who, added, changed, removed, scope "
                                 "FROM hr_imports ORDER BY rowid DESC LIMIT ?", (limit,))]
 
 

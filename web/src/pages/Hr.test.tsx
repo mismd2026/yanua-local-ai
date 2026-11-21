@@ -16,7 +16,7 @@ const MAPPING = {
 };
 const STATUS = {
   last: { imported_at: "2026-11-20T01:00:00+00:00", source: "hr.csv", active: 6, inactive: 1, age_days: 0 },
-  history: [{ imported_at: "2026-11-20T01:00:00+00:00", source: "hr.csv", kind: "取り込み", by: "10006", added: 7, changed: 0, removed: 0 }],
+  history: [{ imported_at: "2026-11-20T01:00:00+00:00", source: "hr.csv", kind: "取り込み", by: "10006", added: 7, changed: 0, removed: 0, scope: "一部のファイル" }],
   backups: [{ backup_id: 1, saved_at: "2026-11-20T01:00:00+00:00", source: "（前の取り込み）", total: 0, active: 0 }],
   mappings: { うちの人事アプリ: MAPPING },
   problems: [],
@@ -36,6 +36,7 @@ const PREVIEW = {
   changed: { count: 1, first: [{ employee_no: "10004", name: "高橋 美咲", dept: "総務部", status: "在籍", changes: ["部署 営業部→総務部"] }], by_field: { 部署: 1 } },
   removed: { count: 0, first: [] },
   groups: [{ group_id: "G-general", name: "総務", join: 1, leave: 0 }], lockout: false, ok: true, retired_members: 0,
+  scope: "partial", scope_label: "一部のファイル", current_total: 7, removal_warning: null,
 };
 const job = (id: string, result: object) => ({ job_id: id, kind: "hr", status: "完了", progress: 100, stage: "完了", result, created_at: "" });
 const queued = (id: string) => () => ({ status: 202, json: { job_id: id, kind: "hr", status: "待ち", progress: 0, stage: "", created_at: "" } });
@@ -78,14 +79,15 @@ describe("S-51 人事データ", () => {
     await user.click(within(form).getByRole("button", { name: "試す（保存しない）" }));
     const box = await within(form).findByRole("region", { name: "試しの結果" });
     expect(box).toHaveTextContent("在籍 5人・休職 1人・退職 1人");
+    expect(box).toHaveTextContent("取り込みの種類：一部のファイル（ファイルにいない人は変えません）");
     expect(box).toHaveTextContent("読まなかった列：住所・給与");
     expect(within(box).getByRole("list", { name: "変わる人" })).toHaveTextContent("変わる人：1人 （先頭：10004 高橋 美咲［部署 営業部→総務部］）");
     expect(within(box).getByRole("table", { name: "グループごとの人数" })).toHaveTextContent("総務1人0人");
-    expect(calls.find((c) => c.path === "/api/hr/preview")?.body).toEqual({ file_id: "f1", mapping: MAPPING });
+    expect(calls.find((c) => c.path === "/api/hr/preview")?.body).toEqual({ file_id: "f1", scope: "partial", mapping: MAPPING });
     expect(calls.some((c) => c.path === "/api/hr/imports")).toBe(false);
     await user.click(within(box).getByRole("button", { name: "確定する" }));
     expect(await within(form).findByRole("status")).toHaveTextContent("確定しました：入る 0人・変わる 1人・いなくなる 0人");
-    expect(calls.find((c) => c.path === "/api/hr/imports")?.body).toEqual({ file_id: "f1", mapping: MAPPING });
+    expect(calls.find((c) => c.path === "/api/hr/imports")?.body).toEqual({ file_id: "f1", scope: "partial", mapping: MAPPING, confirm_removal: false });
   });
 
   it("誤りは行番号つきで出し、確定できない。試したあとに対応づけを変えたら、もう一度試すまで確定できない", async () => {
@@ -110,6 +112,30 @@ describe("S-51 人事データ", () => {
     await user.selectOptions(within(form).getByLabelText("よみ"), "住所");
     expect(within(form).getByRole("button", { name: "確定する" })).toBeDisabled();
     expect(within(form).getByText("対応づけかファイルを変えたので、もう一度試してから確定してください。")).toBeInTheDocument();
+  });
+
+  it("全員のファイルで、いなくなる人が10%を超えるときは、出してからもう一度押させる", async () => {
+    const many = { ...PREVIEW, scope: "all", scope_label: "全員のファイル", removed: { count: 4, first: [] },
+      removal_warning: { count: 4, percent: 57.1, message: "いなくなる人が 4人（全体の 57.1%）います" } };
+    const { calls } = fakeApi({
+      "GET /api/hr/status": STATUS, ...UPLOAD, "POST /api/hr/inspect": inspect,
+      "POST /api/hr/preview": queued("p1"), "GET /api/jobs/p1": job("p1", many),
+      "POST /api/hr/imports": queued("c1"), "GET /api/jobs/c1": job("c1", { ...many, committed: true }),
+    });
+    const user = userEvent.setup();
+    render(<HrPage />);
+    const form = await pickFile(user);
+    await user.click(within(form).getByLabelText("全員のファイル（ファイルにいない人は、いなくなる人として扱う）"));
+    await user.click(within(form).getByRole("button", { name: "試す（保存しない）" }));
+    const box = await within(form).findByRole("region", { name: "試しの結果" });
+    expect(box).toHaveTextContent("取り込みの種類：全員のファイル");
+    expect(calls.find((c) => c.path === "/api/hr/preview")?.body.scope).toBe("all");
+    await user.click(within(box).getByRole("button", { name: "確定する" }));
+    expect(within(box).getByRole("alert")).toHaveTextContent("いなくなる人が 4人（全体の 57.1%）います（今の 7人のうち）。よければ、もう一度押してください。");
+    expect(calls.some((c) => c.path === "/api/hr/imports")).toBe(false);
+    await user.click(within(box).getByRole("button", { name: "確定する" }));
+    expect(await within(form).findByRole("status")).toHaveTextContent("確定しました");
+    expect(calls.find((c) => c.path === "/api/hr/imports")?.body).toMatchObject({ scope: "all", confirm_removal: true });
   });
 
   it("対応づけに名前を付けて保存する", async () => {
@@ -137,7 +163,7 @@ describe("S-51 人事データ", () => {
     const user = userEvent.setup();
     render(<HrPage />);
     const area = await screen.findByRole("region", { name: "前の取り込みに戻す" });
-    expect(within(area).getByRole("table", { name: "取り込みの記録" })).toHaveTextContent("取り込みhr.csv100067人・0人・0人");
+    expect(within(area).getByRole("table", { name: "取り込みの記録" })).toHaveTextContent("取り込み一部のファイルhr.csv100067人・0人・0人");
     await user.click(within(area).getByRole("button", { name: "1つ前に戻す（まず試す）" }));
     const box = await within(area).findByRole("region", { name: "戻す前の試し" });
     expect(calls.some((c) => c.path === "/api/hr/restore")).toBe(false);

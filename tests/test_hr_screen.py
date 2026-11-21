@@ -98,14 +98,14 @@ def run(c, path: str, body: dict) -> dict:
     return job["result"]
 
 
-def preview(c, rows_or_body, mapping=MAPPING) -> dict:
+def preview(c, rows_or_body, mapping=MAPPING, **kw) -> dict:
     fid = upload(c, rows_or_body if isinstance(rows_or_body, bytes) else csv_text(rows_or_body))
-    return run(c, "/api/hr/preview", {"file_id": fid, "mapping": mapping})
+    return run(c, "/api/hr/preview", {"file_id": fid, "mapping": mapping, **kw})
 
 
-def commit(c, rows_or_body, mapping=MAPPING) -> dict:
+def commit(c, rows_or_body, mapping=MAPPING, **kw) -> dict:
     fid = upload(c, rows_or_body if isinstance(rows_or_body, bytes) else csv_text(rows_or_body))
-    return run(c, "/api/hr/imports", {"file_id": fid, "mapping": mapping})
+    return run(c, "/api/hr/imports", {"file_id": fid, "mapping": mapping, **kw})
 
 
 def audit(c, action) -> list[dict]:
@@ -198,7 +198,7 @@ def test_department_change_swaps_rule_groups_and_audit_has_numbers_only(client, 
     me = client.get("/api/me").json()
     assert "総務" in me["roles"] and "paper" in me["permissions"]
     entry = audit(client, "hr.import")[0]
-    assert entry["detail"] == "入る 0人・変わる 1人（部署 1・部署コード 1）・いなくなる 0人。社員番号：10004"
+    assert entry["detail"] == "一部のファイル：入る 0人・変わる 1人（部署 1・部署コード 1）・いなくなる 0人。社員番号：10004"
     assert "高橋" not in entry["detail"] and "@" not in entry["detail"]
     db = sqlite3.connect(settings.db_path)
     changed = dict(db.execute("SELECT employee_no, changed_at FROM employees"))
@@ -274,6 +274,84 @@ def test_on_leave_session_is_ended_when_login_is_turned_off(client, settings):
     assert other.get("/api/me").status_code == 401
 
 
+# ---------------------------------------------------------------- 取り込みの種類・使わない列・ファイル名
+
+
+SALES = [r for r in DEMO_ROWS if r[3] == "営業部"]
+
+
+def test_partial_file_leaves_everyone_else_unchanged(client, settings):
+    commit(client, DEMO_ROWS)
+    db = sqlite3.connect(settings.db_path)
+    before = db.execute("SELECT * FROM employees WHERE dept <> '営業部' ORDER BY employee_no").fetchall()
+    p = preview(client, change(SALES, "10004", name="高橋 美咲子"))                # 種類を言わなければ「一部のファイル」
+    assert p["scope"] == "partial" and p["scope_label"] == "一部のファイル"
+    assert (p["added"]["count"], p["changed"]["count"], p["removed"]["count"]) == (0, 1, 0) and p["groups"] == []
+    assert p["removal_warning"] is None
+    r = commit(client, change(SALES, "10004", name="高橋 美咲子"))
+    assert r["committed"]
+    assert db.execute("SELECT * FROM employees WHERE dept <> '営業部' ORDER BY employee_no").fetchall() == before
+    assert db.execute("SELECT name FROM employees WHERE employee_no = '10004'").fetchone() == ("高橋 美咲子",)
+    assert audit(client, "hr.import")[0]["detail"].startswith("一部のファイル：入る 0人・変わる 1人（名前 1）・いなくなる 0人")
+    assert client.get("/api/hr/status").json()["history"][0]["scope"] == "一部のファイル"
+
+
+def test_whole_file_asks_again_when_more_than_ten_percent_leave(client, settings):
+    commit(client, DEMO_ROWS)
+    p = preview(client, SALES, scope="all")
+    assert p["scope_label"] == "全員のファイル" and p["removed"]["count"] == 4
+    assert p["removal_warning"] == {"count": 4, "percent": 57.1, "message": "いなくなる人が 4人（全体の 57.1%）います"}
+    login(client, "10005")                                    # 締め出しの決まりにかからないよう、ここだけは管理者を残す
+    login(client, "10006")
+    rows = SALES + [r for r in DEMO_ROWS if r[0] in ("10005", "10006")]
+    r = commit(client, rows, scope="all")                    # 確かめずに押すと、確定しない
+    assert not r["committed"] and r["reason"] == "いなくなる人が 2人（全体の 28.6%）います。確かめてから、もう一度確定してください"
+    db = sqlite3.connect(settings.db_path)
+    assert db.execute("SELECT COUNT(*) FROM employees").fetchone()[0] == 7
+    r = commit(client, rows, scope="all", confirm_removal=True)
+    assert r["committed"] and db.execute("SELECT COUNT(*) FROM employees").fetchone()[0] == 5
+    assert audit(client, "hr.import")[0]["detail"].startswith("全員のファイル：入る 0人・変わる 0人・いなくなる 2人")
+    # 10% 以下なら、そのまま確定できる
+    assert commit(client, rows[:-1] + [r for r in DEMO_ROWS if r[0] == "10006"], scope="all")["committed"]
+
+
+def test_unused_optional_columns_keep_current_values(client, settings):
+    commit(client, DEMO_ROWS)
+    db = sqlite3.connect(settings.db_path)
+    keep = dict(((r[0], r[1:]) for r in db.execute("SELECT employee_no, kana, dept_code, email, status FROM employees")))
+    slim = {"columns": {"employee_no": "職員コード", "name": "漢字氏名", "dept": "所属名"}}   # よみ・部署コード・メール・在籍状態は使わない
+    rows = change(DEMO_ROWS, "10002", name="佐藤 花") + [("20001", "新人 一郎", "シンジン", "営業部", "400", "在職", "new@example.co.jp")]
+    p = preview(client, rows, slim)
+    assert (p["added"]["count"], p["changed"]["count"]) == (1, 1)
+    assert p["changed"]["first"][0]["changes"] == ["名前 佐藤 花子→佐藤 花"]
+    assert commit(client, rows, slim)["committed"]
+    now = dict(((r[0], r[1:]) for r in db.execute("SELECT employee_no, kana, dept_code, email, status FROM employees")))
+    assert all(now[no] == v for no, v in keep.items())                     # 今いる人は、使わない列の値をそのまま
+    assert now["20001"] == ("", "", "", "在籍")                            # 新しく入る人だけ空
+    assert hr.lookup(db, "10007") is None                                  # 退職のまま（在籍状態を使わなくても変えない）
+
+
+def test_upload_name_is_shown_not_the_server_name(client):
+    fid = upload(client, csv_text(DEMO_ROWS), name="人事出力_11月.csv")
+    run(client, "/api/hr/imports", {"file_id": fid, "mapping": MAPPING})
+    st = client.get("/api/hr/status").json()
+    assert st["last"]["source"] == "人事出力_11月.csv" and st["history"][0]["source"] == "人事出力_11月.csv"
+    assert audit(client, "hr.import")[0]["target"] == "人事出力_11月.csv"
+    commit(client, DEMO_ROWS)
+    assert client.get("/api/hr/status").json()["backups"][0]["source"] == "人事出力_11月.csv"
+
+
+def test_demo_data_from_before_marks_10006_on_leave_after_reimport(settings):
+    """前の作りは在籍と休職を分けていなかった（10006 が「在籍」）。デモの CSV を取り込み直すと「休職」になる。"""
+    db = sqlite3.connect(settings.db_path)
+    with db:
+        db.execute("UPDATE employees SET status = '在籍' WHERE employee_no = '10006'")   # 前の作りから移したときの形
+    m = hr.load_mapping(ROOT / "demo" / "company" / "hr" / "mapping_sample.json")
+    r = hr.import_employees(db, ROOT / "demo" / "company" / "hr" / "hr_export_sample.csv", m)
+    assert r.errors == [] and hr.status_of(db, "10006") == "休職"
+    assert r.result.preview.diff["changed"]["first"][-1]["changes"][0] == "在籍状態 在籍→休職"
+
+
 # ---------------------------------------------------------------- 前に戻す・まとめて1回
 
 
@@ -287,7 +365,7 @@ def test_restore_previous_import_with_preview_and_keep_three(client, settings):
     r = run(client, "/api/hr/restore", {})
     assert r["committed"] and r["kind"] == "戻す"
     assert db.execute("SELECT name FROM employees WHERE employee_no = '10001'").fetchone() == ("山田 太郎",)
-    assert audit(client, "hr.restore")[0]["detail"].startswith("入る 0人・変わる 1人（名前 1）")
+    assert audit(client, "hr.restore")[0]["detail"].startswith("全員のファイル：入る 0人・変わる 1人（名前 1）")   # 控えは全員のデータ
     # 戻したことも、また戻せる
     run(client, "/api/hr/restore", {})
     assert db.execute("SELECT name FROM employees WHERE employee_no = '10001'").fetchone() == ("山田 太一",)

@@ -554,7 +554,7 @@ export type HrStatus = "在籍" | "休職" | "退職";
 export interface HrMapping { columns: Record<string, string>; status_values?: Record<string, string>; sheet?: string }
 export interface HrOverview {
   last: { imported_at: string; source: string; active: number; inactive: number; age_days: number } | null;
-  history: { imported_at: string; source: string; kind: string; by: string; added: number; changed: number; removed: number }[];
+  history: { imported_at: string; source: string; kind: string; by: string; added: number; changed: number; removed: number; scope: string }[];
   backups: { backup_id: number; saved_at: string; source: string; total: number; active: number }[];
   mappings: Record<string, HrMapping>;
   problems: { where: string; message: string }[];
@@ -583,6 +583,10 @@ export interface HrPreview {
   lockout: boolean;
   ok: boolean;
   retired_members: number;
+  scope: "partial" | "all";
+  scope_label: string;
+  current_total: number;
+  removal_warning: { count: number; percent: number; message: string } | null;
   committed?: boolean;
   reason?: string;
   kind?: string;
