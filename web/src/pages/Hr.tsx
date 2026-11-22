@@ -333,6 +333,7 @@ export function PreviewBox({ p, title, stale, ack, children }: { p: HrPreview; t
               </table>
             </div>
           )}
+          {(p.default_employment ?? 0) > 0 && <p className="small">雇用区分なしで入る人：{p.default_employment}人（社員として入ります）</p>}
           {p.retired_members > 0 && <p className="small">退職・いなくなる {p.retired_members}人は、手で入れたグループからも外れます（在籍に戻っても自動では戻りません）。</p>}
           {p.lockout && <p className="error" role="alert">確定すると、権限を変えられる人（roles.assign）がいなくなるので、確定できません。</p>}
           {p.removal_warning && (

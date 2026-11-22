@@ -459,7 +459,7 @@ function AccessEditor({ values, set, Err, disabled }: EditorProps) {
         </span>
         <Err at="admin_needs_strong_entry" />
         <p className="small muted">
-          ON にすると、管理の権限（権限を変える・設定・通信・監査ログ・受付端末の登録など）は、SSO か多要素つきの Yanua アカウントで入ったときだけ効きます。
+          ON にすると、管理の権限（権限を変える・設定・通信・監査ログ・受付端末の登録・人事データの取り込み・文書の公開先の変更など）は、SSO か多要素つきの Yanua アカウントで入ったときだけ効きます。
           今は入口が社員番号だけなので、ON にするとだれも管理できなくなります。確かな入口で入っていない人は ON にできません（SSO ができてから ON にします）。
         </p>
       </div>

@@ -179,6 +179,31 @@ def test_executive_role_has_no_admin_permissions():
     assert not set(DEFAULT_ROLES["経営"][1]) & set(ADMIN_PERMISSIONS)
     assert set(DEFAULT_ROLES["経営"][1]) == {"documents.view", "reports.view"}
     assert "roles.assign" in ADMIN_PERMISSIONS and "settings.edit" in ADMIN_PERMISSIONS and "audit.view" in ADMIN_PERMISSIONS
+    # ほかの人が見られる範囲を変える権限（人事データの取り込み・1つ前に戻す、文書の公開先の変更）も管理の権限。roles.view は入れない
+    assert {"hr.import", "documents.manage"} <= set(ADMIN_PERMISSIONS) and "roles.view" not in ADMIN_PERMISSIONS
+
+
+def test_executive_sees_company_documents_but_not_infra_documents(client, settings):
+    commit(client, csv2(DEMO_ROWS, {"10001": ("正社員", "", "取締役", "5")}), MAPPING2)
+    e = engine(settings)
+    assert e.can_view_document("10001", "経理部", "documents.view", ["dept:人事部"]).allowed       # 全社の文書は見える
+    assert e.can_view_document("10001", "経理部", "documents.view", ["group:G-hr"]).allowed
+    # 要る権限が infra.docs.view の文書（構成書）は、今までどおり経営でも見えない
+    for targets in (["dept:経理部"], ["dept:人事部"], ["group:G-exec"], [access.ALL]):
+        assert not e.can_view_document("10001", "経理部", "infra.docs.view", targets).allowed, targets
+    scope = dict(e.doc_scope("10001", "経理部").perms)
+    assert scope["documents.view"] is None and "infra.docs.view" not in scope       # 検索・出典の絞り込みでも同じ
+
+
+def test_preview_counts_newcomers_entering_without_employment_type(client):
+    commit(client, csv2(DEMO_ROWS), MAPPING2)
+    newcomers = [("10008", "小林 新", "コバヤシ アラタ", "総務部", "200", "在職", ""),
+                 ("10009", "森 光", "モリ ヒカル", "営業部", "400", "在職", "")]
+    p = preview(client, [*DEMO_ROWS, *newcomers])                     # 雇用区分の列を使わない対応づけ
+    assert p["added"]["count"] == 2 and p["default_employment"] == 2
+    extra = {"10008": ("契約社員", "", "", ""), "10009": ("正社員", "", "", "")}
+    assert preview(client, csv2([*DEMO_ROWS, *newcomers], extra), MAPPING2)["default_employment"] == 0   # 列を使えば 0
+    assert preview(client, DEMO_ROWS)["default_employment"] == 0                                         # 新しく入る人がいなければ 0
 
 
 def test_old_data_gets_job_roles_and_executive_group_once(settings, client):
@@ -210,6 +235,10 @@ def test_admin_permissions_need_a_strong_entry_only_when_the_rule_is_on(client, 
         assert d.reasons == [access.NEEDS_STRONG]
         assert "roles.assign" not in e.permissions("10005", "情報システム部", plain)
         assert "settings.edit" not in e.permissions("10005", "情報システム部")          # 条件を渡さないときも既定の条件
+        # ほかの人が見られる範囲を変える権限も止まる（人事データの取り込み・文書の公開先の変更）。読むだけの権限は効く
+        assert not e.can("10006", "人事部", "hr.import", None, plain).allowed
+        assert not e.can("10005", "情報システム部", "documents.manage", ("department", "経理部"), plain).allowed
+        assert e.can("10005", "情報システム部", "roles.view", None, plain).allowed
     # 確かな入口（SSO・多要素つきの Yanua アカウント）なら、ON でも効く
     for entry in (access.ENTRY_SSO, access.ENTRY_ACCOUNT_MFA):
         assert e.can("10005", "情報システム部", "roles.assign", ("group", "G-hr"), access.Context(entry=entry)).allowed

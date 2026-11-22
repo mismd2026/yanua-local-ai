@@ -65,10 +65,13 @@ PERMISSIONS: dict[str, Permission] = {p.name: p for p in [
 # 文書を見るのに要る権限として選べるもの（S-50）。既定は documents.view
 DOCUMENT_PERMISSIONS = ("documents.view", "infra.docs.view")
 
-# 管理の権限：「確かな入口が要る」の決まり（設定 S-52 の「権限の条件」）を ON にすると、
-# SSO か多要素つきの Yanua アカウントで入ったときだけ効く（yanua/access.py の Context）
+# 管理の権限：「確かな入口が要る」の決まり（設定 S-52 の「権限の条件と役職の段」）を ON にすると、
+# SSO か多要素つきの Yanua アカウントで入ったときだけ効く（yanua/access.py の Context）。
+# 権限・設定・通信・受付端末・監査ログに加えて、ほかの人が見られる範囲を変える権限も入れる：
+# hr.import（人事データの取り込み・1つ前に戻す。部署や在籍が変わり、グループと権限に効く）と
+# documents.manage（文書の公開先・要る権限の変更、外す・戻す）。roles.view は読むだけなので入れない
 ADMIN_PERMISSIONS = ("roles.assign", "roles.delegate", "settings.view", "settings.edit", "network.view", "network.edit",
-                     "kiosk.devices", "audit.view")
+                     "kiosk.devices", "audit.view", "hr.import", "documents.manage")
 
 # 移し替えで名前を変えた権限（前の名前 → 新しい名前）
 RENAMED = {"documents.list": "documents.view", "documents.ingest": "documents.manage", "tickets": "helpdesk.handle"}

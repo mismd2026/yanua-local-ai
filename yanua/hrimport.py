@@ -288,6 +288,7 @@ class Parsed:
     read_columns: list[str] = field(default_factory=list)
     ignored_columns: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)  # 在籍状態ごとの人数
+    default_employment: int = 0     # 雇用区分の列を使わないので「社員」として入る、新しく入る人の数
 
     def error(self, line: int, message: str) -> None:
         self.error_count += 1
@@ -358,6 +359,9 @@ def _stage(db: sqlite3.Connection, path: Path, mapping: Mapping, progress=None) 
         out.error(1, "行がありません")
     _insert_stage(db, batch)
     _keep_unmapped(db, mapping)
+    if "employment" not in mapping.columns:
+        out.default_employment = db.execute(
+            f"SELECT COUNT(*) FROM temp.{STAGE} n LEFT JOIN employees e USING (employee_no) WHERE e.employee_no IS NULL").fetchone()[0]
     found = dict(db.execute(f"SELECT status, COUNT(*) FROM temp.{STAGE} GROUP BY status").fetchall())
     out.counts = {s: found.get(s, 0) for s in hr.STATUSES}
     return out
@@ -577,6 +581,7 @@ class Preview:
     retired_members: list[dict]           # 退職・いなくなるので、手で入れたグループから外れる人（社員番号とグループ）
     scope: str = SCOPE_PARTIAL
     current_total: int = 0                # 今の人事データの人数
+    default_employment: int = 0           # 雇用区分なしで入る（社員として入る）新しく入る人の数
 
     @property
     def ok(self) -> bool:
@@ -596,7 +601,8 @@ class Preview:
                 "read_columns": self.read_columns, "ignored_columns": self.ignored_columns, "counts": self.counts,
                 **self.diff, "groups": self.groups, "lockout": self.lockout, "ok": self.ok,
                 "retired_members": len(self.retired_members), "scope": self.scope, "scope_label": SCOPE_LABELS[self.scope],
-                "current_total": self.current_total, "removal_warning": self.removal_warning}
+                "current_total": self.current_total, "removal_warning": self.removal_warning,
+                "default_employment": self.default_employment}
 
 
 def _retired_members(db, data: dict) -> list[dict]:
@@ -635,7 +641,8 @@ def _preview_staged(db, parsed: Parsed, source: str, leave_policy: str, scope: s
     lockout = (_assign_holders(db, data, leave_policy, f"temp.{STAGE}") == 0
                and _assign_holders(db, data, leave_policy, "employees") > 0)
     return Preview(source, parsed.rows, [], 0, parsed.read_columns, parsed.ignored_columns, parsed.counts,
-                   _diff(db), _group_effects(db, data), lockout, _retired_members(db, data), scope, current)
+                   _diff(db), _group_effects(db, data), lockout, _retired_members(db, data), scope, current,
+                   parsed.default_employment)
 
 
 def preview(db, path: Path, mapping: dict, leave_policy: str = LEAVE_KEEP, progress=None, scope: str = SCOPE_PARTIAL,

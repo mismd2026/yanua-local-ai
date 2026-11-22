@@ -588,6 +588,7 @@ export interface HrPreview {
   scope_label: string;
   current_total: number;
   removal_warning: { count: number; percent: number; message: string } | null;
+  default_employment?: number;      // 雇用区分の列を使わないので「社員」として入る、新しく入る人の数
   committed?: boolean;
   reason?: string;
   kind?: string;
