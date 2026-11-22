@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yanua 費用計算</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700&family=Inter:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* VOICE work: a money tool shown to colleagues, dense and exact
+   IDEA a control-room readout: one dominant figure, long thin strips beside it
+   PICTURE ranked strips of 5-year total cost per option, redrawn as inputs move
+   COLOUR steel panel #d5dbe0, black ink, white panels, alarm red for the cheapest; night #16191c
+   TYPE Inter Tight 700 for figures and titles, Inter + Noto Sans JP for text
+   LAYOUT laptop: inputs column 34% left, readout + strips right, table full width below; phone: title, readout, strips, inputs, table */
+:root{color-scheme:light dark;--bg:light-dark(#d5dbe0,#16191c);--panel:light-dark(#ffffff,#1f2327);--ink:light-dark(#0b0d0f,#eef1f3);--mute:light-dark(#4a535b,#a3adb5);--line:light-dark(#c3cad0,#343a40);--red:light-dark(#d81f14,#ff5a4e);--bar:light-dark(#0b0d0f,#cfd6dc);--soft:light-dark(#eef1f3,#262b30)}
+:root[data-theme=light]{color-scheme:light}
+:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.55 Inter,"Noto Sans JP",system-ui,sans-serif;overflow-x:clip}
+.band{padding:clamp(20px,3vw,40px) max(4vw,16px)}
+.wrap{max-width:1240px;margin:0 auto}
+h1{font:700 clamp(28px,3.6vw,42px)/1.08 "Inter Tight","Noto Sans JP",sans-serif;letter-spacing:-.02em;margin:0 0 6px;text-wrap:balance}
+.sub{color:var(--mute);margin:0 0 20px;max-width:70ch}
+.grid{display:grid;grid-template-columns:minmax(0,34fr) minmax(0,66fr);gap:20px;align-items:start}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px}
+.panel h2{font:600 17px/1.3 "Inter Tight","Noto Sans JP",sans-serif;margin:0 0 12px}
+.field{display:grid;grid-template-columns:minmax(0,1fr) 9.5em;gap:10px;align-items:center;margin-bottom:10px}
+.field label{font-size:14px}
+.field input,.field select{font:16px Inter,sans-serif;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:var(--soft);color:var(--ink);text-align:right;min-height:40px}
+input:focus-visible,button:focus-visible,select:focus-visible{outline:3px solid var(--red);outline-offset:2px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+.chips button,.btn{font:500 14px Inter,"Noto Sans JP",sans-serif;min-height:36px;padding:6px 10px;border:1px solid var(--line);border-radius:4px;background:var(--soft);color:var(--ink);cursor:pointer}
+.chips button[aria-pressed=true]{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+.range{display:grid;grid-template-columns:minmax(0,1fr) 4.5em;gap:10px;align-items:center;margin-bottom:12px}
+.range input{width:100%;accent-color:var(--red);height:32px}
+.range output{text-align:right;font-weight:600;white-space:nowrap}
+.seg{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.seg label{display:flex;gap:6px;align-items:center;font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:4px;background:var(--soft);cursor:pointer}
+hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+.readout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-bottom:16px}
+.big{font:700 clamp(30px,4.4vw,52px)/1 "Inter Tight",sans-serif;letter-spacing:-.02em;white-space:nowrap}
+.big.red{color:var(--red)}
+.lbl{font-size:13px;color:var(--mute);margin-bottom:6px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(8.5em,1fr));gap:10px;margin-bottom:16px}
+.kpi{background:var(--soft);border-radius:4px;padding:10px 12px}
+.kpi b{display:block;font:700 20px/1.2 "Inter Tight",sans-serif;white-space:nowrap}
+.kpi span{font-size:13px;color:var(--mute)}
+.strips{display:grid;gap:8px}
+.strip{display:grid;grid-template-columns:11em minmax(0,1fr) 7.5em;gap:10px;align-items:center;font-size:14px}
+.strip .name{line-height:1.25}
+.strip .track{height:18px;background:var(--soft);border-radius:2px;overflow:hidden}
+.strip .fill{height:100%;background:var(--bar);transition:width .35s ease}
+.strip.best .fill{background:var(--red)}
+.strip.best .name{font-weight:600}
+.strip .val{text-align:right;font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
+.note{font-size:13px;color:var(--mute);margin:10px 0 0}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+th{font-weight:600;color:var(--mute);font-size:13px}
+th:first-child,td:first-child{text-align:left;white-space:normal}
+td input{font:15px Inter,sans-serif;width:6.5em;padding:5px 6px;border:1px solid var(--line);border-radius:4px;background:var(--soft);color:var(--ink);text-align:right}
+tr.best td{color:var(--red);font-weight:600}
+.tag{display:inline-block;font-size:12px;padding:1px 6px;border-radius:3px;background:var(--soft);color:var(--mute);margin-left:4px}
+details summary{cursor:pointer;font-weight:600;padding:6px 0}
+@media(max-width:860px){.grid{grid-template-columns:minmax(0,1fr)}.inputs{order:2}.result{order:1}}
+@media(max-width:600px){.readout{grid-template-columns:minmax(0,1fr)}.strip{grid-template-columns:7.5em minmax(0,1fr) 6.2em;font-size:13px}.field{grid-template-columns:minmax(0,1fr) 8em}table{font-size:13px}th,td{padding:6px 5px}}
+@media(prefers-reduced-motion:reduce){.strip .fill{transition:none}}
+</style>
+</head>
+<body>
+<div class="band"><div class="wrap">
+<h1 id="title">Yanua の費用：自前・AWS・GCP・Azure・Claude API</h1>
+<p class="sub">人数・稼働率・トークン数を変えると、初期費用と毎月の費用がその場で変わります。単価は 2026年11月に調べた東京リージョンの定価（オンデマンド）です。下の表で書き換えられます。</p>
+
+<div class="grid">
+<section class="panel inputs" aria-labelledby="h-in">
+<h2 id="h-in">使い方</h2>
+<div class="field"><label for="emp">社員数</label><input id="emp" type="number" min="1" step="1"></div>
+<div class="chips" id="presets"></div>
+<div class="range"><label for="use">使う人の割合 <input id="use" type="range" min="1" max="100" step="1"></label><output id="useO"></output></div>
+<div class="range"><label for="duty">稼働率（就業時間中に答えを作っている時間の割合。稼働率＝χ／就業時間） <input id="duty" type="range" min="1" max="100" step="1"></label><output id="dutyO"></output></div>
+<p class="note" style="margin-top:-6px" id="chiNote"></p>
+<p class="note">χ は1人が1日に答えを作っている時間。100%＝就業時間中ずっと全員が答えを作っている、いちばん厳しい見方。GPU はこの混む時間に合わせて用意し、夜や休日も止めずに1か月730時間（24時間×365日÷12）で計算します。</p>
+<hr>
+<div class="seg" role="radiogroup" aria-label="質問数の決め方">
+<label><input type="radio" name="qmode" value="manual" id="qm1"> 質問数を入れる</label>
+<label><input type="radio" name="qmode" value="duty" id="qm2"> 稼働率から出す</label>
+</div>
+<div class="field" id="rowQ"><label for="q">1人1日の質問数</label><input id="q" type="number" min="0" step="1"></div>
+<div class="field" id="rowH"><label for="hours">就業時間（時間/日）</label><input id="hours" type="number" min="1" step="0.5"></div>
+<div class="field" id="rowS"><label for="sec">1問の答えを作る秒数</label><input id="sec" type="number" min="1" step="1"></div>
+<div class="field"><label for="tin">1問の入力トークン</label><input id="tin" type="number" min="0" step="100"></div>
+<div class="field"><label for="tout">1問の出力トークン</label><input id="tout" type="number" min="0" step="50"></div>
+<div class="field"><label for="days">月の稼働日数</label><input id="days" type="number" min="1" max="31" step="1"></div>
+<details>
+<summary>共通の前提</summary>
+<div class="field"><label for="fx">為替（円/ドル）</label><input id="fx" type="number" step="1"></div>
+<div class="field"><label for="margin">余裕（予備・混雑、%）</label><input id="margin" type="number" step="1"></div>
+<div class="field"><label for="minG">最低の GPU 枚数</label><input id="minG" type="number" min="1" step="1"></div>
+<div class="field"><label for="extra">クラウドの GPU 以外の上乗せ（%）</label><input id="extra" type="number" step="1"></div>
+<div class="field"><label for="perSrv">自前：1台の GPU 枚数</label><input id="perSrv" type="number" min="1" step="1"></div>
+<div class="field"><label for="srvPrice">自前：サーバー1台（GPU 除く・円）</label><input id="srvPrice" type="number" step="100000"></div>
+<div class="field"><label for="srvW">自前：サーバー1台の電力（W）</label><input id="srvW" type="number" step="50"></div>
+<div class="field"><label for="kwh">電気代（円/kWh）</label><input id="kwh" type="number" step="1"></div>
+<div class="field"><label for="pue">PUE（冷却などの上乗せ）</label><input id="pue" type="number" step="0.1"></div>
+<div class="field"><label for="maint">自前：保守（購入額の年 %）</label><input id="maint" type="number" step="1"></div>
+<hr>
+<div class="field"><label for="appPer">Yanua 本体：1台で受ける社員数</label><input id="appPer" type="number" min="1" step="100"></div>
+<div class="field"><label for="appMin">Yanua 本体：最低の台数</label><input id="appMin" type="number" min="1" step="1"></div>
+<div class="field"><label for="appCloud">本体1台の月額（クラウド・DB 込み・円）</label><input id="appCloud" type="number" step="1000"></div>
+<div class="field"><label for="appPrice">本体1台の価格（自前・円）</label><input id="appPrice" type="number" step="10000"></div>
+<div class="field"><label for="appW">本体1台の電力（自前・W）</label><input id="appW" type="number" step="50"></div>
+<p class="note">Yanua 本体は画面・権限・人の台帳・監査ログ・承認の流れ・DB・社内文書の検索を動かす、GPU のいらないサーバー。どの方式にも必要です（値は仮）。</p>
+</details>
+<button class="btn" id="reset" type="button" style="margin-top:12px">前提を最初の値に戻す</button>
+</section>
+
+<section class="panel result" aria-labelledby="h-out">
+<h2 id="h-out">結果</h2>
+<div class="readout">
+<div><div class="lbl" id="bestLbl"></div><div class="big red" id="bestVal"></div><div class="note" id="bestSub"></div></div>
+<div><div class="lbl">同時利用数</div><div class="big" id="conc"></div><div class="note" id="concSub"></div></div>
+</div>
+<div class="kpis">
+<div class="kpi"><span>トークン／日</span><b id="tDay"></b></div>
+<div class="kpi"><span>トークン／月</span><b id="tMon"></b></div>
+<div class="kpi"><span>トークン／年</span><b id="tYear"></b></div>
+<div class="kpi"><span>1人1日の質問数</span><b id="qDay"></b></div>
+</div>
+<div class="field" style="grid-template-columns:minmax(0,1fr) 6em;max-width:22em"><label for="years">比べる年数</label><input id="years" type="number" min="1" max="20" step="1"></div>
+<div class="chips" id="yearChips"></div>
+<div class="lbl" id="stripLbl"></div>
+<div class="strips" id="strips"></div>
+<p class="note" id="breakEven" style="font-size:14px;color:var(--ink)"></p>
+<p class="note">自前は「初期費用＋毎月の支払い（電気・保守）× 月数」。クラウドと API は初期費用なし。どの方式にも Yanua 本体のサーバー（GPU なし）を含みます。ラック代・回線・人件費は入っていません。</p>
+</section>
+</div>
+</div></div>
+
+<div class="band" style="padding-top:0"><div class="wrap panel">
+<h2>方式ごとの内訳（単価は書き換えられます）</h2>
+<div class="scroll"><table>
+<thead><tr><th>方式</th><th>GPU 1枚の同時数</th><th>単価</th><th>台数</th><th>初期費用</th><th>毎月</th><th>1年</th><th id="thN"></th></tr></thead>
+<tbody id="rows"></tbody>
+</table></div>
+<p class="note">単価：自前は GPU 1枚の購入価格（円）、クラウドは GPU 1枚の時間単価（ドル。国内は円）、API は入力／出力 100万トークンあたりのドル。同時数は vLLM・Qwen2.5-7B の公開測定（L40S 32件・H100 64件）。L4 の 12件は仮の値で、実測で直してください。GCP の H100 1枚の型はスポットか Flex-start でしか作れないため、常時使うなら 8枚の型（a3-highgpu-8g）で見積もり直してください。</p>
+</div></div>
+
+<script>
+{
+const DEF={emp:1000,use:100,duty:15,qmode:'manual',q:240,hours:8,sec:15,tin:4000,tout:400,days:21,fx:155,margin:30,minG:2,extra:15,perSrv:4,srvPrice:3000000,srvW:800,kwh:30,pue:1.5,maint:10,years:5,appPer:5000,appMin:2,appCloud:100000,appPrice:1500000,appW:400};
+const OPTS0=[
+ {id:'selfL',name:'自前 L40S',kind:'self',cap:32,price:1650000,w:350},
+ {id:'selfH',name:'自前 H100',kind:'self',cap:64,price:4200000,w:350},
+ {id:'awsL',name:'AWS L40S',sku:'g6e.xlarge',kind:'cloud',cap:32,usd:2.699},
+ {id:'awsH',name:'AWS H100',sku:'p5.48xlarge ÷ 8',kind:'cloud',cap:64,usd:8.6},
+ {id:'gcpL',name:'GCP L4',sku:'g2-standard-8',kind:'cloud',cap:12,usd:1.0962},
+ {id:'gcpH',name:'GCP H100',sku:'a3-highgpu-1g',kind:'cloud',cap:64,usd:15.72},
+ {id:'azH',name:'Azure H100',sku:'NC40ads H100 v5',kind:'cloud',cap:64,usd:10.121},
+ {id:'jpH',name:'国内 H100',sku:'さくら 高火力',kind:'jp',cap:64,yen:990,capYen:385000},
+ {id:'apiHa',name:'Claude API Haiku 5.5',kind:'api',pin:0.1,pout:0.5},
+ {id:'apiSo',name:'Claude API Sonnet 5.5',kind:'api',pin:2,pout:10}
+];
+const HOURS=730;
+const $=id=>document.getElementById(id);
+const keys=Object.keys(DEF).filter(k=>k!=='qmode');
+let S={...DEF},OPTS=OPTS0.map(o=>({...o}));
+try{const sv=JSON.parse(localStorage.getItem('yanua-cost')||'null');if(sv){S={...DEF,...sv.S};OPTS=OPTS0.map(o=>({...o,...(sv.O||{})[o.id]}))}}catch(e){}
+
+const yen=v=>{if(!isFinite(v))return '—';const a=Math.abs(v);if(a>=1e8)return (v/1e8).toFixed(a>=1e10?0:2).replace(/\.?0+$/,'')+'億円';if(a>=1e4)return Math.round(v/1e4).toLocaleString('ja-JP')+'万円';return Math.round(v).toLocaleString('ja-JP')+'円'};
+const tok=v=>{const a=Math.abs(v);if(a>=1e12)return (v/1e12).toFixed(2)+'兆';if(a>=1e8)return (v/1e8).toFixed(a>=1e10?0:1)+'億';if(a>=1e4)return Math.round(v/1e4).toLocaleString('ja-JP')+'万';return Math.round(v).toLocaleString('ja-JP')};
+const num=v=>Math.round(v).toLocaleString('ja-JP');
+
+const presets=[50,100,500,1000,5000,10000,50000,100000];
+$('presets').innerHTML=presets.map(p=>`<button type="button" data-p="${p}" aria-pressed="false">${p>=10000?(p/10000)+'万':num(p)}人</button>`).join('');
+
+$('yearChips').innerHTML=[1,3,5,7,10].map(y=>`<button type="button" data-y="${y}" aria-pressed="false">${y}年</button>`).join('');
+function calc(){
+ const users=Math.ceil(S.emp*S.use/100);
+ const conc=Math.max(1,Math.ceil(S.emp*S.use/100*S.duty/100));
+ const q=S.qmode==='duty'?Math.round(S.duty/100*S.hours*3600/Math.max(1,S.sec)):S.q;
+ const perDay=users*q*(S.tin+S.tout);
+ const app=Math.max(S.appMin,Math.ceil(S.emp/Math.max(1,S.appPer)));
+ const res=OPTS.map(o=>{
+  let gpus=0,init=0,mon=0,cnt='';
+  if(o.kind==='api'){
+   mon=users*q*S.days*(S.tin*o.pin+S.tout*o.pout)/1e6*S.fx;
+   cnt='GPU なし';
+  }else{
+   gpus=Math.max(S.minG,Math.ceil(conc*(1+S.margin/100)/o.cap));
+   if(o.kind==='self'){
+    const srv=Math.ceil(gpus/S.perSrv);
+    init=srv*S.srvPrice+gpus*o.price;
+    mon=init*S.maint/100/12+(gpus*o.w+srv*S.srvW)/1000*HOURS*S.kwh*S.pue;
+    cnt=`${num(gpus)}枚・${num(srv)}台`;
+   }else if(o.kind==='jp'){
+    mon=gpus*Math.min(o.yen*HOURS,o.capYen)*(1+S.extra/100);cnt=`${num(gpus)}枚`;
+   }else{
+    mon=gpus*o.usd*HOURS*S.fx*(1+S.extra/100);cnt=`${num(gpus)}枚`;
+   }
+  }
+  if(o.kind==='self'){
+   const ai=app*S.appPrice;init+=ai;mon+=ai*S.maint/100/12+app*S.appW/1000*HOURS*S.kwh*S.pue;
+  }else{mon+=app*S.appCloud}
+  cnt+=`＋本体${num(app)}台`;
+  return {...o,gpus,init,mon,cnt,total:init+mon*12*S.years};
+ });
+ return {users,conc,q,perDay,app,res};
+}
+
+function render(){
+ const r=calc();
+ for(const k of keys){const el=$(k);if(document.activeElement!==el)el.value=S[k]}
+ $('qm1').checked=S.qmode==='manual';$('qm2').checked=S.qmode==='duty';
+ $('rowQ').style.display=S.qmode==='manual'?'':'none';
+ $('rowS').style.display=S.qmode==='duty'?'':'none';
+ $('useO').textContent=S.use+'%';$('dutyO').textContent=S.duty+'%';
+ const chi=S.duty/100*S.hours;
+ $('chiNote').textContent=`χ＝${chi.toFixed(2).replace(/\.?0+$/,'')}時間／日（就業 ${S.hours}時間のうち）。24時間に対しては χ／24h＝${(chi/24*100).toFixed(1)}%`;
+ for(const b of document.querySelectorAll('#presets button'))b.setAttribute('aria-pressed',String(+b.dataset.p===S.emp));
+ for(const b of document.querySelectorAll('#yearChips button'))b.setAttribute('aria-pressed',String(+b.dataset.y===S.years));
+ $('conc').textContent=num(r.conc)+'件';
+ $('concSub').textContent=`使う人 ${num(r.users)}人 × 稼働率 ${S.duty}%`;
+ $('tDay').textContent=tok(r.perDay);$('tMon').textContent=tok(r.perDay*S.days);$('tYear').textContent=tok(r.perDay*S.days*12);
+ $('qDay').textContent=num(r.q)+'問';
+ const sorted=[...r.res].sort((a,b)=>a.total-b.total);
+ const best=sorted[0],max=Math.max(...sorted.map(x=>x.total))||1;
+ $('bestLbl').textContent=`${S.years}年でいちばん安い方式`;
+ $('bestVal').textContent=yen(best.total);
+ $('bestSub').textContent=`${best.name}（初期 ${yen(best.init)}、毎月 ${yen(best.mon)}）`;
+ $('stripLbl').textContent=`${S.years}年の総額（安い順）`;
+ $('strips').innerHTML=sorted.map((x,i)=>`<div class="strip${i===0?' best':''}"><div class="name">${x.name}</div><div class="track"><div class="fill" style="width:${Math.max(.5,x.total/max*100).toFixed(2)}%"></div></div><div class="val">${yen(x.total)}</div></div>`).join('');
+ $('thN').textContent=`${S.years}年の総額`;
+ const selfs=r.res.filter(x=>x.kind==='self'),others=r.res.filter(x=>x.kind!=='self');
+ const bs=selfs.reduce((a,b)=>a.mon<b.mon?a:b),bo=others.reduce((a,b)=>a.mon<b.mon?a:b);
+ let be;
+ if(bo.mon<=bs.mon)be=`毎月の支払いは ${bo.name} のほうが安いので、何年使っても自前は追いつきません。`;
+ else{const m=(bs.init-bo.init)/(bo.mon-bs.mon);be=`自前（${bs.name.replace('自前 ','')}）が ${bo.name} より安くなるのは、使い始めて約${m<12?Math.ceil(m)+'か月':(m/12).toFixed(1)+'年'}後から。`}
+ $('breakEven').textContent=be;
+ $('rows').innerHTML=r.res.map(x=>{
+  let unit='';
+  if(x.kind==='self')unit=`<input aria-label="${x.name} 単価" data-o="${x.id}" data-f="price" type="number" step="10000" value="${x.price}">円`;
+  else if(x.kind==='cloud')unit=`$<input aria-label="${x.name} 単価" data-o="${x.id}" data-f="usd" type="number" step="0.01" value="${x.usd}">/時`;
+  else if(x.kind==='jp')unit=`<input aria-label="${x.name} 単価" data-o="${x.id}" data-f="yen" type="number" step="10" value="${x.yen}">円/時`;
+  else unit=`$<input aria-label="${x.name} 入力単価" data-o="${x.id}" data-f="pin" type="number" step="0.01" value="${x.pin}" style="width:4.5em">／<input aria-label="${x.name} 出力単価" data-o="${x.id}" data-f="pout" type="number" step="0.01" value="${x.pout}" style="width:4.5em">`;
+  const cap=x.kind==='api'?'—':`<input aria-label="${x.name} 同時数" data-o="${x.id}" data-f="cap" type="number" min="1" step="1" value="${x.cap}" style="width:4.5em">件`;
+  return `<tr class="${x.id===best.id?'best':''}"><td>${x.name}${x.sku?`<span class="tag">${x.sku}</span>`:''}</td><td>${cap}</td><td>${unit}</td><td>${x.cnt||'—'}</td><td>${x.init?yen(x.init):'なし'}</td><td>${yen(x.mon)}</td><td>${yen(x.mon*12)}</td><td>${yen(x.total)}</td></tr>`;
+ }).join('');
+ try{const O={};for(const o of OPTS)O[o.id]={cap:o.cap,price:o.price,usd:o.usd,yen:o.yen,pin:o.pin,pout:o.pout};localStorage.setItem('yanua-cost',JSON.stringify({S,O}))}catch(e){}
+}
+
+for(const k of keys){$(k).addEventListener('input',e=>{const v=parseFloat(e.target.value);if(isFinite(v)){S[k]=v;render()}})}
+for(const el of document.querySelectorAll('input[name=qmode]'))el.addEventListener('change',e=>{S.qmode=e.target.value;render()});
+$('presets').addEventListener('click',e=>{const b=e.target.closest('button');if(b){S.emp=+b.dataset.p;render()}});
+$('yearChips').addEventListener('click',e=>{const b=e.target.closest('button');if(b){S.years=+b.dataset.y;render()}});
+$('rows').addEventListener('change',e=>{const t=e.target;if(!t.dataset.o)return;const o=OPTS.find(x=>x.id===t.dataset.o);const v=parseFloat(t.value);if(o&&isFinite(v)&&v>=0){o[t.dataset.f]=v;render()}});
+$('reset').addEventListener('click',()=>{S={...DEF};OPTS=OPTS0.map(o=>({...o}));render()});
+render();
+}
+</script>
+</body>
+</html>
