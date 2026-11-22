@@ -249,7 +249,7 @@ class RoleCreate(BaseModel):
 class GroupCreate(BaseModel):
     name: str = Field(max_length=100)
     description: str = Field(default="", max_length=200)
-    rule: dict | None = None                                        # None：手で入れる。{"all": true}・{"departments": [...]}：決まり
+    rule: dict | None = None                                        # None：手で入れる。{"all": true}・{"departments": [...]}・{"min_level": N}：決まり
 
 
 class GroupUpdate(BaseModel):
@@ -326,11 +326,13 @@ class HrInspect(BaseModel):          # S-51
     file_id: str = Field(min_length=1, max_length=64)
     sheet: str | None = Field(default=None, max_length=100)
     status_column: str | None = Field(default=None, max_length=200)
+    employment_column: str | None = Field(default=None, max_length=200)
 
 
 class HrMapping(BaseModel):
     columns: dict[str, str] = Field(max_length=20)
     status_values: dict[str, str] | None = Field(default=None, max_length=200)
+    employment_values: dict[str, str] | None = Field(default=None, max_length=200)
     sheet: str | None = Field(default=None, max_length=100)
 
 
@@ -394,16 +396,18 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     # 権限の設定に誤りがあれば起動しない（権限と本人確認は止める、の決まり）
     with closing(connect()) as db:
         access_migrated = access.migrate_if_empty(db, roles)
-        access_upgraded = access.upgrade(db)   # 前の版のデータを今の版に合わせる（社員の対象 → メンバー自身の所属）
+        # 前の版のデータを今の版に合わせる（社員の対象 → メンバー自身の所属、職務ロールと「経営」のグループ、段の境目）
+        access_upgraded = access.upgrade(db, settings.executive_level)
         access.sync_targets(db)          # 部署・グループ・機能の対象をそろえる
         found = access.problems(access.load(db))
     if found:
         raise access.AccessError("権限の設定に誤りがあるので起動しません：" + "／".join(f"{w}: {m}" for w, m in found), found)
-    engine = access.Engine(connect, leave_policy=lambda: settings.on_leave_permissions)
+    engine = access.Engine(connect, leave_policy=lambda: settings.on_leave_permissions,
+                           admin_needs_strong=lambda: settings.admin_needs_strong_entry)
 
     def can(user: User, permission: str, target: tuple[str, str] | None = None) -> bool:
         """判定の1か所（yanua/access.py の Engine.can）。target が None なら、その機能を使えるか。"""
-        return engine.can(user.employee_no, user.dept, permission, target).allowed
+        return engine.can(user.employee_no, user.dept, permission, target, user.context).allowed
 
     def doc_scope(user: User):
         """文書を見てよい範囲（DocScope。一覧・開く・検索・質問・ヘルプデスクの検索で、LLM に渡す前に絞る）。
@@ -867,7 +871,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
 
     @app.get("/api/me")
     def me(user: User = Depends(current_user)):
-        return {**user.as_dict(), "permissions": engine.permissions(user.employee_no, user.dept)}
+        return {**user.as_dict(), "permissions": engine.permissions(user.employee_no, user.dept, user.context)}
 
     # ------------------------------------------------ 質問・検索・文書
 
@@ -1072,7 +1076,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             return {"checked": len(people), "too_many": True, "gain": 0, "lose": 0, "groups": []}
         groups: dict[str, dict] = {}
         gain = lose = 0
-        for no, dept in people:
+        for no, dept, _level in people:
             b = before is not None and engine.can_view_document(no, dept, before[0], before[1]).allowed
             a = after is not None and engine.can_view_document(no, dept, after[0], after[1]).allowed
             for name in engine.groups_of(no, dept):
@@ -1893,14 +1897,14 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         mappings, _ = hr_mappings()
         return {"last": last, "history": hist if can(user, "hr.import") else [], "backups": backs,
                 "mappings": mappings if can(user, "hr.import") else {}, "problems": hr_problems(),
-                "fields": {f: hr.LABELS[f] for f in hr.FIELDS}, "required": list(hr.REQUIRED), "statuses": list(hr.STATUSES),
+                "fields": {f: hr.LABELS[f] for f in hr.FIELDS}, "required": list(hr.REQUIRED), "statuses": list(hr.STATUSES), "employments": list(hr.EMPLOYMENTS),
                 "leave": {"login": settings.on_leave_login, "permissions": settings.on_leave_permissions},
                 "can_import": can(user, "hr.import"), "can_view": can(user, "hr.view"), "keep": hrimport.HR_KEEP}
 
     @app.post("/api/hr/inspect")
     def hr_inspect(req: HrInspect, user: User = Depends(require("hr.import"))):
-        """上げたファイルの列名・シート・対応づけの下書き。status_column を渡すと、その列に出てくる値（50種類まで）と下書き。
-        読むのは列名と在籍状態の列だけ（ほかの列の値は読まない）。"""
+        """上げたファイルの列名・シート・対応づけの下書き。status_column・employment_column を渡すと、その列に出てくる値
+        （50種類まで）と下書き。読むのは列名と、在籍状態・雇用区分の列だけ（ほかの列の値は読まない）。"""
         path = Path(my_file(req.file_id, user, "hr")["path"])
         sheets: list[str] = []
         try:
@@ -1911,21 +1915,27 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 sheets = list(wb.sheetnames)
                 wb.close()
             heads = hrimport.headers(path, req.sheet or None)
-            values: list[dict] = []
-            if req.status_column:
-                if req.status_column not in heads:
-                    raise ApiError(400, "invalid_mapping", f"列「{req.status_column}」がファイルにありません")
+
+            def distinct(column: str | None, guess) -> list[dict]:
+                if not column:
+                    return []
+                if column not in heads:
+                    raise ApiError(400, "invalid_mapping", f"列「{column}」がファイルにありません")
                 seen: dict[str, None] = {}
-                for _line, r in hrimport._iter(path, [req.status_column], req.sheet or None):
-                    v = r.get(req.status_column, "")
+                for _line, r in hrimport._iter(path, [column], req.sheet or None):
+                    v = r.get(column, "")
                     if v and v not in seen:
                         seen[v] = None
                         if len(seen) >= 50:
                             break
-                values = [{"value": v, "guess": hr.guess_status(v)} for v in seen]
+                return [{"value": v, "guess": guess(v)} for v in seen]
+
+            values = distinct(req.status_column, hr.guess_status)
+            employment = distinct(req.employment_column, hr.guess_employment)
         except hr.HRImportError as e:
             raise ApiError(400, "invalid_file", str(e)) from e
-        return {"headers": heads, "sheets": sheets, "draft": hr.suggest_mapping(heads)["columns"], "status_values": values}
+        return {"headers": heads, "sheets": sheets, "draft": hr.suggest_mapping(heads)["columns"], "status_values": values,
+                "employment_values": employment}
 
     def check_mapping(m: HrMapping) -> dict:
         data = m.model_dump(exclude_none=True)
@@ -2089,12 +2099,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
                 return {"catalog": model_catalog(), "error": ""}
             except Exception as e:  # noqa: BLE001
                 return {"catalog": [], "error": f"Ollama に、入っているモデルを問い合わせられません（{e}）"}
-        if key in ("audit", "files"):
+        if key in ("audit", "files", "access"):
             return {"limits": {k.split(".", 1)[1]: {"min": lo, "max": hi, "unit": u}
                                for k, (lo, hi, u) in adminsettings.LIMITS.items() if k.startswith(f"{key}.")}}
         return {}
 
-    def apply_setting(key: str) -> None:
+    def apply_setting(key: str, user: User | None = None) -> None:
         """保存・版に戻す・既定に戻すのあとで、動いている値を入れ替える（再起動しなくても効く）。"""
         text = setting_store(key).read_text()
         if key == "identity":
@@ -2105,6 +2115,12 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         adminsettings.apply_to_settings(settings, key, adminsettings.values_of(key, text))
         if key == "audit":
             auditor.keep_days, auditor.keep_body = settings.audit_keep_days, settings.audit_keep_body
+        elif key == "access":
+            # 「経営」のグループの段の境目を、設定に合わせる（グループの決まりが変わるので、監査ログに残す）
+            with closing(connect()) as db:
+                changed = access.set_executive_level(db, settings.executive_level)
+            if changed and user is not None:
+                audit_by(user, "roles.group.update", target=access.EXEC_GROUP, detail=changed)
         elif key == "models":
             llm.name = settings.chat_model
             if summary_llm is not llm:
@@ -2148,21 +2164,39 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         setting_text(key, req.values)
         return {"ok": True}
 
+    def strong_entry_guard(key: str, text: str, user: User) -> None:
+        """「管理の権限は確かな入口が要る」を ON にすると、今の入口（社員番号）の人は管理できなくなる。
+        確かな入口で入っていない人は ON にできない（だれも戻せなくなるのを防ぐ。締め出しを防ぐ決まりと同じ考え方）。"""
+        if key != "access" or user.context.strong:
+            return
+        if adminsettings.values_of(key, text).get("admin_needs_strong_entry") and not settings.admin_needs_strong_entry:
+            raise ApiError(409, "lockout", "今の入口（" + user.context.entry + "）で入っている人は、この決まりを ON にできません",
+                           [{"where": "admin_needs_strong_entry",
+                             "message": "ON にすると、あなたも含めて確かな入口（SSO か多要素つきの Yanua アカウント）で入っていない人は"
+                                        "管理できなくなり、画面から戻せなくなります。SSO ができてから ON にしてください"}])
+
     @app.put("/api/admin/settings/{key}")
     def settings_save(key: str, req: SettingValues, user: User = Depends(require("settings.edit"))):
         st = setting_store(key)
         text = setting_text(key, req.values)
+        strong_entry_guard(key, text, user)
         changes = adminsettings.describe_changes(key, setting_section(key)["values"], adminsettings.values_of(key, text))
         try:
             version = st.save(text, user.employee_no, f"{adminsettings.LABELS[key]}を保存した（{changes}）")
         except SettingError as e:
             raise setting_error(e, 400, "invalid_setting", "設定に直すところがあります") from e
-        apply_setting(key)
+        apply_setting(key, user)
         return {"version": version, **setting_section(key)}
 
     @app.post("/api/admin/settings/{key}/history/{version}/restore")
     def settings_restore(key: str, version: int, user: User = Depends(require("settings.edit"))):
         st = setting_store(key)
+        old = st.get(version)
+        if old:
+            try:
+                strong_entry_guard(key, old, user)
+            except (ValueError, KeyError):
+                pass                     # その版が読めないとき（戻すときの検証で断る）
         try:
             note = adminsettings.describe_changes(key, setting_section(key)["values"], adminsettings.values_of(key, st.get(version) or ""))
         except (ValueError, KeyError, identity.PolicyError):
@@ -2173,7 +2207,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             raise not_found("設定の版") from e
         except SettingError as e:
             raise setting_error(e, 409, "invalid_version", "この版は、今の検証を通らないので戻せません") from e
-        apply_setting(key)
+        apply_setting(key, user)
         return {"version": new, **setting_section(key)}
 
     @app.post("/api/admin/settings/{key}/reset")
@@ -2190,7 +2224,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
             raise setting_error(e, 409, "invalid_default", "既定の設定が今の検証を通らないので、戻せません。管理者に連絡してください") from e
         if new is None:
             return {"version": None, "already_default": True, "message": "すでに既定です", **setting_section(key)}
-        apply_setting(key)
+        apply_setting(key, user)
         return {"version": new, "already_default": False, **setting_section(key)}
 
     @app.post("/api/admin/settings/identity/try")
@@ -2585,7 +2619,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
     def denied_groups(user: User, change: access.Change, data: dict) -> list[str]:
         """roles.assign がそのグループに効いていないもの（グループ名）。"""
         return [data["groups"].get(g, {}).get("name", g) for g in sorted(change.groups)
-                if not engine.can(user.employee_no, user.dept, "roles.assign", ("group", g)).allowed]
+                if not engine.can(user.employee_no, user.dept, "roles.assign", ("group", g), user.context).allowed]
 
     def audit_target(args: dict) -> str:
         for key in ("group_id", "role_id", "target_id", "set_id", "grant_id", "name"):
@@ -2650,7 +2684,8 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         return {"permissions": [{"name": p.name, "feature": p.feature, "does": p.does,
                                  "targets": [TARGET_KINDS[t] for t in p.targets]} for p in PERMISSIONS.values()],
                 "roles": roles, "groups": groups, "targets": targets, "target_sets": sets,
-                "accounts": list(data["accounts"].values()), "departments": depts, "hosts": hosts_now()}
+                "accounts": list(data["accounts"].values()), "departments": depts, "hosts": hosts_now(),
+                "title_levels": settings.title_levels}
 
     @app.get("/api/admin/access")
     def access_get(user: User = Depends(require("roles.view"))):

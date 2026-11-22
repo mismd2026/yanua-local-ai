@@ -100,9 +100,9 @@ def test_only_admins(settings):
         assert "settings.view" in c.get("/api/me").json()["permissions"]
 
 
-def test_list_shows_five_sections_using_defaults(client):
+def test_list_shows_six_sections_using_defaults(client):
     r = client.get("/api/admin/settings").json()
-    assert [s["key"] for s in r["sections"]] == ["identity", "audit", "models", "files", "hr"]
+    assert [s["key"] for s in r["sections"]] == ["identity", "audit", "models", "files", "hr", "access"]
     assert all(s["status"]["using"] == "default" and s["applied"] for s in r["sections"])
     assert r["pending_restart"] == []
     assert r["links"][0]["path"] == "/paper/sort"

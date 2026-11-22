@@ -404,9 +404,11 @@ function GrantAdd({ g, view, changer }: { g: AccessGroup; view: AccessView; chan
 function GroupCreate({ view, changer, onCreated }: { view: AccessView; changer: Changer; onCreated: (id: string) => void }) {
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
-  const [how, setHow] = useState<"manual" | "all" | "departments">("manual");
+  const [how, setHow] = useState<"manual" | "all" | "departments" | "level">("manual");
   const [depts, setDepts] = useState<string[]>([]);
-  const rule = how === "manual" ? null : how === "all" ? { all: true } : { departments: depts };
+  const levels = Object.entries(view.title_levels ?? {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+  const [level, setLevel] = useState(levels.length ? levels[Math.floor(levels.length / 2)][0] : "3");
+  const rule = how === "manual" ? null : how === "all" ? { all: true } : how === "level" ? { min_level: Number(level) } : { departments: depts };
   const body = { name, description: desc, rule };
   const nameError = changer.fieldError("group-create", "name");
   return (
@@ -416,7 +418,7 @@ function GroupCreate({ view, changer, onCreated }: { view: AccessView; changer: 
       <p><label>説明 <input type="text" value={desc} onChange={(e) => setDesc(e.target.value)} /></label></p>
       <fieldset>
         <legend>入り方</legend>
-        {([["manual", "手で入れる"], ["all", "全員（決まり）"], ["departments", "部署（決まり）"]] as const).map(([k, label]) => (
+        {([["manual", "手で入れる"], ["all", "全員（決まり）"], ["departments", "部署（決まり）"], ["level", "役職の段（決まり）"]] as const).map(([k, label]) => (
           <label key={k} style={{ marginRight: "1em" }}>
             <input type="radio" name="how" checked={how === k} onChange={() => setHow(k)} style={{ width: "auto" }} /> {label}
           </label>
@@ -429,6 +431,17 @@ function GroupCreate({ view, changer, onCreated }: { view: AccessView; changer: 
                   onChange={(e) => setDepts(e.target.checked ? [...depts, d] : depts.filter((x) => x !== d))} /> {d}
               </label>
             ))}
+          </p>
+        )}
+        {how === "level" && (
+          <p>
+            <label>段が{" "}
+              <select aria-label="役職の段" value={level} onChange={(e) => setLevel(e.target.value)}>
+                {(levels.length ? levels : [["3", ""]]).map(([n, label]) => <option key={n} value={n}>{n}{label && `（${label}）`}</option>)}
+              </select>
+              {" "}以上の人が入る
+            </label>
+            <span className="small muted">　役職は人の属性で、権限は持ちません。このグループに役割を与えると、段が上がった人は入り、下がった人は外れます。</span>
           </p>
         )}
       </fieldset>

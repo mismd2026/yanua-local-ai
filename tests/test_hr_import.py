@@ -46,7 +46,7 @@ def test_import_keeps_only_needed_columns(db):
     cols = [r[1] for r in db.execute("PRAGMA table_info(employees)")]
     # 保存するのは本人確認に使う列と、その照合用の形（正規化した氏名・姓・部署）だけ
     assert cols == ["employee_no", "name", "dept", "dept_code", "active", "email", "kana", "status", "changed_at",
-                    "name_key", "surname_key", "dept_key"]
+                    "employment", "expires_on", "title", "title_level", "name_key", "surname_key", "dept_key"]
 
 
 def test_verify_needs_both_number_and_name(db):

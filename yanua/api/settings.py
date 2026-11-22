@@ -24,6 +24,7 @@ class Settings:
     models_config: Path = Path("config/models.json")
     files_config: Path = Path("config/files.json")
     hr_config: Path = Path("config/hr.json")                        # 休職中の人の扱い（S-52 の「人事」）
+    access_config: Path = Path("config/access.json")                # 権限の条件と役職の段（S-52 の「権限の条件と役職の段」）
     hr_mappings_config: Path = Path("config/hr_mappings.json")      # 人事データの列の対応づけ（S-51 で名前を付けて保存）
     network_config: Path = Path("config/network.json")              # 宛先の一覧と目録（既定。S-53 からは書き換えない）
     network_state_config: Path = Path("config/network_state.json")  # 宛先の ON/OFF・追加・更新の確認の既定（写しは settings_dir）
@@ -60,6 +61,10 @@ class Settings:
     hr_max_bytes: int = 500_000_000              # 人事データ（CSV・Excel・JSON）のアップロードの上限（500MB。100万人の CSV で 100MB ほど）
     on_leave_login: bool = True                  # 休職中の人がログインできるか（S-52 の「人事」で変える）
     on_leave_permissions: str = "そのまま"        # 休職中の人の権限：「そのまま」か「社員の役割だけ」
+    # 権限の条件と役職の段（S-52。config/access.json と同じ既定）
+    admin_needs_strong_entry: bool = False       # 管理の権限は確かな入口（SSO・多要素つきのアカウント）で入ったときだけ。今は OFF
+    title_levels: dict = field(default_factory=lambda: {"1": "一般", "2": "主任", "3": "課長", "4": "部長", "5": "役員", "6": "社長"})
+    executive_level: int = 5                     # この段以上の人が「経営」のグループに入る
     work_max_bytes: int = 20_000_000_000         # 作業用フォルダの合計の上限（20GB）。超えるアップロードは断る
     # PDF の仕分け・変換
     paper_inbox: Path = Path("demo/company/paper/inbox")     # 受信箱（スキャナーが PDF を置くフォルダ）

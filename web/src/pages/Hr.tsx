@@ -1,6 +1,6 @@
 // S-51 人事データ（取り込みは hr.import、一覧は hr.view）。考え方は yanua/hrimport.py
 // - 人事アプリから出したファイル（Excel・CSV・JSON）を上げ、列を Yanua の項目に割り当てる（名前を付けて保存して、次から選べる）
-// - 読むのは割り当てた列だけ。在籍状態は、ファイルの値を在籍・休職・退職に当てる
+// - 読むのは割り当てた列だけ。在籍状態は、ファイルの値を在籍・休職・退職に当てる。雇用区分も同じ作りで、5つの区分に当てる
 // - 取り込みの種類：「一部のファイル」（既定。ファイルにいない人は変えない）か「全員のファイル」（ファイルにいない人はいなくなる）
 // - 試す（保存しない）→ 確かめる（入る・変わる・いなくなる人、グループごとの増減、誤りは行番号つき）→ 確定（まとめて1回）
 //   全員のファイルで、いなくなる人が今の人数の 10% を超えるときは、「いなくなる人が N人（全体の M%）います」と出して、もう一度押させる
@@ -63,6 +63,7 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   const [mapping, setMapping] = useState<HrMapping>({ columns: {}, status_values: {} });
   const [chosen, setChosen] = useState("");
   const [values, setValues] = useState<{ value: string; guess: string }[]>([]);
+  const [kinds, setKinds] = useState<{ value: string; guess: string }[]>([]);   // 雇用区分の列に出てくる値
   const [saveName, setSaveName] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -83,8 +84,9 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   });
   const key = JSON.stringify({ fileId, mapping, scope });
 
-  const inspect = async (id: string, sheet?: string, statusColumn?: string) => {
-    const r = await api<HrInspect>("POST", "/api/hr/inspect", { file_id: id, sheet: sheet || null, status_column: statusColumn || null });
+  const inspect = async (id: string, sheet?: string, statusColumn?: string, employmentColumn?: string) => {
+    const r = await api<HrInspect>("POST", "/api/hr/inspect", { file_id: id, sheet: sheet || null, status_column: statusColumn || null,
+      employment_column: employmentColumn || null });
     return r;
   };
   const choose = async (file: File) => {
@@ -97,7 +99,7 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
       setInfo(r);
       const first = Object.entries(view.mappings).find(([, m]) => Object.values(m.columns).every((c) => r.headers.includes(c)));
       if (first) { setChosen(first[0]); setMapping(first[1]); await loadValues(up.file_id, first[1]); }
-      else { setChosen(""); setMapping({ columns: r.draft, status_values: {} }); await loadValues(up.file_id, { columns: r.draft }); }
+      else { setChosen(""); setMapping({ columns: r.draft, status_values: {}, employment_values: {} }); await loadValues(up.file_id, { columns: r.draft }); }
     } catch (e) {
       setError(errorText(e, "ファイルを読み込めませんでした"));
     } finally {
@@ -106,18 +108,27 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   };
   const loadValues = async (id: string, m: HrMapping) => {
     const col = m.columns.status;
-    if (!col) { setValues([]); return; }
-    const r = await inspect(id, m.sheet, col);
-    setValues(r.status_values);
-    setMapping((cur) => ({ ...cur, status_values: Object.fromEntries(r.status_values.map((v) => [v.value, cur.status_values?.[v.value] || m.status_values?.[v.value] || v.guess])) }));
+    const kindCol = m.columns.employment;
+    if (!col) setValues([]);
+    if (!kindCol) setKinds([]);
+    if (!col && !kindCol) return;
+    const r = await inspect(id, m.sheet, col, kindCol);
+    if (col) setValues(r.status_values);
+    const ev = r.employment_values ?? [];
+    if (kindCol) setKinds(ev);
+    setMapping((cur) => ({
+      ...cur,
+      status_values: col ? Object.fromEntries(r.status_values.map((v) => [v.value, cur.status_values?.[v.value] || m.status_values?.[v.value] || v.guess])) : cur.status_values,
+      employment_values: kindCol ? Object.fromEntries(ev.map((v) => [v.value, cur.employment_values?.[v.value] || m.employment_values?.[v.value] || v.guess])) : cur.employment_values,
+    }));
   };
   const setColumn = async (field: string, col: string) => {
     const columns = { ...mapping.columns };
     if (col) columns[field] = col; else delete columns[field];
     const next = { ...mapping, columns };
     setMapping(next); setChosen("");
-    if (field === "status") {
-      try { await loadValues(fileId, next); } catch (e) { setError(errorText(e, "在籍状態の値を読めませんでした")); }
+    if (field === "status" || field === "employment") {
+      try { await loadValues(fileId, next); } catch (e) { setError(errorText(e, "列の値を読めませんでした")); }
     }
   };
   const pickSaved = async (name: string) => {
@@ -129,7 +140,9 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   };
   const body = () => {
     const sv = Object.fromEntries(Object.entries(mapping.status_values ?? {}).filter(([, v]) => v));
-    return { file_id: fileId, scope, mapping: { columns: mapping.columns, status_values: mapping.columns.status ? sv : undefined, sheet: mapping.sheet || undefined } };
+    const ev = Object.fromEntries(Object.entries(mapping.employment_values ?? {}).filter(([, v]) => v));
+    return { file_id: fileId, scope, mapping: { columns: mapping.columns, status_values: mapping.columns.status ? sv : undefined,
+      employment_values: mapping.columns.employment ? ev : undefined, sheet: mapping.sheet || undefined } };
   };
   const start = async (m: "preview" | "commit") => {
     setError(""); setMessage("");
@@ -157,6 +170,7 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
   const running = job !== null && (job.status === "待ち" || job.status === "実行中");
   const missing = view.required.filter((f) => !mapping.columns[f]);
   const unmapped = values.filter((v) => !mapping.status_values?.[v.value]);
+  const unmappedKinds = kinds.filter((v) => !mapping.employment_values?.[v.value]);
   return (
     <section className="card" aria-label="人事データの取り込み">
       <h2>取り込み</h2>
@@ -225,8 +239,25 @@ function ImportTab({ view, onDone }: { view: HrOverview; onDone: () => void }) {
               ))}
             </fieldset>
           )}
+          {mapping.columns.employment && (
+            <fieldset>
+              <legend>雇用区分の対応（ファイルの値 → Yanua）</legend>
+              {kinds.length === 0 && <p className="small muted">値が見つかりません。</p>}
+              {kinds.map((v) => (
+                <label key={v.value} style={{ marginRight: "1.5em", display: "inline-block" }}>「{v.value}」→{" "}
+                  <select aria-label={`雇用区分「${v.value}」`} value={mapping.employment_values?.[v.value] ?? ""}
+                    onChange={(e) => { setChosen(""); setMapping({ ...mapping, employment_values: { ...mapping.employment_values, [v.value]: e.target.value } }); }}>
+                    <option value="">（選ぶ）</option>
+                    {view.employments.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+              ))}
+              <p className="small muted">雇用区分は人の属性で、権限は持ちません（期限・表示などに使います）。列を使わないときは、今いる人は今のまま、新しく入る人は「社員」です。</p>
+            </fieldset>
+          )}
           {missing.length > 0 && <p className="error">必要な項目の列を選んでください：{missing.map((f) => view.fields[f]).join("・")}</p>}
           {unmapped.length > 0 && <p className="small">在籍状態「{unmapped.map((v) => v.value).join("」「")}」の当て先が決まっていません（このままだと、その行は誤りになります）</p>}
+          {unmappedKinds.length > 0 && <p className="small">雇用区分「{unmappedKinds.map((v) => v.value).join("」「")}」の当て先が決まっていません（このままだと、その行は誤りになります）</p>}
           <p>
             <label>この対応づけに名前を付けて保存{" "}
               <input value={saveName} onChange={(e) => setSaveName(e.target.value)} maxLength={40} style={{ width: "14em" }} />
@@ -293,7 +324,7 @@ export function PreviewBox({ p, title, stale, ack, children }: { p: HrPreview; t
             <People label="いなくなる人" part={p.removed} />
           </ul>
           {by.length > 0 && <p className="small">変わるところ：{by.map(([k, n]) => `${k} ${n}人`).join("・")}</p>}
-          <h4>権限への効き方（部署が変わる人・退職になる人・いなくなる人）</h4>
+          <h4>権限への効き方（入る人・部署や在籍が変わる人・いなくなる人）</h4>
           {p.groups.length === 0 ? <p className="small muted">入るグループ・外れるグループはありません。</p> : (
             <div className="table-wrap">
               <table className="table" aria-label="グループごとの人数">

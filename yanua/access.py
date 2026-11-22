@@ -7,9 +7,11 @@
         「メンバー自身の部署」（special:self_dept。部署だけ）と「全社」（special:all）
 - グループ：役割 × 対象 を受け取る（group_grants）。権限は人に直接は与えない。入れ子は作らない
 - アカウント：グループのメンバー（人 person・システム system）。手で入れたメンバー（group_members。期限つき）と、
-        グループの決まり（rule：全員・部署）で自動で入るメンバーを、区別して持つ
+        グループの決まり（rule：全員・部署・役職の段）で自動で入るメンバーを、区別して持つ
+- 条件：どの入口で入ったか・どこからか・どの端末か（Context）。「管理の権限は確かな入口が要る」の決まりを ON にすると、
+        管理の権限（permissions.ADMIN_PERMISSIONS）は SSO か多要素つきの Yanua アカウントで入ったときだけ効く
 
-判定は can(アカウント, 権限, 対象) の1か所。結果は「はい／いいえ」と理由（どのグループのどの役割から来たか）。
+判定は can(アカウント, 権限, 対象, 条件) の1か所。結果は「はい／いいえ」と理由（どのグループのどの役割から来たか）。
 アカウントごとの「持っている権限と、その出どころ」は、変更があったときだけ作り直して持っておく（世代の番号で見分ける）。
 期限の切れたメンバーは、判定の時点で数えない。
 """
@@ -28,7 +30,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import hr
-from .permissions import DEFAULT_ROLES, DOCUMENT_PERMISSIONS, PERMISSIONS
+from .permissions import ADMIN_PERMISSIONS, DEFAULT_ROLES, DOCUMENT_PERMISSIONS, PERMISSIONS, ROLES_V2
 
 PERSON, SYSTEM = "person", "system"
 SELF, SELF_DEPT, ALL = "special:self", "special:self_dept", "special:all"
@@ -50,7 +52,7 @@ CREATE TABLE IF NOT EXISTS access_groups (
     group_id    TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL DEFAULT '',
-    rule        TEXT                        -- 自動で入る決まり（JSON）：{"all": true} か {"departments": [...]}
+    rule        TEXT                        -- 自動で入る決まり（JSON）：{"all": true}・{"departments": [...]}・{"min_level": N}
 );
 CREATE TABLE IF NOT EXISTS group_members (
     group_id    TEXT NOT NULL,
@@ -132,6 +134,7 @@ def migrate_if_empty(db: sqlite3.Connection, role_config) -> bool:
     管理者 → 「管理者」（roles.json の社員番号は手で入れたメンバー）× 全社。今の動きを変えないため、
             「監査」（audit.view）と「文書管理」（documents.manage。前の documents.ingest）の役割も与える
     「監査」のグループ（メンバーなし）× 全社。IaC の役割は作るが、どのグループにも与えない
+    「経営」（決まり：役職の段が役員以上）× 全社 に、経営のロール。マネージャー・ディレクターの役割は作るが、どのグループにも与えない
     """
     ensure_schema(db)
     if db.execute("SELECT COUNT(*) FROM access_groups").fetchone()[0]:
@@ -177,16 +180,21 @@ def migrate_if_empty(db: sqlite3.Connection, role_config) -> bool:
         for aid, name in (("sys:kiosk", "受付端末"), ("sys:update-check", "更新の確認（S-53）")):
             db.execute("INSERT OR IGNORE INTO accounts VALUES (?, 'system', ?, ?)", (aid, name, now))
         db.execute("INSERT OR IGNORE INTO access_meta (key, value) VALUES ('self_target', '1')")
+        # 「経営」のグループ（役職の段が役員以上）× 経営のロール。段の境目は、このあとの upgrade で設定に合わせる
+        _add_roles_v2(db, DEFAULT_EXECUTIVE_LEVEL)
+        db.execute("INSERT OR IGNORE INTO access_meta (key, value) VALUES ('roles_v2', '1')")
         _bump(db)
     return True
 
 
-def upgrade(db: sqlite3.Connection) -> list[str]:
+def upgrade(db: sqlite3.Connection, executive_level: int | None = None) -> list[str]:
     """前の版で作ったデータを、今の版に合わせる（起動のたびに呼ぶ。済んだものは2回はしない）。したことの説明を返す。
 
     - 特別な対象「メンバー自身の所属（部署と、入っているグループ）」を作り、役割「社員」の
       「メンバー自身の部署」を、これに置き換える（グループに公開した文書を、そのグループの人が見られるように。S-50）。
       1回だけ。あとで画面で「メンバー自身の部署」に戻しても、また置き換えはしない
+    - 職務ロール（マネージャー・ディレクター・経営）と、「経営」のグループ（役職の段が executive_level 以上）を足す（1回だけ）
+    - 「経営」のグループの段の境目を、設定（executive_level）に合わせる（起動のたび。None なら合わせない：復旧用のコマンドなど）
     """
     ensure_schema(db)
     done = []
@@ -200,7 +208,60 @@ def upgrade(db: sqlite3.Connection) -> list[str]:
             if rows:
                 _bump(db)
                 done.append(f"役割「社員」の対象を「{SPECIAL_NAMES[SELF_DEPT]}」から「{SPECIAL_NAMES[SELF]}」に置き換えた（{rows}件）")
+        if db.execute("SELECT 1 FROM access_meta WHERE key = 'roles_v2'").fetchone() is None:
+            done += _add_roles_v2(db, executive_level or DEFAULT_EXECUTIVE_LEVEL)
+            db.execute("INSERT INTO access_meta (key, value) VALUES ('roles_v2', '1')")
+    changed = set_executive_level(db, executive_level) if executive_level is not None else ""
+    if changed:
+        done.append(changed)
     return done
+
+
+EXEC_GROUP = "G-exec"
+DEFAULT_EXECUTIVE_LEVEL = 5
+
+
+def _add_roles_v2(db: sqlite3.Connection, executive_level: int) -> list[str]:
+    """職務ロール（マネージャー・ディレクター・経営）を足し、「経営」のグループ（役職の段が役員以上）に経営のロール × 全社を与える。
+    1回だけ（あとで画面で消しても、また足さない）。"""
+    done = []
+    have = {name: rid for rid, name in db.execute("SELECT role_id, name FROM access_roles")}
+    taken = set(have.values())
+    n = 1
+    for name in ROLES_V2:
+        if name in have:
+            continue
+        while f"R{n:02d}" in taken:
+            n += 1
+        rid = f"R{n:02d}"
+        taken.add(rid)
+        desc, perms = DEFAULT_ROLES[name]
+        db.execute("INSERT INTO access_roles VALUES (?, ?, ?, ?)", (rid, name, desc, json.dumps(perms)))
+        have[name] = rid
+        done.append(f"役割「{name}」を足した（{'・'.join(perms)}）")
+    exists = db.execute("SELECT 1 FROM access_groups WHERE group_id = ? OR name = '経営'", (EXEC_GROUP,)).fetchone()
+    if not exists:
+        db.execute("INSERT INTO access_groups VALUES (?, '経営', ?, ?)",
+                   (EXEC_GROUP, "役職の段が役員以上の人（段の境目は設定 S-52 の「権限の条件と役職の段」）",
+                    json.dumps({"min_level": executive_level})))
+        db.execute("INSERT INTO group_grants (group_id, role_id, target_id) VALUES (?, ?, ?)", (EXEC_GROUP, have["経営"], ALL))
+        done.append(f"グループ「経営」（役職の段 {executive_level} 以上）を作り、役割「経営」× 全社を与えた")
+    _bump(db)
+    return done
+
+
+def set_executive_level(db: sqlite3.Connection, level: int) -> str:
+    """「経営」のグループの段の境目を、設定に合わせる（起動のときと、設定を保存したとき）。変えたら説明を返す。"""
+    row = db.execute("SELECT rule FROM access_groups WHERE group_id = ?", (EXEC_GROUP,)).fetchone()
+    if not row or not row[0]:
+        return ""
+    rule = json.loads(row[0])
+    if set(rule) != {"min_level"} or rule["min_level"] == level:
+        return ""
+    with db:
+        db.execute("UPDATE access_groups SET rule = ? WHERE group_id = ?", (json.dumps({"min_level": level}), EXEC_GROUP))
+        _bump(db)
+    return f"グループ「経営」の決まりを、役職の段 {rule['min_level']} 以上 → {level} 以上 にした（設定に合わせた）"
 
 
 def _ensure_person(db: sqlite3.Connection, employee_no: str) -> None:
@@ -250,8 +311,9 @@ def problems(data: dict) -> list[tuple[str, str]]:
         rule = g["rule"]
         if rule is not None and not (isinstance(rule, dict) and (rule == {"all": True} or (
                 set(rule) == {"departments"} and isinstance(rule["departments"], list)
-                and all(isinstance(d, str) and d for d in rule["departments"])))):
-            out.append((f"groups.{g['name']}", "自動で入る決まりは {\"all\": true} か {\"departments\": [...]} にしてください"))
+                and all(isinstance(d, str) and d for d in rule["departments"])) or _level_rule_ok(rule))):
+            out.append((f"groups.{g['name']}", "自動で入る決まりは {\"all\": true}・{\"departments\": [...]}・"
+                                               "{\"min_level\": 段} のどれかにしてください"))
     for gr in data["grants"]:
         at = f"grants[{gr['grant_id']}]"
         if gr["group_id"] not in data["groups"]:
@@ -281,6 +343,11 @@ def problems(data: dict) -> list[tuple[str, str]]:
             except ValueError:
                 out.append((at, "期限は YYYY-MM-DD で書いてください"))
     return out
+
+
+def _level_rule_ok(rule: dict) -> bool:
+    v = rule.get("min_level")
+    return set(rule) == {"min_level"} and isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= hr.TITLE_LEVEL_MAX
 
 
 # ------------------------------------------------------------ 判定
@@ -317,22 +384,54 @@ def _expired(expires_at: str | None, today: str) -> bool:
     return bool(expires_at) and expires_at[:10] < today
 
 
-def _rule_match(rule: dict | None, dept: str) -> str | None:
+def _rule_match(rule: dict | None, dept: str, level: int | None = None) -> str | None:
     if not rule:
         return None
     if rule.get("all"):
         return f"決まり：{EVERYONE}"
     if dept and dept in rule.get("departments", []):
         return f"決まり：部署「{dept}」"
+    if rule.get("min_level") is not None and level is not None and level >= rule["min_level"]:
+        return f"決まり：役職の段 {rule['min_level']} 以上"
     return None
+
+
+# ------------------------------------------------------------ 条件（入口・場所・端末）
+
+ENTRY_SSO, ENTRY_ACCOUNT_MFA, ENTRY_ACCOUNT, ENTRY_EMPLOYEE_NO = "SSO", "Yanuaのアカウント（多要素）", "Yanuaのアカウント", "社員番号"
+ENTRY_SHARED_DEVICE = "登録した共有端末＋社員番号"
+STRONG_ENTRIES = (ENTRY_SSO, ENTRY_ACCOUNT_MFA)          # 確かな入口
+INSIDE, OUTSIDE = "社内", "社外"
+REGISTERED, UNREGISTERED = "登録した端末", "登録していない端末"
+
+
+@dataclass(frozen=True)
+class Context:
+    """権限の判定の条件：どの入口で入ったか・どこからか・どの端末か。"""
+    entry: str = ENTRY_EMPLOYEE_NO
+    location: str = INSIDE
+    device: str = UNREGISTERED
+
+    @property
+    def strong(self) -> bool:
+        return self.entry in STRONG_ENTRIES
+
+    def as_dict(self) -> dict:
+        return {"entry": self.entry, "location": self.location, "device": self.device, "strong": self.strong}
+
+
+# 今は入口が社員番号（と開発用ログイン）しかないので、既定の条件は「社員番号・社内・登録していない端末」
+DEFAULT_CONTEXT = Context()
+NEEDS_STRONG = "管理の権限は、確かな入口（SSO か多要素つきの Yanua アカウント）で入ったときだけ効きます"
 
 
 LEAVE_KEEP, LEAVE_EMPLOYEE_ONLY = "そのまま", "社員の役割だけ"   # 休職中の人の権限（設定 S-52 の「人事」）
 EMPLOYEE_ROLE = "社員"
 
 
-def compute_memberships(data: dict, account_id: str, dept: str, status: str | None = None) -> dict[str, tuple[str, str | None]]:
-    """その人が入っているグループ：{group_id: (入り方, 期限)}。期限の切れたものも入っている。
+def compute_memberships(data: dict, account_id: str, dept: str, status: str | None = None,
+                        level: int | None = None) -> dict[str, tuple[str, str | None]]:
+    """その人が入っているグループ：{group_id: (入り方, 期限)}。期限の切れたものも入っている。level は役職の段。
     退職した人は、どのグループにも数えない（決まりのグループは在籍している人だけ。手で入れたグループも数えない。K-054）。"""
     if status == "退職":
         return {}
@@ -340,7 +439,7 @@ def compute_memberships(data: dict, account_id: str, dept: str, status: str | No
     manual = {m["group_id"]: m for m in data["members"] if m["account_id"] == account_id}
     for gid, g in data["groups"].items():
         via, expires = None, None
-        rule = _rule_match(g["rule"], dept) if not account_id.startswith("sys:") else None
+        rule = _rule_match(g["rule"], dept, level) if not account_id.startswith("sys:") else None
         if rule:
             via = rule
         if gid in manual:
@@ -352,12 +451,12 @@ def compute_memberships(data: dict, account_id: str, dept: str, status: str | No
 
 
 def compute_grants(data: dict, account_id: str, dept: str, status: str | None = None,
-                   leave: str = LEAVE_KEEP) -> list[Grant]:
+                   leave: str = LEAVE_KEEP, level: int | None = None) -> list[Grant]:
     """その人が持つ権限と出どころ（データだけから決める。変更を試すときにも使う）。期限の切れたものも入っている。
     休職中の人は、設定が「社員の役割だけ」なら、役割「社員」から来る権限だけ。"""
     result = []
     only_employee = status == "休職" and leave == LEAVE_EMPLOYEE_ONLY
-    for gid, (via, expires) in compute_memberships(data, account_id, dept, status).items():
+    for gid, (via, expires) in compute_memberships(data, account_id, dept, status, level).items():
         g = data["groups"][gid]
         for gr in data["grants"]:
             if gr["group_id"] != gid or gr["role_id"] not in data["roles"]:
@@ -378,11 +477,14 @@ def compute_grants(data: dict, account_id: str, dept: str, status: str | None = 
 class Engine:
     """判定の1か所。アカウントごとの結果を、変更の世代が同じあいだ持っておく。"""
 
-    def __init__(self, connect, today=None, leave_policy: Callable[[], str] | None = None):
-        """leave_policy は休職中の人の権限（「そのまま」か「社員の役割だけ」）を返す関数（設定を変えたらすぐ効く）。"""
+    def __init__(self, connect, today=None, leave_policy: Callable[[], str] | None = None,
+                 admin_needs_strong: Callable[[], bool] | None = None):
+        """leave_policy は休職中の人の権限（「そのまま」か「社員の役割だけ」）を返す関数（設定を変えたらすぐ効く）。
+        admin_needs_strong は「管理の権限は確かな入口が要る」の決まりが ON かを返す関数（既定は OFF）。"""
         self._connect = connect
         self._today = today or (lambda: datetime.now().astimezone().date().isoformat())
         self._leave = leave_policy or (lambda: LEAVE_KEEP)
+        self._strong = admin_needs_strong or (lambda: False)
         self._cache: dict[tuple, tuple[int, list[Grant]]] = {}
         self._groups: dict[tuple, tuple[int, dict]] = {}
         self._data: tuple[int, dict] | None = None
@@ -405,8 +507,8 @@ class Engine:
             hit = self._cache.get(key)
             if hit and hit[0] == gen:
                 return hit[1]
-            status = None if account_id.startswith("sys:") else hr.status_of(db, account_id)
-            result = compute_grants(data, account_id, dept, status, leave)
+            status, level = (None, None) if account_id.startswith("sys:") else hr.attrs_of(db, account_id)
+            result = compute_grants(data, account_id, dept, status, leave, level)
             self._cache[key] = (gen, result)
             return result
 
@@ -416,21 +518,32 @@ class Engine:
             gen, data = self._load(db)
             hit = self._groups.get((account_id, dept))
             if not hit or hit[0] != gen:
-                status = None if account_id.startswith("sys:") else hr.status_of(db, account_id)
-                hit = (gen, compute_memberships(data, account_id, dept, status))
+                status, level = (None, None) if account_id.startswith("sys:") else hr.attrs_of(db, account_id)
+                hit = (gen, compute_memberships(data, account_id, dept, status, level))
                 self._groups[(account_id, dept)] = hit
         today = self._today()
         return {gid for gid, (_, exp) in hit[1].items() if not _expired(exp, today)}
 
-    def _live(self, account_id: str, dept: str) -> list[Grant]:
+    def _live(self, account_id: str, dept: str, context: Context | None = None) -> list[Grant]:
         today = self._today()
-        return [g for g in self.grants_for(account_id, dept) if not _expired(g.expires_at, today)]
+        held = self._held_back(context)
+        return [g for g in self.grants_for(account_id, dept) if not _expired(g.expires_at, today) and g.permission not in held]
 
-    def can(self, account_id: str, dept: str, permission: str, target: tuple[str, str] | None = None) -> Decision:
-        """target は (種類, 参照)（例 ("department", "営業部")）。None なら「どこかに対して持っているか」（機能を使えるか）。"""
+    def _held_back(self, context: Context | None) -> frozenset[str]:
+        """条件で効かない権限：決まりが ON で、確かな入口で入っていなければ、管理の権限。"""
+        if self._strong() and not (context or DEFAULT_CONTEXT).strong:
+            return frozenset(ADMIN_PERMISSIONS)
+        return frozenset()
+
+    def can(self, account_id: str, dept: str, permission: str, target: tuple[str, str] | None = None,
+            context: Context | None = None) -> Decision:
+        """target は (種類, 参照)（例 ("department", "営業部")）。None なら「どこかに対して持っているか」（機能を使えるか）。
+        context は条件（入口・場所・端末）。None なら既定（社員番号・社内・登録していない端末）。"""
+        if permission in self._held_back(context):
+            return Decision(False, [NEEDS_STRONG])
         reasons = []
         mine = None
-        for g in self._live(account_id, dept):
+        for g in self._live(account_id, dept, context):
             if g.permission != permission:
                 continue
             if g.target == SELF and target is not None and target[0] == "group" and mine is None:
@@ -441,8 +554,8 @@ class Engine:
                 reasons.append(g.reason())
         return Decision(bool(reasons), reasons)
 
-    def permissions(self, account_id: str, dept: str) -> list[str]:
-        have = {g.permission for g in self._live(account_id, dept)}
+    def permissions(self, account_id: str, dept: str, context: Context | None = None) -> list[str]:
+        have = {g.permission for g in self._live(account_id, dept, context)}
         return [p for p in PERMISSIONS if p in have]
 
     def departments(self, account_id: str, dept: str, permission: str):
@@ -627,10 +740,10 @@ class Change:
     groups: set[str] = field(default_factory=set)   # roles.assign が効いている要があるグループ（API で確かめる）
 
 
-def _effect(data: dict, account_id: str, dept: str, today: str) -> dict[tuple[str, str], str]:
+def _effect(data: dict, account_id: str, dept: str, today: str, level: int | None = None) -> dict[tuple[str, str], str]:
     """(権限, 対象) → いつまで効くか（期限なしは FOREVER）。期限の切れたものは入れない。"""
     out: dict[tuple[str, str], str] = {}
-    for g in compute_grants(data, account_id, dept):
+    for g in compute_grants(data, account_id, dept, level=level):
         if _expired(g.expires_at, today):
             continue
         until = (g.expires_at or FOREVER)[:10]
@@ -639,17 +752,21 @@ def _effect(data: dict, account_id: str, dept: str, today: str) -> dict[tuple[st
     return out
 
 
-def _active_people(db) -> list[tuple[str, str]]:
+def _active_people(db) -> list[tuple[str, str, int | None]]:
     try:
-        return [(r[0], r[1]) for r in db.execute("SELECT employee_no, dept FROM employees WHERE active = 1")]
+        return [(r[0], r[1], r[2]) for r in db.execute("SELECT employee_no, dept, title_level FROM employees WHERE active = 1")]
     except sqlite3.Error:
         return []
 
 
+def _level_of(db, account_id: str) -> int | None:
+    return None if account_id.startswith("sys:") else hr.attrs_of(db, account_id)[1]
+
+
 def _assign_holders(db, data: dict, today: str) -> list[str]:
     """roles.assign を持つ人（在籍している人だけ。システムアカウントは数えない）。"""
-    return [no for no, dept in _active_people(db)
-            if any(p == "roles.assign" for (p, _t) in _effect(data, no, dept, today))]
+    return [no for no, dept, level in _active_people(db)
+            if any(p == "roles.assign" for (p, _t) in _effect(data, no, dept, today, level))]
 
 
 def guard(db, engine: "Engine", actor: str, actor_dept: str, before: dict, after: dict) -> None:
@@ -658,7 +775,8 @@ def guard(db, engine: "Engine", actor: str, actor_dept: str, before: dict, after
     - 権限が減る変更と、自分に効かない変更はできる
     - roles.assign を持つ人が1人もいなくなる変更はできない（締め出しを防ぐ）"""
     today = engine._today()
-    now, then = _effect(before, actor, actor_dept, today), _effect(after, actor, actor_dept, today)
+    lv = _level_of(db, actor)
+    now, then = _effect(before, actor, actor_dept, today, lv), _effect(after, actor, actor_dept, today, lv)
     gained = sorted(p for key, until in then.items() if until > now.get(key, "") for p in [key[0]])
     if gained:
         raise AccessError(f"自分の権限が増える変更はできません（増える権限：{'・'.join(dict.fromkeys(gained))}）",
@@ -694,6 +812,8 @@ def _group(data: dict, group_id: str) -> dict:
 def _rule_text(rule: dict | None) -> str:
     if not rule:
         return "手で入れる"
+    if rule.get("min_level") is not None:
+        return f"役職の段 {rule['min_level']} 以上"
     return EVERYONE if rule.get("all") else f"部署「{'・'.join(rule.get('departments', []))}」"
 
 
@@ -732,6 +852,9 @@ def _rule_count(db, rule: dict | None) -> int:
     try:
         if rule.get("all"):
             return db.execute("SELECT COUNT(*) FROM employees WHERE active = 1").fetchone()[0]
+        if rule.get("min_level") is not None:
+            return db.execute("SELECT COUNT(*) FROM employees WHERE active = 1 AND title_level >= ?",
+                              (rule["min_level"],)).fetchone()[0]
         depts = rule.get("departments", [])
         if not depts:
             return 0
@@ -901,6 +1024,13 @@ def role_delete(db, data: dict, by: str, role_id: str) -> Change:
 
 
 def _check_rule(db, rule) -> dict | None:
+    if isinstance(rule, dict) and set(rule) == {"min_level"}:
+        v = rule["min_level"]
+        if isinstance(v, str) and v.strip().isdigit():
+            v = int(v.strip())
+        if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= hr.TITLE_LEVEL_MAX:
+            raise _fail(f"役職の段は 1〜{hr.TITLE_LEVEL_MAX} の整数にしてください", "rule")
+        return {"min_level": v}
     if rule in (None, {}):
         return None
     if rule == {"all": True}:
@@ -914,7 +1044,7 @@ def _check_rule(db, rule) -> dict | None:
         if unknown:
             raise _fail(f"人事データにない部署です：{'・'.join(unknown)}", "rule")
         return {"departments": list(dict.fromkeys(depts))}
-    raise _fail("入り方は「手で入れる」「全員」「部署」のどれかにしてください", "rule")
+    raise _fail("入り方は「手で入れる」「全員」「部署」「役職の段」のどれかにしてください", "rule")
 
 
 def group_create(db, data: dict, by: str, name: str, description: str = "", rule=None) -> Change:
@@ -1155,24 +1285,36 @@ def _dept_of(db, account_id: str) -> str:
     return row[0] if row else ""
 
 
-def _people_of(db, data_list: list[dict], gids: list[str]) -> tuple[dict[str, str], int]:
-    """その変更で権限が変わりうる人（触れたグループのメンバー）→ 部署。数が多ければ空で返し、数だけ返す。"""
+def _people_of(db, data_list: list[dict], gids: list[str]) -> tuple[dict[str, tuple[str, int | None]], int]:
+    """その変更で権限が変わりうる人（触れたグループのメンバー）→ (部署, 役職の段)。数が多ければ空で返し、数だけ返す。"""
     manual = {m["account_id"] for d in data_list for m in d["members"] if m["group_id"] in gids}
     rules = [d["groups"][g]["rule"] for d in data_list for g in gids if g in d["groups"] and d["groups"][g]["rule"]]
     everyone = any(r.get("all") for r in rules)
     depts = sorted({x for r in rules for x in r.get("departments", [])})
-    count = _rule_count(db, {"all": True} if everyone else ({"departments": depts} if depts else None)) + len(manual)
+    levels = [r["min_level"] for r in rules if r.get("min_level") is not None]
+    low = min(levels) if levels else None
+    if everyone:
+        count = _rule_count(db, {"all": True})
+    else:
+        count = (_rule_count(db, {"departments": depts}) if depts else 0) + (_rule_count(db, {"min_level": low}) if levels else 0)
+    count += len(manual)
     if count > IMPACT_LIMIT:
         return {}, count
-    people = {no: _dept_of(db, no) for no in manual}
-    if everyone or depts:
-        sql = "SELECT employee_no, dept FROM employees WHERE active = 1"
+    people = {no: (_dept_of(db, no), _level_of(db, no)) for no in manual}
+    if everyone or depts or levels:
+        sql = "SELECT employee_no, dept, title_level FROM employees WHERE active = 1"
         args: list = []
         if not everyone:
-            sql += f" AND dept IN ({','.join('?' * len(depts))})"
-            args = depts
+            parts = []
+            if depts:
+                parts.append(f"dept IN ({','.join('?' * len(depts))})")
+                args += depts
+            if levels:
+                parts.append("title_level >= ?")
+                args.append(low)
+            sql += " AND (" + " OR ".join(parts) + ")"
         try:
-            people.update({r[0]: r[1] for r in db.execute(sql, args)})
+            people.update({r[0]: (r[1], r[2]) for r in db.execute(sql, args)})
         except sqlite3.Error:
             pass
     return people, len(people)
@@ -1187,12 +1329,14 @@ def preview(db, engine: "Engine", actor: str, actor_dept: str, before: dict, cha
         guard(db, engine, actor, actor_dept, before, after)
     except AccessError as e:
         refused = str(e)
-    mine_gained, mine_lost = _diff(before, after, _effect(before, actor, actor_dept, today), _effect(after, actor, actor_dept, today))
+    lv = _level_of(db, actor)
+    mine_gained, mine_lost = _diff(before, after, _effect(before, actor, actor_dept, today, lv),
+                                   _effect(after, actor, actor_dept, today, lv))
     gids = _touched_groups(before, after)
     people, count = _people_of(db, [before, after], gids)
     rows = []
-    for no, dept in sorted(people.items()):
-        gained, lost = _diff(before, after, _effect(before, no, dept, today), _effect(after, no, dept, today))
+    for no, (dept, level) in sorted(people.items()):
+        gained, lost = _diff(before, after, _effect(before, no, dept, today, level), _effect(after, no, dept, today, level))
         if gained or lost:
             who = account_of(db, after, no) or {"name": (after["accounts"].get(no) or {}).get("name") or no}
             rows.append({"account_id": no, "name": who["name"], "dept": dept, "gained": gained, "lost": lost})
@@ -1211,10 +1355,10 @@ def preview(db, engine: "Engine", actor: str, actor_dept: str, before: dict, cha
             "too_many": count > IMPACT_LIMIT, "groups": groups}
 
 
-def explain(engine: Engine, account_id: str, dept: str) -> list[dict]:
+def explain(engine: Engine, account_id: str, dept: str, context: Context | None = None) -> list[dict]:
     """その人が何をできるか：権限ごとに、どのグループのどの役割から来たか、対象、期限。期限の切れたものは出さない。"""
     out: dict[str, list[dict]] = {}
-    for g in engine._live(account_id, dept):
+    for g in engine._live(account_id, dept, context):
         out.setdefault(g.permission, []).append({"group": g.group, "role": g.role, "target": g.target_label(),
                                                  "via": g.via, "expires_at": g.expires_at, "reason": g.reason()})
     return [{"permission": p, "feature": PERMISSIONS[p].feature, "does": PERMISSIONS[p].does, "from": out[p]}

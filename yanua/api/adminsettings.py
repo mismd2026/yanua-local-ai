@@ -8,6 +8,8 @@
               その用途（use）があり、models pull で登録した digest と手元の Ollama の digest が同じものだけ
     files     作業用フォルダ       既定 config/files.json     → 写し data/settings/files.json
     hr        人事（休職中の人）   既定 config/hr.json        → 写し data/settings/hr.json（K-054）
+    access    権限の条件と役職の段 既定 config/access.json    → 写し data/settings/access.json
+              「管理の権限は確かな入口が要る」（既定 OFF）・役職の段の名前・「経営」のグループに入る段の境目
 
 決まり：
 - 読むときは、写しがあれば写し、なければ既定（settingfiles と同じ）
@@ -28,9 +30,10 @@ from typing import Callable
 from .. import identity
 from ..settingfiles import SettingError, SettingFile
 
-SECTIONS = ("identity", "audit", "models", "files", "hr")
+SECTIONS = ("identity", "audit", "models", "files", "hr", "access")
 LABELS = {"identity": "本人確認の方針", "audit": "監査ログ", "models": "モデル", "files": "ファイル（作業用フォルダ）",
-          "hr": "人事（休職中の人）"}
+          "hr": "人事（休職中の人）", "access": "権限の条件と役職の段"}
+TITLE_NAME_MAX = 20
 LEAVE_PERMISSIONS = ("そのまま", "社員の役割だけ")
 KEYS = {
     "identity": identity.POLICY_KEYS,
@@ -38,6 +41,7 @@ KEYS = {
     "models": ("chat", "summary"),
     "files": ("work_max_gb", "file_keep_hours"),
     "hr": ("on_leave_login", "on_leave_permissions"),
+    "access": ("admin_needs_strong_entry", "title_levels", "executive_level"),
 }
 # 起動の指定が勝つ項目 → 起動の指定の名前
 PIN_FLAGS = {"audit.keep_days": "--audit-keep-days", "audit.keep_body": "--audit-body",
@@ -47,6 +51,7 @@ LIMITS = {
     "audit.keep_days": (1, 3650, "日"),
     "files.work_max_gb": (1, 10000, "GB"),
     "files.file_keep_hours": (1, 720, "時間"),
+    "access.executive_level": (1, 99, "段"),
 }
 COMMENTS = {
     "identity": "本人確認の方針（yanua/identity.py）。画面（S-52）で保存したもの",
@@ -54,6 +59,7 @@ COMMENTS = {
     "models": "使う Ollama のモデル。画面（S-52）で保存したもの",
     "files": "作業用フォルダの設定。画面（S-52）で保存したもの",
     "hr": "休職中の人の扱い。画面（S-52）で保存したもの",
+    "access": "権限の条件と役職の段。画面（S-52）で保存したもの",
 }
 
 
@@ -112,6 +118,19 @@ def problems(key: str, text: str, catalog: Catalog | None = None) -> list[tuple[
             out.append(("on_leave_login", "ログインできるか（true か false）にしてください"))
         if data["on_leave_permissions"] not in LEAVE_PERMISSIONS:
             out.append(("on_leave_permissions", f"{'か'.join(f'「{x}」' for x in LEAVE_PERMISSIONS)}にしてください"))
+    elif key == "access":
+        if not isinstance(data["admin_needs_strong_entry"], bool):
+            out.append(("admin_needs_strong_entry", "効かせるか（true か false）にしてください"))
+        out += _number(data, "executive_level", "access.executive_level", integer=True)
+        levels = data["title_levels"]
+        if not isinstance(levels, dict) or not levels:
+            out.append(("title_levels", "役職の段の名前を {\"1\": \"一般\", ...} の形で1つ以上入れてください"))
+        else:
+            for k, v in levels.items():
+                if not (isinstance(k, str) and k.isdigit() and 1 <= int(k) <= 99):
+                    out.append(("title_levels", f"段「{k}」は 1〜99 の整数にしてください"))
+                elif not isinstance(v, str) or not v.strip() or len(v.strip()) > TITLE_NAME_MAX:
+                    out.append(("title_levels", f"段 {k} の名前を {TITLE_NAME_MAX} 文字までで入れてください"))
     elif key == "files":
         out += _number(data, "work_max_gb", "files.work_max_gb", integer=False)
         out += _number(data, "file_keep_hours", "files.file_keep_hours", integer=True)
@@ -153,6 +172,8 @@ FIELD_LABELS = {
     "models": {"chat": "チャットのモデル", "summary": "要約のモデル"},
     "files": {"work_max_gb": "作業用フォルダの上限", "file_keep_hours": "ファイルを消すまで"},
     "hr": {"on_leave_login": "休職中の人のログイン", "on_leave_permissions": "休職中の人の権限"},
+    "access": {"admin_needs_strong_entry": "管理の権限は確かな入口が要る", "title_levels": "役職の段の名前",
+               "executive_level": "「経営」に入る段"},
 }
 
 
@@ -170,6 +191,12 @@ def _shown(key: str, field: str, v) -> str:
         return f"{v}日" if field == "keep_days" else ("残す" if v else "残さない")
     if key == "hr" and field == "on_leave_login":
         return "できる" if v else "できない"
+    if key == "access":
+        if field == "admin_needs_strong_entry":
+            return "ON" if v else "OFF"
+        if field == "title_levels":
+            return "・".join(f"{k} {n}" for k, n in sorted((v or {}).items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0))
+        return f"{v} 以上"
     if key == "files":
         return f"{v:g}GB" if field == "work_max_gb" and isinstance(v, (int, float)) else f"{v}時間" if field == "file_keep_hours" else str(v)
     return str(v)
@@ -221,6 +248,9 @@ def running_values(settings, key: str, policy: identity.Policy | None = None) ->
         return {"chat": settings.chat_model, "summary": settings.summary_model}
     if key == "hr":
         return {"on_leave_login": settings.on_leave_login, "on_leave_permissions": settings.on_leave_permissions}
+    if key == "access":
+        return {"admin_needs_strong_entry": settings.admin_needs_strong_entry, "title_levels": settings.title_levels,
+                "executive_level": settings.executive_level}
     return {"work_max_gb": settings.work_max_bytes / 1_000_000_000, "file_keep_hours": settings.file_keep_hours}
 
 
@@ -241,6 +271,10 @@ def apply_to_settings(settings, key: str, values: dict) -> None:
     elif key == "hr":
         settings.on_leave_login = bool(put["on_leave_login"])
         settings.on_leave_permissions = put["on_leave_permissions"]
+    elif key == "access":
+        settings.admin_needs_strong_entry = bool(put["admin_needs_strong_entry"])
+        settings.title_levels = {str(k): str(v).strip() for k, v in put["title_levels"].items()}
+        settings.executive_level = int(put["executive_level"])
     elif key == "files":
         settings.work_max_bytes = int(round(float(put["work_max_gb"]) * 1_000_000_000))
         settings.file_keep_hours = int(put["file_keep_hours"])
@@ -251,7 +285,7 @@ def startup(settings) -> tuple[set[str], dict[str, list[tuple[str, str]]]]:
     (写しを使った設定, {設定: 誤り}) を返す。誤りのある写しは使わず、既定のまま動く（起動は止めない）。
     本人確認の方針は load_policy で読む（誤りがあれば起動しない）。"""
     bad, loaded = {}, set()
-    for key in ("audit", "models", "files", "hr"):
+    for key in ("audit", "models", "files", "hr", "access"):
         s = store(settings, key)
         if s.path() != s.saved:
             continue                     # 写しがなければ、起動の値（既定）のまま
