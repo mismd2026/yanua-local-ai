@@ -452,9 +452,12 @@ function AccessEditor({ values, set, Err, disabled }: EditorProps) {
       <div className="form-row">
         <span>管理の権限は確かな入口が要る</span>
         <span className="toolbar">
-          {([[false, "OFF（今のまま）"], [true, "ON"]] as const).map(([v, text]) => (
-            <label key={text}><input type="radio" style={{ width: "auto" }} name="admin_needs_strong_entry"
-              checked={values.admin_needs_strong_entry === v} onChange={() => set("admin_needs_strong_entry", v)} disabled={disabled} /> {text}</label>
+          {([[false, "OFF（今のまま）", "strong-off"], [true, "ON", "strong-on"]] as const).map(([v, text, id]) => (
+            <span key={id} style={{ display: "inline-flex", gap: "0.3em", alignItems: "center" }}>
+              <input type="radio" id={id} style={{ width: "auto" }} name="admin_needs_strong_entry" value={id} aria-label={text}
+                checked={values.admin_needs_strong_entry === v} onChange={() => set("admin_needs_strong_entry", v)} disabled={disabled} />
+              <label htmlFor={id}>{text}</label>
+            </span>
           ))}
         </span>
         <Err at="admin_needs_strong_entry" />

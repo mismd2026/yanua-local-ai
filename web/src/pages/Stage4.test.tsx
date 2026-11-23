@@ -261,6 +261,22 @@ describe("S-52 設定", () => {
     expect(await within(box).findByText(/版 1 に戻しました（版 3）/)).toBeInTheDocument();
   });
 
+  it("権限の条件：「管理の権限は確かな入口が要る」の2つのラジオボタンに、それぞれの名前がある", async () => {
+    const user = userEvent.setup();
+    const values = { admin_needs_strong_entry: false, title_levels: { "1": "一般", "5": "役員" }, executive_level: 5 };
+    fakeApi(settingRoutes({ access: { ...detail("access", values), label: "権限の条件と役職の段",
+      meta: { limits: { executive_level: { min: 1, max: 99, unit: "段" } } } } }));
+    render(<SettingsPage canEdit />);
+    const box = await screen.findByRole("region", { name: "権限の条件と役職の段" });
+    const off = await within(box).findByRole("radio", { name: "OFF（今のまま）" });
+    const on = within(box).getByRole("radio", { name: "ON" });
+    expect(off).toBeChecked();
+    expect(on).not.toBeChecked();
+    await user.click(on);
+    expect(on).toBeChecked();
+    expect(within(box).queryByRole("radio", { name: "on" })).not.toBeInTheDocument();
+  });
+
   it("見るだけの権限なら、保存・版に戻す・既定に戻すを出さない", async () => {
     fakeApi(settingRoutes({ files: detail("files", { work_max_gb: 20, file_keep_hours: 24 }, { status: status("saved"),
       versions: [{ version: 1, saved_at: "2026-11-18T09:00:00+09:00", saved_by: "（既定）", saved_by_name: "（既定）", action: "x" }] }) }));

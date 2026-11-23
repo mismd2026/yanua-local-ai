@@ -2164,12 +2164,17 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         setting_text(key, req.values)
         return {"ok": True}
 
-    def strong_entry_guard(key: str, text: str, user: User) -> None:
+    def strong_entry_guard(key: str, text: str, user: User, op: str = "save") -> None:
         """「管理の権限は確かな入口が要る」を ON にすると、今の入口（社員番号）の人は管理できなくなる。
-        確かな入口で入っていない人は ON にできない（だれも戻せなくなるのを防ぐ。締め出しを防ぐ決まりと同じ考え方）。"""
+        確かな入口で入っていない人は ON にできない（だれも戻せなくなるのを防ぐ。締め出しを防ぐ決まりと同じ考え方）。
+        断ったときは、監査ログに settings.access.<op> を「拒否」で、理由つきで残す（保存の失敗と同じ形）。"""
         if key != "access" or user.context.strong:
             return
         if adminsettings.values_of(key, text).get("admin_needs_strong_entry") and not settings.admin_needs_strong_entry:
+            audit_setting(f"settings.{key}.{op}", user.employee_no, audit.DENIED,
+                          f"{key}.json：「管理の権限は確かな入口が要る」を ON にしようとしたので断った"
+                          f"（今の入口：{user.context.entry}。確かな入口で入っていない人は ON にできない。"
+                          "ON にすると、だれも画面から戻せなくなるため）")
             raise ApiError(409, "lockout", "今の入口（" + user.context.entry + "）で入っている人は、この決まりを ON にできません",
                            [{"where": "admin_needs_strong_entry",
                              "message": "ON にすると、あなたも含めて確かな入口（SSO か多要素つきの Yanua アカウント）で入っていない人は"
@@ -2194,7 +2199,7 @@ def create_app(settings: Settings, llm: ChatModel, transcriber_factory=None, sum
         old = st.get(version)
         if old:
             try:
-                strong_entry_guard(key, old, user)
+                strong_entry_guard(key, old, user, "restore")
             except (ValueError, KeyError):
                 pass                     # その版が読めないとき（戻すときの検証で断る）
         try:

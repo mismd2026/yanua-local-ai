@@ -253,6 +253,10 @@ def test_rule_cannot_be_turned_on_from_a_weak_entry_and_me_shows_the_context(cli
     values = {"admin_needs_strong_entry": True, "title_levels": {"1": "一般", "5": "役員"}, "executive_level": 5}
     r = client.put("/api/admin/settings/access", json={"values": values}, headers=H)
     assert r.status_code == 409 and "ON にできません" in r.text
+    # 断ったことは、監査ログに settings.access.save を「拒否」で、理由つきで残す
+    e = client.get("/api/audit", params={"action": "settings.access.save"}).json()["entries"][0]
+    assert e["result"] == "拒否" and e["actor"] == "10005"
+    assert "「管理の権限は確かな入口が要る」を ON にしようとしたので断った（今の入口：社員番号" in e["detail"]
     # 断ったので、まだ管理できる
     assert client.get("/api/admin/settings/access").status_code == 200
     assert client.get("/api/admin/settings/access").json()["values"]["admin_needs_strong_entry"] is False
