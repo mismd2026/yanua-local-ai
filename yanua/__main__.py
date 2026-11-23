@@ -755,12 +755,23 @@ def _serve(args) -> int:
 
     from . import access
 
+    from . import audit as _audit
+
+    # 作った・足したことは、ここで監査ログにも残す（このあとの create_app では、もう済んでいるので「したこと」がない）
+    startup_audit = _audit.Auditor(settings.audit_path, settings.audit_keep_days, settings.audit_keep_body)
+
+    def migrated(detail: str) -> None:
+        startup_audit.record("roles.migrate", actor=_audit.SYSTEM, actor_name=_audit.SYSTEM, kind=_audit.SYSTEM, ip="",
+                             detail=detail)
+
     db = _sqlite3.connect(str(settings.db_path))
     try:
         if access.migrate_if_empty(db, role_config):
             print("権限の仕組みを、roles.json から作りました（役割・グループ・対象。docs/access-model.md）")
-        for done in access.upgrade(db):
+            migrated("初めての起動：roles.json から役割・グループ・対象を作った（docs/access-model.md）")
+        for done in access.upgrade(db, settings.executive_level):
             print(f"権限の仕組みを今の版に合わせました：{done}")
+            migrated(done)
         access.sync_targets(db)
         found = access.problems(access.load(db))
     finally:

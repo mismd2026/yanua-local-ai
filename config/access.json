@@ -1,0 +1,6 @@
+{
+  "_説明": "権限の条件と役職の段（S-52 の「権限の条件と役職の段」。docs/access-model.md）。admin_needs_strong_entry：管理の権限（roles.assign・設定・監査など）は確かな入口（SSO か多要素つきの Yanua アカウント）で入ったときだけ効かせるか。今は入口が社員番号しかないので false（true にするとだれも管理できなくなる。SSO ができてから既定を true にする）。title_levels：役職の段の名前（比べるための数 → 名前。名前は会社ごと）。executive_level：この段以上の人が「経営」のグループに入る",
+  "admin_needs_strong_entry": false,
+  "title_levels": {"1": "一般", "2": "主任", "3": "課長", "4": "部長", "5": "役員", "6": "社長"},
+  "executive_level": 5
+}

@@ -125,3 +125,41 @@ def test_serve_builds_access_once_and_stops_on_broken_access(base, capsys):
     out = capsys.readouterr().out
     assert "権限の設定に誤りがあるので起動しません" in out and "roles.総務：知らない権限です: nosuch" in out
     assert "モデルの確かめ" not in out and "作りました" not in out
+
+
+def _migrate_logs(tmp) -> list[str]:
+    import sqlite3
+
+    db = sqlite3.connect(tmp / "audit.db")
+    try:
+        return [r[0] for r in db.execute("SELECT detail FROM audit_log WHERE action = 'roles.migrate' ORDER BY id")]
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+
+
+def test_serve_records_what_it_built_or_added_in_the_audit_log(base, capsys):
+    """serve の起動の確かめで作った・足したもの（役割・グループ）は、監査ログに roles.migrate で残す。すでにあれば残さない。"""
+    import sqlite3
+
+    args, tmp = base
+    assert cli.main(args) == 1                                     # 初めての起動（roles.json から作る）
+    assert _migrate_logs(tmp) == ["初めての起動：roles.json から役割・グループ・対象を作った（docs/access-model.md）"]
+    # 前の版のデータ（職務ロールと「経営」のグループがない）にする
+    db = sqlite3.connect(tmp / "index.db")
+    with db:
+        db.execute("DELETE FROM group_grants WHERE group_id = 'G-exec'")
+        db.execute("DELETE FROM access_groups WHERE group_id = 'G-exec'")
+        db.execute("DELETE FROM access_roles WHERE name IN ('マネージャー', 'ディレクター', '経営')")
+        db.execute("DELETE FROM access_meta WHERE key = 'roles_v2'")
+    db.close()
+    assert cli.main(args) == 1
+    logs = _migrate_logs(tmp)[1:]
+    assert logs == ["役割「マネージャー」を足した（roles.delegate・reports.view）",
+                    "役割「ディレクター」を足した（roles.delegate・reports.view）",
+                    "役割「経営」を足した（documents.view・reports.view）",
+                    "グループ「経営」（役職の段 5 以上）を作り、役割「経営」× 全社を与えた"]
+    assert "権限の仕組みを今の版に合わせました：役割「経営」を足した" in capsys.readouterr().out
+    assert cli.main(args) == 1                                     # すでにあるので、もう残さない
+    assert len(_migrate_logs(tmp)) == 5

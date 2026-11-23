@@ -440,7 +440,7 @@ export interface AuditPage {
 }
 
 // 設定の画面（S-52。K-042）
-export type SettingKey = "identity" | "audit" | "models" | "files" | "hr";
+export type SettingKey = "identity" | "audit" | "models" | "files" | "hr" | "access";
 
 export interface SettingSection {
   key: SettingKey;
@@ -518,7 +518,7 @@ export interface AccessTarget {
 export interface AccessSet { set_id: string; name: string; members: string[]; used_by: string[] }
 export interface AccessView {
   permissions: AccessPermission[]; roles: AccessRole[]; groups: AccessGroup[]; targets: AccessTarget[];
-  target_sets: AccessSet[]; accounts: { account_id: string; kind: string; name: string }[]; departments: string[]; hosts: string[];
+  target_sets: AccessSet[]; accounts: { account_id: string; kind: string; name: string }[]; departments: string[]; hosts: string[]; title_levels?: Record<string, string>;
 }
 export interface AccessPerson { account_id: string; name: string; dept: string; kind: "person" | "system" }
 export interface AccessPreview {
@@ -551,7 +551,7 @@ export interface DocImpact {
 
 // S-51 人事データ
 export type HrStatus = "在籍" | "休職" | "退職";
-export interface HrMapping { columns: Record<string, string>; status_values?: Record<string, string>; sheet?: string }
+export interface HrMapping { columns: Record<string, string>; status_values?: Record<string, string>; employment_values?: Record<string, string>; sheet?: string }
 export interface HrOverview {
   last: { imported_at: string; source: string; active: number; inactive: number; age_days: number } | null;
   history: { imported_at: string; source: string; kind: string; by: string; added: number; changed: number; removed: number; scope: string }[];
@@ -561,12 +561,13 @@ export interface HrOverview {
   fields: Record<string, string>;
   required: string[];
   statuses: HrStatus[];
+  employments: string[];
   leave: { login: boolean; permissions: string };
   can_import: boolean;
   can_view: boolean;
   keep: number;
 }
-export interface HrInspect { headers: string[]; sheets: string[]; draft: Record<string, string>; status_values: { value: string; guess: string }[] }
+export interface HrInspect { headers: string[]; sheets: string[]; draft: Record<string, string>; status_values: { value: string; guess: string }[]; employment_values?: { value: string; guess: string }[] }
 export interface HrPerson { employee_no: string; name: string; dept: string; status: string; changes?: string[] }
 export interface HrPreview {
   source: string;
@@ -587,6 +588,7 @@ export interface HrPreview {
   scope_label: string;
   current_total: number;
   removal_warning: { count: number; percent: number; message: string } | null;
+  default_employment?: number;      // 雇用区分の列を使わないので「社員」として入る、新しく入る人の数
   committed?: boolean;
   reason?: string;
   kind?: string;

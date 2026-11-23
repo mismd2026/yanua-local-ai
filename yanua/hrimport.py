@@ -2,18 +2,20 @@
 
 画面（/admin/hr）とコマンド（python -m yanua hr-import）は、どちらもここを通る。
 
-- 読むのは、対応表で割り当てた列だけ（社員番号・氏名・よみ・部署名・部署コード・在籍状態・メールアドレス）。
+- 読むのは、対応表で割り当てた列だけ（社員番号・氏名・よみ・部署名・部署コード・在籍状態・メールアドレス・
+  雇用区分・期限・役職・役職の段）。
   住所・給与などの列がファイルにあっても、その列の値は読まない（CSV・Excel は列の位置で拾い、JSON は割り当てた名前だけ取る）
 - 在籍状態は、ファイルの値（例「在職」「休業」「退社」）を、Yanua の3つ（在籍・休職・退職）に対応づける。
-  対応づけていない値は誤り（行番号つき）。誤りが1件でもあれば確定しない
+  対応づけていない値は誤り（行番号つき）。誤りが1件でもあれば確定しない。雇用区分も同じ作りで、ファイルの値を
+  5つ（社員・契約・派遣・短期・外部委託）に対応づける。期限は日付（YYYY-MM-DD か YYYY/MM/DD）、役職の段は 1〜99 の整数
 - 試しの結果：新しく入る人・変わる人（部署・在籍状態・名前など）・いなくなる人の件数と先頭の数件、
-  部署が変わる人・退職になる人・いなくなる人の、入るグループ・外れるグループ（グループごとの人数）
+  権限への効き方（入る人・部署や在籍状態や役職の段が変わる人・いなくなる人の、入るグループ・外れるグループ。グループごとの人数）
 - 確定：1つのトランザクションで、今のデータを控えに写し → まるごと入れ替え → 部署の一覧を作り直し →
   退職した人・いなくなった人を、手で入れたグループから外す → 権限の結果を作り直す（世代を上げる）。途中で失敗したら前のまま
 - 取り込みの種類：「一部のファイル」（既定。ファイルにいない人は変えない）と「全員のファイル」（ファイルにいない人は
   いなくなる人）。全員のファイルで、いなくなる人が今の人数の REMOVAL_WARN を超えるときは、確かめてからでないと確定しない
-- 「使わない」にした任意の列（よみ・部署コード・メールアドレス・在籍状態）は、今いる人の値をそのまま残す（変わる人にも数えない）。
-  新しく入る人だけ、その列が空（在籍状態は「在籍」）で入る
+- 「使わない」にした任意の列（よみ・部署コード・メールアドレス・在籍状態・雇用区分・期限・役職・役職の段）は、
+  今いる人の値をそのまま残す（変わる人にも数えない）。新しく入る人だけ、その列が空（在籍状態は「在籍」、雇用区分は「社員」）で入る
 - 控えは直近の HR_KEEP 回分。「1つ前に戻す」は、いちばん新しい控えを、取り込みと同じ流れ（試し → 確定）で入れる
   （戻したことも控えに残るので、戻したことをまた戻せる）。手で入れたグループのメンバーは、戻しても自動では戻らない
 - 100万人でも数分で終わるように、比べるのは SQLite の一時表どうし（全員を Python に読み込まない）
@@ -35,14 +37,20 @@ from . import hr
 HR_KEEP = 3                 # 控え（前の取り込みのデータ）を残す数
 SAMPLE = 5                  # 試しの結果に出す先頭の件数
 MAX_ERRORS = 100            # 誤りを出す件数の上限（数はすべて数える）
-COMPARED = ("name", "kana", "dept", "dept_code", "status", "email")
+COMPARED = ("name", "kana", "dept", "dept_code", "status", "email", "employment", "expires_on", "title", "title_level")
 CHANGE_LABELS = {"name": "名前", "kana": "よみ", "dept": "部署", "dept_code": "部署コード", "status": "在籍状態",
-                 "email": "メールアドレス"}
+                 "email": "メールアドレス", "employment": "雇用区分", "expires_on": "期限", "title": "役職",
+                 "title_level": "役職の段"}
 LEAVE_KEEP, LEAVE_EMPLOYEE_ONLY = "そのまま", "社員の役割だけ"
 SCOPE_PARTIAL, SCOPE_ALL = "partial", "all"
 SCOPE_LABELS = {SCOPE_PARTIAL: "一部のファイル", SCOPE_ALL: "全員のファイル"}
 REMOVAL_WARN = 0.10         # 全員のファイルで、いなくなる人がこの割合を超えたら、確かめてからでないと確定しない
-OPTIONAL = ("kana", "dept_code", "email", "status")   # 「使わない」にできる列（今の値を残す）
+OPTIONAL = ("kana", "dept_code", "email", "status", "employment", "expires_on", "title", "title_level")   # 「使わない」にできる列（今の値を残す）
+# 一時表・控えの列（employees と同じ名前。changed_at は確定のときに決める）
+STAGE_COLUMNS = ("employee_no", "name", "kana", "dept", "dept_code", "status", "email", "active", "name_key", "surname_key",
+                 "dept_key", "employment", "expires_on", "title", "title_level")
+# 前の版の控えにない列 → 入れる値（今いる人の既定と同じ）
+BACKUP_DEFAULTS = {"employment": "'社員'", "expires_on": "''", "title": "''", "title_level": "NULL"}
 
 META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS hr_backups (
@@ -82,6 +90,7 @@ class Mapping:
     status_values: dict[str, str] | None     # ファイルの値（照合用の形）→ 在籍・休職・退職。None なら在籍状態の列なし
     legacy_active: set[str] | None = None    # 前の書き方（active_values）
     sheet: str | None = None
+    employment_values: dict[str, str] | None = None   # ファイルの値（照合用の形）→ 雇用区分。None なら雇用区分の列なし
 
 
 def mapping_problems(m) -> list[tuple[str, str]]:
@@ -115,6 +124,15 @@ def mapping_problems(m) -> list[tuple[str, str]]:
                 out.append(("status_values", "在籍状態の値を、在籍・休職・退職に当ててください"))
     elif cols.get("status") and not isinstance(m.get("active_values"), list):
         out.append(("status_values", "在籍状態の値を、在籍・休職・退職に当ててください"))
+    ev = m.get("employment_values")
+    if ev is not None and not isinstance(ev, dict):
+        out.append(("employment_values", "雇用区分の対応を {\"ファイルの値\": \"社員・契約・派遣・短期・外部委託\"} の形にしてください"))
+    elif ev:
+        for k, v in ev.items():
+            if v not in hr.EMPLOYMENTS:
+                out.append((f"employment_values.{k}", f"「{k}」を{'・'.join(hr.EMPLOYMENTS)}のどれかに当ててください"))
+    if cols.get("employment") and not ev:
+        out.append(("employment_values", f"雇用区分の値を、{'・'.join(hr.EMPLOYMENTS)}に当ててください"))
     if m.get("sheet") is not None and not isinstance(m.get("sheet"), str):
         out.append(("sheet", "シートの名前を文字で入れてください"))
     return out
@@ -133,7 +151,41 @@ def parse_mapping(m: dict) -> Mapping:
         values = {hr.norm(k): v for k, v in sv.items()}
     else:
         values, legacy = None, {hr.norm(v) for v in m.get("active_values", ["在籍"])}
-    return Mapping(cols, values, legacy, m.get("sheet") or None)
+    ev = {hr.norm(k): v for k, v in (m.get("employment_values") or {}).items()} if cols.get("employment") else None
+    return Mapping(cols, values, legacy, m.get("sheet") or None, ev)
+
+
+def employment_value(mapping: Mapping, raw: str) -> str | None:
+    """ファイルの値 → 雇用区分。列を使わないときは「社員」（新しく入る人の既定）。対応づけていない値は None。"""
+    if mapping.employment_values is None:
+        return hr.DEFAULT_EMPLOYMENT
+    return mapping.employment_values.get(hr.norm(raw))
+
+
+def date_value(raw: str) -> str | None:
+    """期限の値 → YYYY-MM-DD。空なら空（期限なし）。読めなければ None。Excel の日時（2026-03-31 00:00:00）も読む。"""
+    v = hr.norm(raw)
+    if not v:
+        return ""
+    v = v.replace("/", "-").replace(".", "-")
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d%H:%M:%S", "%Y%m%d"):
+        try:
+            return datetime.strptime(v, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def level_value(raw: str) -> int | None | str:
+    """役職の段の値 → 整数（1〜99）。空なら None（段なし）。読めなければ "bad"。"""
+    v = hr.norm(raw)
+    if not v:
+        return None
+    if v.endswith(".0"):            # Excel の数字
+        v = v[:-2]
+    if not v.isdigit() or not 1 <= int(v) <= hr.TITLE_LEVEL_MAX:
+        return "bad"
+    return int(v)
 
 
 def status_value(mapping: Mapping, raw: str) -> str | None:
@@ -236,6 +288,7 @@ class Parsed:
     read_columns: list[str] = field(default_factory=list)
     ignored_columns: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)  # 在籍状態ごとの人数
+    default_employment: int = 0     # 雇用区分の列を使わないので「社員」として入る、新しく入る人の数
 
     def error(self, line: int, message: str) -> None:
         self.error_count += 1
@@ -279,8 +332,24 @@ def _stage(db: sqlite3.Connection, path: Path, mapping: Mapping, progress=None) 
         if status is None:
             out.error(line, f"在籍状態「{raw}」を、在籍・休職・退職のどれに当てるか決めていません")
             continue
+        raw = get("employment")
+        employment = employment_value(mapping, raw)
+        if employment is None:
+            out.error(line, f"雇用区分「{raw}」を、{'・'.join(hr.EMPLOYMENTS)}のどれに当てるか決めていません")
+            continue
+        raw = get("expires_on")
+        expires = date_value(raw)
+        if expires is None:
+            out.error(line, f"期限「{raw}」を日付として読めません（例 2026-03-31）")
+            continue
+        raw = get("title_level")
+        level = level_value(raw)
+        if level == "bad":
+            out.error(line, f"役職の段「{raw}」は 1〜{hr.TITLE_LEVEL_MAX} の整数にしてください")
+            continue
         batch.append((no, name, get("kana").strip(), dept, get("dept_code").strip(), status, get("email").strip().lower(),
-                      int(status in hr.ACTIVE_STATUSES), *hr._keys(name, dept)))
+                      int(status in hr.ACTIVE_STATUSES), *hr._keys(name, dept), employment, expires, get("title").strip(),
+                      level))
         if len(batch) >= 20000:
             _insert_stage(db, batch)
             batch = []
@@ -290,6 +359,9 @@ def _stage(db: sqlite3.Connection, path: Path, mapping: Mapping, progress=None) 
         out.error(1, "行がありません")
     _insert_stage(db, batch)
     _keep_unmapped(db, mapping)
+    if "employment" not in mapping.columns:
+        out.default_employment = db.execute(
+            f"SELECT COUNT(*) FROM temp.{STAGE} n LEFT JOIN employees e USING (employee_no) WHERE e.employee_no IS NULL").fetchone()[0]
     found = dict(db.execute(f"SELECT status, COUNT(*) FROM temp.{STAGE} GROUP BY status").fetchall())
     out.counts = {s: found.get(s, 0) for s in hr.STATUSES}
     return out
@@ -306,28 +378,34 @@ def _keep_unmapped(db, mapping: Mapping) -> None:
     db.execute(f"UPDATE temp.{STAGE} AS n SET {sets} FROM employees AS e WHERE e.employee_no = n.employee_no")
 
 
+COLS = ", ".join(STAGE_COLUMNS)
+
+
 def _add_others(db) -> None:
     """一部のファイル：ファイルにいない人は、今のまま残す（一時表に今の値で足す）。"""
-    db.execute(f"INSERT INTO temp.{STAGE} SELECT employee_no, name, kana, dept, dept_code, status, email, active, "
-               f"name_key, surname_key, dept_key FROM employees WHERE employee_no NOT IN (SELECT employee_no FROM temp.{STAGE})")
+    db.execute(f"INSERT INTO temp.{STAGE} ({COLS}) SELECT {COLS} FROM employees "
+               f"WHERE employee_no NOT IN (SELECT employee_no FROM temp.{STAGE})")
 
 
 def _create_stage(db) -> None:
     db.execute(f"DROP TABLE IF EXISTS temp.{STAGE}")
     db.execute(f"""CREATE TEMP TABLE {STAGE} (employee_no TEXT PRIMARY KEY, name TEXT, kana TEXT, dept TEXT, dept_code TEXT,
-                   status TEXT, email TEXT, active INTEGER, name_key TEXT, surname_key TEXT, dept_key TEXT)""")
+                   status TEXT, email TEXT, active INTEGER, name_key TEXT, surname_key TEXT, dept_key TEXT,
+                   employment TEXT, expires_on TEXT, title TEXT, title_level INTEGER)""")
 
 
 def _insert_stage(db, batch) -> None:
     if batch:
-        db.executemany(f"INSERT INTO temp.{STAGE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
+        db.executemany(f"INSERT INTO temp.{STAGE} ({COLS}) VALUES ({', '.join('?' * len(STAGE_COLUMNS))})", batch)
 
 
 def _stage_from_backup(db, backup_id: int) -> Parsed:
     _create_stage(db)
     t = _backup_table(backup_id)
-    db.execute(f"INSERT INTO temp.{STAGE} SELECT employee_no, name, kana, dept, dept_code, status, email, active, "
-               f"name_key, surname_key, dept_key FROM {t}")
+    have = {r[1] for r in db.execute(f"PRAGMA table_info({t})")}
+    # 前の版の控え（雇用区分などの列がない）は、今いる人の既定（社員・期限なし・役職は空）で入れる
+    picks = ", ".join(c if c in have else f"{BACKUP_DEFAULTS[c]} AS {c}" for c in STAGE_COLUMNS)
+    db.execute(f"INSERT INTO temp.{STAGE} ({COLS}) SELECT {picks} FROM {t}")
     out = Parsed()
     out.rows = db.execute(f"SELECT COUNT(*) FROM temp.{STAGE}").fetchone()[0]
     out.counts = {s: n for s, n in db.execute(f"SELECT status, COUNT(*) FROM temp.{STAGE} GROUP BY status")}
@@ -392,18 +470,18 @@ def _changed_numbers(db, limit: int) -> tuple[list[str], int]:
     return nos, total
 
 
-def _state_groups(data: dict, account_id: str, dept: str | None, status: str | None) -> set[str]:
-    """その人（部署・在籍状態）が入るグループ。退職・いない人は、どこにも入らない。"""
+def _state_groups(data: dict, account_id: str, dept: str | None, status: str | None, level: int | None = None) -> set[str]:
+    """その人（部署・在籍状態・役職の段）が入るグループ。退職・いない人は、どこにも入らない。"""
     from . import access
 
     if dept is None or status in (None, "退職"):
         return set()
-    return set(access.compute_memberships(data, account_id, dept, status))
+    return set(access.compute_memberships(data, account_id, dept, status, level))
 
 
 def _group_effects(db, data: dict) -> list[dict]:
-    """新しく入る人・部署や在籍状態が変わる人・いなくなる人の、入るグループ・外れるグループ（グループごとの人数）。
-    決まり（全員・部署）で入るグループは、(前の部署, 前の状態, 後の部署, 後の状態) ごとにまとめて数える
+    """新しく入る人・部署や在籍状態や役職の段が変わる人・いなくなる人の、入るグループ・外れるグループ（グループごとの人数）。
+    決まり（全員・部署・役職の段）で入るグループは、(前の部署, 前の状態, 前の段, 後の部署, 後の状態, 後の段) ごとにまとめて数える
     （新しく入る人は「前」がなく、いなくなる人は「後」がない）。取り込みと「1つ前に戻す」で同じ数え方をする。
     手で入れたグループは、メンバーの人だけを1人ずつ見る。"""
     s = STAGE
@@ -412,17 +490,18 @@ def _group_effects(db, data: dict) -> list[dict]:
     leave: Counter = Counter()
     rule_only = {**data, "members": []}
     combos = db.execute(
-        f"SELECT e.dept, e.status, n.dept, n.status, COUNT(*) FROM employees e JOIN temp.{s} n USING (employee_no) "
-        f"WHERE e.dept IS NOT n.dept OR e.status IS NOT n.status GROUP BY 1, 2, 3, 4").fetchall()
-    combos += [(None, None, d, st, c) for d, st, c in db.execute(
-        f"SELECT n.dept, n.status, COUNT(*) FROM temp.{s} n LEFT JOIN employees e USING (employee_no) "
-        f"WHERE e.employee_no IS NULL GROUP BY 1, 2")]
-    combos += [(d, st, None, None, c) for d, st, c in db.execute(
-        f"SELECT e.dept, e.status, COUNT(*) FROM employees e LEFT JOIN temp.{s} n USING (employee_no) "
-        f"WHERE n.employee_no IS NULL GROUP BY 1, 2")]
-    for od, ost, nd, nst, c in combos:
-        before = _state_groups(rule_only, "", od, ost)
-        after = _state_groups(rule_only, "", nd, nst)
+        f"SELECT e.dept, e.status, e.title_level, n.dept, n.status, n.title_level, COUNT(*) FROM employees e "
+        f"JOIN temp.{s} n USING (employee_no) WHERE e.dept IS NOT n.dept OR e.status IS NOT n.status "
+        f"OR e.title_level IS NOT n.title_level GROUP BY 1, 2, 3, 4, 5, 6").fetchall()
+    combos += [(None, None, None, d, st, lv, c) for d, st, lv, c in db.execute(
+        f"SELECT n.dept, n.status, n.title_level, COUNT(*) FROM temp.{s} n LEFT JOIN employees e USING (employee_no) "
+        f"WHERE e.employee_no IS NULL GROUP BY 1, 2, 3")]
+    combos += [(d, st, lv, None, None, None, c) for d, st, lv, c in db.execute(
+        f"SELECT e.dept, e.status, e.title_level, COUNT(*) FROM employees e LEFT JOIN temp.{s} n USING (employee_no) "
+        f"WHERE n.employee_no IS NULL GROUP BY 1, 2, 3")]
+    for od, ost, olv, nd, nst, nlv, c in combos:
+        before = _state_groups(rule_only, "", od, ost, olv)
+        after = _state_groups(rule_only, "", nd, nst, nlv)
         for g in after - before:
             join[g] += c
         for g in before - after:
@@ -433,12 +512,12 @@ def _group_effects(db, data: dict) -> list[dict]:
         for i in range(0, len(nos), 500):
             part = nos[i:i + 500]
             q = ",".join("?" * len(part))
-            for no, od, ost, nd, nst in db.execute(
-                    f"SELECT e.employee_no, e.dept, e.status, n.dept, n.status FROM employees e "
+            for no, od, ost, olv, nd, nst in db.execute(
+                    f"SELECT e.employee_no, e.dept, e.status, e.title_level, n.dept, n.status FROM employees e "
                     f"LEFT JOIN temp.{s} n USING (employee_no) WHERE e.employee_no IN ({q}) "
                     f"AND (n.employee_no IS NULL OR (n.status = '退職' AND e.status <> '退職'))", part):
                 mine = {m["group_id"] for m in data["members"] if m["account_id"] == no}
-                rules_before = _state_groups(rule_only, no, od, ost)
+                rules_before = _state_groups(rule_only, no, od, ost, olv)
                 for g in mine - rules_before:
                     leave[g] += 1
     out = []
@@ -481,6 +560,9 @@ def _assign_holders(db, data: dict, leave_policy: str, table: str) -> int:
             depts = rule["departments"]
             count += db.execute(f"SELECT COUNT(*) FROM {table} WHERE status IN {statuses} "
                                 f"AND dept IN ({','.join('?' * len(depts))})", depts).fetchone()[0]
+        elif rule and rule.get("min_level") is not None:
+            count += db.execute(f"SELECT COUNT(*) FROM {table} WHERE status IN {statuses} AND title_level >= ?",
+                                (rule["min_level"],)).fetchone()[0]
     return count + len(holders)
 
 
@@ -499,6 +581,7 @@ class Preview:
     retired_members: list[dict]           # 退職・いなくなるので、手で入れたグループから外れる人（社員番号とグループ）
     scope: str = SCOPE_PARTIAL
     current_total: int = 0                # 今の人事データの人数
+    default_employment: int = 0           # 雇用区分なしで入る（社員として入る）新しく入る人の数
 
     @property
     def ok(self) -> bool:
@@ -518,7 +601,8 @@ class Preview:
                 "read_columns": self.read_columns, "ignored_columns": self.ignored_columns, "counts": self.counts,
                 **self.diff, "groups": self.groups, "lockout": self.lockout, "ok": self.ok,
                 "retired_members": len(self.retired_members), "scope": self.scope, "scope_label": SCOPE_LABELS[self.scope],
-                "current_total": self.current_total, "removal_warning": self.removal_warning}
+                "current_total": self.current_total, "removal_warning": self.removal_warning,
+                "default_employment": self.default_employment}
 
 
 def _retired_members(db, data: dict) -> list[dict]:
@@ -557,7 +641,8 @@ def _preview_staged(db, parsed: Parsed, source: str, leave_policy: str, scope: s
     lockout = (_assign_holders(db, data, leave_policy, f"temp.{STAGE}") == 0
                and _assign_holders(db, data, leave_policy, "employees") > 0)
     return Preview(source, parsed.rows, [], 0, parsed.read_columns, parsed.ignored_columns, parsed.counts,
-                   _diff(db), _group_effects(db, data), lockout, _retired_members(db, data), scope, current)
+                   _diff(db), _group_effects(db, data), lockout, _retired_members(db, data), scope, current,
+                   parsed.default_employment)
 
 
 def preview(db, path: Path, mapping: dict, leave_policy: str = LEAVE_KEEP, progress=None, scope: str = SCOPE_PARTIAL,
@@ -632,8 +717,7 @@ def _commit_staged(db, parsed: Parsed, source: str, kind: str, by: str, leave_po
         cur = db.execute("INSERT INTO hr_backups (saved_at, source, total, active) VALUES (?, ?, ?, ?)",
                          (_now(), current_source, tot, act))
         bid = cur.lastrowid
-        db.execute(f"CREATE TABLE {_backup_table(bid)} AS SELECT employee_no, name, kana, dept, dept_code, status, email, "
-                   "active, name_key, surname_key, dept_key, changed_at FROM employees")
+        db.execute(f"CREATE TABLE {_backup_table(bid)} AS SELECT {COLS}, changed_at FROM employees")
         if fail_hook:
             fail_hook("backup")
         # 2. まるごと入れ替える（変わらない人は「最後に変わった日」をそのまま）
@@ -641,9 +725,7 @@ def _commit_staged(db, parsed: Parsed, source: str, kind: str, by: str, leave_po
                    f"THEN ? ELSE e.changed_at END AS changed_at FROM temp.{s} n LEFT JOIN employees e USING (employee_no)",
                    (today,))
         db.execute("DELETE FROM employees")
-        db.execute("INSERT INTO employees (employee_no, name, kana, dept, dept_code, status, email, active, name_key, "
-                   "surname_key, dept_key, changed_at) SELECT employee_no, name, kana, dept, dept_code, status, email, "
-                   "active, name_key, surname_key, dept_key, changed_at FROM temp.hr_final")
+        db.execute(f"INSERT INTO employees ({COLS}, changed_at) SELECT {COLS}, changed_at FROM temp.hr_final")
         db.execute("DROP TABLE temp.hr_final")
         if fail_hook:
             fail_hook("replace")

@@ -50,6 +50,9 @@ PERMISSIONS: dict[str, Permission] = {p.name: p for p in [
     _p("audit.view", "監査", "監査ログを見る（S-55）", FEATURE),
     _p("roles.view", "権限", "グループ・役割・対象を見る（S-54）", FEATURE),
     _p("roles.assign", "権限", "グループの役割とメンバーを変える", GROUP),
+    # 2026-11-22 に足した2つ（docs/access-model.md「権限の一覧」。動きは K-063・K-067 で作る）
+    _p("roles.delegate", "権限", "任せた管理：自分の対象の範囲で、人をグループに期限つきで足す・外す（マネージャー）", GROUP, DEPARTMENT),
+    _p("reports.view", "集計", "社内の集計（困りごとの見える化など）を見る", DEPARTMENT),
     # IaC（将来）。作っておくだけで、どのグループにも与えない
     _p("infra.docs.view", "IaC（将来）", "構成書を見る", SYSTEM),
     _p("infra.scan", "IaC（将来）", "構成を読み取る", SYSTEM),
@@ -61,6 +64,14 @@ PERMISSIONS: dict[str, Permission] = {p.name: p for p in [
 
 # 文書を見るのに要る権限として選べるもの（S-50）。既定は documents.view
 DOCUMENT_PERMISSIONS = ("documents.view", "infra.docs.view")
+
+# 管理の権限：「確かな入口が要る」の決まり（設定 S-52 の「権限の条件と役職の段」）を ON にすると、
+# SSO か多要素つきの Yanua アカウントで入ったときだけ効く（yanua/access.py の Context）。
+# 権限・設定・通信・受付端末・監査ログに加えて、ほかの人が見られる範囲を変える権限も入れる：
+# hr.import（人事データの取り込み・1つ前に戻す。部署や在籍が変わり、グループと権限に効く）と
+# documents.manage（文書の公開先・要る権限の変更、外す・戻す）。roles.view は読むだけなので入れない
+ADMIN_PERMISSIONS = ("roles.assign", "roles.delegate", "settings.view", "settings.edit", "network.view", "network.edit",
+                     "kiosk.devices", "audit.view", "hr.import", "documents.manage")
 
 # 移し替えで名前を変えた権限（前の名前 → 新しい名前）
 RENAMED = {"documents.list": "documents.view", "documents.ingest": "documents.manage", "tickets": "helpdesk.handle"}
@@ -81,7 +92,15 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
     "インフラ承認者": ("変更の承認（将来）", ["infra.docs.view", "infra.approve"]),
     "インフラ実行者": ("変更の実行（将来）", ["infra.docs.view", "infra.apply"]),
     "インフラ管理": ("接続する対象の登録（将来）", ["infra.docs.view", "infra.targets"]),
+    # 職務ロール（2026-11-22）。マネージャー・ディレクターは、既定ではどのグループにも与えない（対象は部署・本部ごとに決める）
+    "マネージャー": ("任せた管理（自分の対象の範囲で、期限つきで足す・外す）と、その範囲の集計", ["roles.delegate", "reports.view"]),
+    "ディレクター": ("マネージャーと同じ権限を、複数の部署（本部など）の対象で持つ", ["roles.delegate", "reports.view"]),
+    # 経営：全社の文書と集計を見る。管理の権限（roles.assign・設定・監査）は入れない
+    "経営": ("全社の文書と集計を見る（管理の権限は入れない）", ["documents.view", "reports.view"]),
 }
+
+# 職務ロールを足した版（upgrade で前の版のデータに足す役割）
+ROLES_V2 = ("マネージャー", "ディレクター", "経営")
 
 
 def unknown(names) -> list[str]:

@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .. import hr
+from ..access import DEFAULT_CONTEXT, Context
 from .roles import RoleConfig
 
 COOKIE = "yanua_session"
@@ -35,9 +36,12 @@ class User:
     name: str
     dept: str
     roles: list[str]
+    # 権限の判定の条件（入口・場所・端末）。今は入口が社員番号（開発用ログイン）しかないので、既定（社員番号・社内・登録していない端末）
+    context: Context = field(default_factory=lambda: DEFAULT_CONTEXT)
 
     def as_dict(self) -> dict:
-        return {"employee_no": self.employee_no, "name": self.name, "dept": self.dept, "roles": self.roles}
+        return {"employee_no": self.employee_no, "name": self.name, "dept": self.dept, "roles": self.roles,
+                "context": self.context.as_dict()}
 
 
 def _now() -> datetime:

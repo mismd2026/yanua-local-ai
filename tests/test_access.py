@@ -64,14 +64,14 @@ def test_permission_catalog_matches_the_design():
     doc = (ROOT / "docs" / "access-model.md").read_text(encoding="utf-8")
     for name in PERMISSIONS:
         assert name in doc or name.split(".")[0] + ".*" in doc or name.startswith("infra."), name
-    assert len(PERMISSIONS) == 31
+    assert len(PERMISSIONS) == 33          # 前の31個に roles.delegate・reports.view（2026-11-22）
     for role, (_, perms) in DEFAULT_ROLES.items():
         assert all(p in PERMISSIONS for p in perms), role
 
 
 def test_migration_builds_roles_groups_and_targets(client):
     v = view(client)
-    assert [g["name"] for g in v["groups"]] == ["社員", "総務", "情シス・ヘルプデスク", "人事", "管理者", "監査"]
+    assert [g["name"] for g in v["groups"]] == ["社員", "総務", "情シス・ヘルプデスク", "人事", "管理者", "監査", "経営"]
     assert group(v, "社員")["rule"] == {"all": True}
     assert [(x["role"], x["target"]) for x in group(v, "社員")["grants"]] == [("社員", "メンバー自身の所属（部署と、入っているグループ）")]
     assert group(v, "総務")["rule"] == {"departments": ["総務部"]}

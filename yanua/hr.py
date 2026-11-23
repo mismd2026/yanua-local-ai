@@ -3,7 +3,8 @@
 人事DBには直接つながない。人事システムから出力したファイル（CSV / Excel / JSON）を取り込む。
 人事システムごとに列名や形式が違うので、「対応表（mapping）」で Yanua の決まった項目に読み替える。
 
-- 取り込むのは本人確認と取次・権限に必要な項目だけ（従業員番号・氏名・よみ・部署・部署番号・在籍の状態・メールアドレス）。
+- 取り込むのは本人確認と取次・権限に必要な項目だけ（従業員番号・氏名・よみ・部署・部署番号・在籍の状態・メールアドレス・
+  雇用区分・期限・役職・役職の段）。給与・住所・家族・評価・マイナンバーは持たない（docs/access-model.md「人の台帳」）。
   メールアドレスは任意で、Googleカレンダーなどで登録した来訪予定の担当者を、社員番号に結びつけるときに使う。
   生年月日や住所などの列が出力に含まれていても、その列は読まない（yanua/hrimport.py）。
 - 取り込みは毎回まるごと入れ替える（人事システムの出力を正とする）。試し・確定・前に戻すは yanua/hrimport.py。
@@ -19,6 +20,9 @@
       "status_values": {"在職": "在籍", "休業": "休職", "退社": "退職"},
       "sheet": "社員一覧"
     }
+
+雇用区分は "employment_values"（ファイルの値 → 社員・契約・派遣・短期・外部委託）で、在籍状態と同じ作りで対応づける。
+雇用区分・期限・役職・役職の段は人の属性で、それ自体は権限を持たない（役職の段は、段で決まるグループの決まりに使う）。
 
 "status" を対応させない場合は、全員を在籍として扱う。前の書き方の "active_values"（在籍とみなす値の並び）も読める
 （その値は在籍、ただし「休職」は休職。ほかの値は退職）。
@@ -37,9 +41,12 @@ from pathlib import Path
 
 from .llm import ChatModel
 
-FIELDS = ("employee_no", "name", "kana", "dept", "dept_code", "status", "email")
+FIELDS = ("employee_no", "name", "kana", "dept", "dept_code", "status", "email", "employment", "expires_on", "title", "title_level")
 STATUSES = ("在籍", "休職", "退職")
 ACTIVE_STATUSES = ("在籍", "休職")        # 照合で一致する（active = 1）
+EMPLOYMENTS = ("社員", "契約", "派遣", "短期", "外部委託")   # 雇用区分（人の属性。権限は持たない）
+DEFAULT_EMPLOYMENT = "社員"
+TITLE_LEVEL_MAX = 99
 REQUIRED = ("employee_no", "name", "dept")
 LABELS = {
     "employee_no": "従業員番号",
@@ -49,6 +56,10 @@ LABELS = {
     "dept_code": "部署番号",
     "status": "在籍の状態",
     "email": "メールアドレス",
+    "employment": "雇用区分",
+    "expires_on": "期限",
+    "title": "役職",
+    "title_level": "役職の段",
 }
 
 # 列名から対応表の下書きを作るときの手がかり（決まったルール。AIはこれで決まらないときだけ使う）
@@ -60,6 +71,10 @@ HINTS = {
     "dept_code": ["所属コード", "部署コード", "部署番号", "所属番号", "組織コード", "所属cd", "部署cd", "deptcode", "departmentcode"],
     "status": ["在籍区分", "在籍状況", "在職区分", "在籍状態", "在籍", "雇用状態", "ステータス", "status", "退職区分"],
     "email": ["メールアドレス", "メール", "社用メール", "email", "mail", "e-mail", "mailaddress"],
+    "employment": ["雇用区分", "雇用形態", "社員区分", "従業員区分", "契約形態", "employmenttype", "employment"],
+    "expires_on": ["期限", "契約終了日", "契約満了日", "雇用期限", "契約期限", "有効期限", "終了日", "enddate", "expires"],
+    "title": ["役職", "役職名", "職位", "肩書", "title", "position"],
+    "title_level": ["役職の段", "役職ランク", "役職レベル", "職位ランク", "職階", "titlelevel", "positionlevel"],
 }
 
 HR_SCHEMA = """
@@ -72,7 +87,11 @@ CREATE TABLE IF NOT EXISTS employees (
     email       TEXT NOT NULL DEFAULT '',
     kana        TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT '在籍',     -- 在籍・休職・退職
-    changed_at  TEXT NOT NULL DEFAULT ''          -- 最後に変わった日（YYYY-MM-DD。取り込みで入った・変わった日）
+    changed_at  TEXT NOT NULL DEFAULT '',         -- 最後に変わった日（YYYY-MM-DD。取り込みで入った・変わった日）
+    employment  TEXT NOT NULL DEFAULT '社員',     -- 雇用区分（社員・契約・派遣・短期・外部委託）
+    expires_on  TEXT NOT NULL DEFAULT '',         -- 期限（契約の終わりの日。YYYY-MM-DD。空なら期限なし）
+    title       TEXT NOT NULL DEFAULT '',         -- 役職（名前は会社ごと）
+    title_level INTEGER                           -- 役職の段（比べるための数。空なら段なし）
 );
 CREATE TABLE IF NOT EXISTS hr_departments (
     dept      TEXT PRIMARY KEY,
@@ -193,7 +212,7 @@ def suggest_mapping(headers: list[str], llm: ChatModel | None = None) -> dict:
                     cols[f] = v
         except Exception:  # noqa: BLE001  AIの下書きは補助なので、失敗しても止めない
             pass
-    return {"columns": cols, "status_values": {}}
+    return {"columns": cols, "status_values": {}, "employment_values": {}}
 
 
 # 在籍状態の値の下書き（画面・コマンドで、ファイルに出てくる値を在籍・休職・退職に当てるときの手がかり）
@@ -202,6 +221,28 @@ STATUS_HINTS = {
     "休職": ["休職", "休業", "休暇", "産休", "育休", "leave", "onleave"],
     "退職": ["退職", "退社", "離職", "解雇", "retired", "resigned", "inactive", "terminated"],
 }
+
+
+EMPLOYMENT_HINTS = {
+    "社員": ["社員", "正社員", "正職員", "常勤", "regular", "fulltime", "permanent"],
+    "契約": ["契約", "契約社員", "嘱託", "contract"],
+    "派遣": ["派遣", "派遣社員", "temp", "dispatch"],
+    "短期": ["短期", "アルバイト", "パート", "臨時", "インターン", "parttime", "intern"],
+    "外部委託": ["外部委託", "業務委託", "委託", "協力会社", "contractor", "outsource", "vendor"],
+}
+
+
+def guess_employment(value: str) -> str:
+    """ファイルの値から、雇用区分（社員・契約・派遣・短期・外部委託）の下書き。決まらなければ空（人が選ぶ）。
+    「契約社員」は「社員」より先に「契約」に当てる（長く一致した言葉を採る）。"""
+    k = _key(value)
+    best, size = "", 0
+    for kind, words in EMPLOYMENT_HINTS.items():
+        for w in words:
+            wk = _key(w)
+            if (wk == k or (len(wk) >= 2 and wk in k)) and len(wk) > size:
+                best, size = kind, len(wk)
+    return best
 
 
 def guess_status(value: str) -> str:
@@ -251,6 +292,11 @@ def ensure_schema(db) -> None:
         db.execute("ALTER TABLE employees ADD COLUMN kana TEXT NOT NULL DEFAULT ''")
     if "changed_at" not in cols:
         db.execute("ALTER TABLE employees ADD COLUMN changed_at TEXT NOT NULL DEFAULT ''")
+    # 雇用区分・期限・役職・役職の段（今いる人は「社員」・期限なし・役職は空）
+    for col, decl in (("employment", "TEXT NOT NULL DEFAULT '社員'"), ("expires_on", "TEXT NOT NULL DEFAULT ''"),
+                      ("title", "TEXT NOT NULL DEFAULT ''"), ("title_level", "INTEGER")):
+        if col not in cols:
+            db.execute(f"ALTER TABLE employees ADD COLUMN {col} {decl}")
     if "status" not in cols:
         # 前の保存先は在籍（1）か、そうでないか（0）だけ。休職は次の取り込みで分かる
         db.execute("ALTER TABLE employees ADD COLUMN status TEXT NOT NULL DEFAULT '在籍'")
@@ -328,6 +374,15 @@ def lookup(db, employee_no: str) -> dict | None:
         (norm(employee_no),),
     ).fetchone()
     return {"employee_no": row[0], "name": row[1], "dept": row[2], "dept_code": row[3], "status": row[4]} if row else None
+
+
+def attrs_of(db, employee_no: str) -> tuple[str | None, int | None]:
+    """(在籍の状態, 役職の段)。人事データにいなければ (None, None)。権限の判定（決まりで入るグループ）に使う。"""
+    try:
+        row = db.execute("SELECT status, title_level FROM employees WHERE employee_no = ?", (employee_no,)).fetchone()
+    except Exception:  # noqa: BLE001  人事データをまだ取り込んでいないとき・前の保存先
+        return status_of(db, employee_no), None
+    return (row[0], row[1]) if row else (None, None)
 
 
 def status_of(db, employee_no: str) -> str | None:

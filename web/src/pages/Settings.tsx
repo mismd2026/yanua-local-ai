@@ -12,7 +12,7 @@ import { errorText, time } from "../ui";
 type Values = Record<string, unknown>;
 type Problems = Record<string, string[]>;
 
-const KEYS: SettingKey[] = ["identity", "audit", "models", "files", "hr"];
+const KEYS: SettingKey[] = ["identity", "audit", "models", "files", "hr", "access"];
 const CLUE_ORDER = ["employee_no", "name", "dept"];
 // 確定する組み合わせの選び肢（違う手がかりを2つ以上）
 const COMBOS: string[][] = [["name", "employee_no"], ["name", "dept"], ["employee_no", "dept"], ["employee_no", "name", "dept"]];
@@ -139,6 +139,7 @@ function Section({ settingKey, canEdit, tick, onChanged }: { settingKey: Setting
           {settingKey === "models" && <ModelsEditor data={data} values={values} set={set} Err={Err} Pinned={Pinned} disabled={!editable} />}
           {settingKey === "files" && <FilesEditor data={data} values={values} set={set} Err={Err} disabled={!editable} />}
           {settingKey === "hr" && <HrEditor data={data} values={values} set={set} Err={Err} disabled={!editable} />}
+          {settingKey === "access" && <AccessEditor data={data} values={values} set={set} Err={Err} disabled={!editable} />}
           {problems[""] && <div className="small error" role="alert">{problems[""].join("　")}</div>}
           {canEdit && (
             <div className="toolbar">
@@ -436,6 +437,65 @@ function HrEditor({ values, set, Err, disabled }: EditorProps) {
         <Err at="on_leave_permissions" />
       </div>
       <p className="small muted">退職した人は、いつもログインできません。手で入れたグループのメンバーとしても数えません。</p>
+    </div>
+  );
+}
+
+// 権限の条件と役職の段（docs/access-model.md）。役職の段は人の属性で、権限は持たない（段で決まるグループを通して効く）
+function AccessEditor({ values, set, Err, disabled }: EditorProps) {
+  const levels = (values.title_levels ?? {}) as Record<string, string>;
+  const rows = Object.entries(levels).sort((a, b) => Number(a[0]) - Number(b[0]));
+  const setLevels = (next: Record<string, string>) => set("title_levels", next);
+  const nextNo = String(Math.max(0, ...rows.map(([n]) => Number(n) || 0)) + 1);
+  return (
+    <div className="form-grid">
+      <div className="form-row">
+        <span>管理の権限は確かな入口が要る</span>
+        <span className="toolbar">
+          {([[false, "OFF（今のまま）", "strong-off"], [true, "ON", "strong-on"]] as const).map(([v, text, id]) => (
+            <span key={id} style={{ display: "inline-flex", gap: "0.3em", alignItems: "center" }}>
+              <input type="radio" id={id} style={{ width: "auto" }} name="admin_needs_strong_entry" value={id} aria-label={text}
+                checked={values.admin_needs_strong_entry === v} onChange={() => set("admin_needs_strong_entry", v)} disabled={disabled} />
+              <label htmlFor={id}>{text}</label>
+            </span>
+          ))}
+        </span>
+        <Err at="admin_needs_strong_entry" />
+        <p className="small muted">
+          ON にすると、管理の権限（権限を変える・設定・通信・監査ログ・受付端末の登録・人事データの取り込み・文書の公開先の変更など）は、SSO か多要素つきの Yanua アカウントで入ったときだけ効きます。
+          今は入口が社員番号だけなので、ON にするとだれも管理できなくなります。確かな入口で入っていない人は ON にできません（SSO ができてから ON にします）。
+        </p>
+      </div>
+      <div className="form-row">
+        <span>役職の段の名前</span>
+        <table className="table" aria-label="役職の段の名前">
+          <thead><tr><th>段</th><th>名前</th><th></th></tr></thead>
+          <tbody>
+            {rows.map(([n, name]) => (
+              <tr key={n}>
+                <td>{n}</td>
+                <td><input aria-label={`段 ${n} の名前`} value={name} maxLength={20} disabled={disabled}
+                  onChange={(e) => setLevels({ ...levels, [n]: e.target.value })} /></td>
+                <td>{!disabled && rows.length > 1 && (
+                  <button type="button" className="link" onClick={() => { const next = { ...levels }; delete next[n]; setLevels(next); }}>消す</button>
+                )}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!disabled && <button type="button" onClick={() => setLevels({ ...levels, [nextNo]: "" })}>段 {nextNo} を足す</button>}
+        <Err at="title_levels" />
+        <p className="small muted">段は比べるための数です（大きいほど上）。名前は会社ごとに決めます。人ごとの段は人事データの取り込みで入ります。</p>
+      </div>
+      <div className="form-row">
+        <label htmlFor="f-executive_level">「経営」のグループに入る段</label>
+        <select id="f-executive_level" value={String(values.executive_level ?? "")} disabled={disabled}
+          onChange={(e) => set("executive_level", Number(e.target.value))}>
+          {rows.map(([n, name]) => <option key={n} value={n}>{n}（{name || "名前なし"}）以上</option>)}
+        </select>
+        <Err at="executive_level" />
+        <p className="small muted">この段以上の人が「経営」のグループに入り、役割「経営」（全社の文書と集計を見る。管理の権限は入らない）を持ちます。</p>
+      </div>
     </div>
   );
 }
